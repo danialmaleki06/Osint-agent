@@ -1,0 +1,739 @@
+"""Модели данных.
+
+Pydantic здесь работает в трёх ролях одновременно:
+  1. проверяет данные на границе системы;
+  2. из аннотаций типов генерируется схема, которую видит модель;
+  3. задаёт контракт, на который опираются тесты.
+
+Один источник правды — рассинхронизироваться нечему.
+"""
+
+from datetime import date, datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+# «Не найдено» и «выбирайте из нескольких» — разные состояния, и путать
+# их нельзя: по второму агент обязан показать перечень кандидатов,
+# а по первому перечень пуст, и показывать нечего.
+Confidence = Literal["high", "medium", "low", "none"]
+SourceStatus = Literal["ok", "unavailable", "partial", "skipped"]
+
+
+# ──────────────────────────  Служебное  ──────────────────────────
+
+class ServerHealth(BaseModel):
+    """Состояние сервера. Служит для отделения проблем связи от проблем логики."""
+
+    status: Literal["ok"] = "ok"
+    server: str = Field(description="Имя сервера")
+    version: str = Field(description="Версия сервера")
+    checked_at: datetime = Field(description="Время ответа сервера, UTC")
+    tools: list[str] = Field(description="Зарегистрированные инструменты")
+
+
+class InnCheck(BaseModel):
+    """Результат проверки ИНН по контрольной сумме.
+
+    valid=False — это нормальный результат, а не ошибка выполнения.
+    """
+
+    inn: str = Field(description="Проверявшийся номер в исходном виде")
+    valid: bool = Field(description="Прошёл ли номер проверку контрольной суммы")
+    kind: Literal["legal_entity", "individual", "unknown"] = Field(
+        description=(
+            "legal_entity — 10 знаков, организация; "
+            "individual — 12 знаков, ИП или физлицо; "
+            "unknown — длина не соответствует ни одному формату"
+        )
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Причина отбраковки. Заполняется только при valid=False",
+    )
+
+
+# ──────────────────────────  Установление личности  ──────────────────────────
+
+class Candidate(BaseModel):
+    """Одна организация-кандидат при разрешении неоднозначного запроса.
+
+    Набор полей подобран так, чтобы человек мог отличить кандидатов
+    друг от друга: город, статус и дата регистрации обычно достаточны.
+    """
+
+    inn: str = Field(description="ИНН")
+    ogrn: str | None = Field(default=None, description="ОГРН")
+    name: str = Field(description="Наименование по реестру")
+    short_name: str | None = Field(default=None, description="Краткое наименование")
+    city: str | None = Field(default=None, description="Город регистрации")
+    status: str | None = Field(
+        default=None, description="Статус: действующая, ликвидирована, в стадии ликвидации"
+    )
+    registered_at: date | None = Field(default=None, description="Дата регистрации")
+    director: str | None = Field(default=None, description="ФИО руководителя")
+    okved: str | None = Field(default=None, description="Основной код ОКВЭД")
+
+
+class ResolveResult(BaseModel):
+    """Результат установления личности компании.
+
+    ВАЖНО: при confidence="low" выбор кандидата остаётся за пользователем.
+    Инструмент намеренно не выбирает сам.
+    """
+
+    query: str = Field(description="Исходный запрос")
+    status: SourceStatus = Field(default="ok", description="Состояние источника")
+    reason: str | None = Field(
+        default=None, description="Причина, если status не 'ok'"
+    )
+    confidence: Confidence = Field(
+        description=(
+            "high — организация определена однозначно; "
+            "medium — вероятное совпадение, стоит упомянуть выбор; "
+            "low — несколько равнозначных кандидатов, нужен выбор пользователя; "
+            "none — выбирать не из чего: не найдено, номер некорректен либо "
+            "источник не ответил. Перечень кандидатов при этом пуст"
+        )
+    )
+    total_found: int = Field(default=0, description="Сколько всего найдено")
+    candidates: list[Candidate] = Field(
+        default_factory=list, description="Кандидаты, наиболее вероятные первыми"
+    )
+    hint: str | None = Field(
+        default=None, description="Пояснение для агента: что делать дальше"
+    )
+
+
+class CompanyContext(BaseModel):
+    """Опорный контекст компании. Вход для всех последующих проверок.
+
+    Разделение полей принципиально:
+      authoritative — пришло из реестра, можно утверждать в досье;
+      derived       — выведено нами, годится для поиска, но не для утверждений.
+    """
+
+    # authoritative — из реестра
+    inn: str = Field(description="ИНН, либо УНП для Беларуси, либо БИН для Казахстана")
+    country: Literal["RU", "BY", "KZ", "unknown"] = Field(
+        default="RU",
+        description=(
+            "Страна регистрации. Проверки рисков (суды, банкротство, приставы, "
+            "закупки) доступны ТОЛЬКО для RU. Для BY и KZ отсутствие находок "
+            "означает, что проверка не проводилась"
+        ),
+    )
+    ogrn: str | None = Field(default=None, description="ОГРН")
+    name_legal: str = Field(description="Полное наименование по ЕГРЮЛ")
+    name_short: str | None = Field(default=None, description="Краткое наименование")
+    status: str | None = Field(default=None, description="Статус организации")
+    registered_at: date | None = Field(
+        default=None,
+        description=(
+            "Дата регистрации. Используется как фильтр: публикация, вышедшая "
+            "раньше этой даты, не может относиться к данной организации"
+        ),
+    )
+    address_full: str | None = Field(default=None, description="Юридический адрес")
+    city: str | None = Field(default=None, description="Город — якорь для поиска")
+    region: str | None = Field(default=None, description="Регион")
+    director_fio: str | None = Field(
+        default=None,
+        description="ФИО руководителя. Используется и как якорь, и как отрицательный признак",
+    )
+    director_post: str | None = Field(default=None, description="Должность руководителя")
+    founders: list[str] = Field(default_factory=list, description="Учредители")
+    okved_code: str | None = Field(default=None, description="Основной код ОКВЭД")
+    okved_text: str | None = Field(default=None, description="Расшифровка ОКВЭД")
+    capital: float | None = Field(default=None, description="Уставный капитал, рублей")
+
+    # derived — выведено нами
+    name_variants: list[str] = Field(
+        default_factory=list,
+        description="Варианты написания названия для поиска, от точного к широкому",
+    )
+    industry_terms: list[str] = Field(
+        default_factory=list,
+        description="Отраслевые слова по коду ОКВЭД — якоря для веб-поиска",
+    )
+    brand_resolved: bool = Field(
+        default=False,
+        description=(
+            "Установлено ли рыночное название. Пока False, веб-поиск ведётся "
+            "только по юридическому наименованию, и отсутствие находок "
+            "НЕ доказывает отсутствие негатива"
+        ),
+    )
+    brand: str | None = Field(
+        default=None, description="Рыночное наименование — как компанию называют в публикациях"
+    )
+    former_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Прежние наименования организации. Смена названия — известный "
+            "способ отделиться от прежней репутации, поэтому публикации "
+            "нужно искать и по ним тоже"
+        ),
+    )
+    brand_domain: str | None = Field(default=None, description="Официальный сайт")
+    brand_summary: str | None = Field(default=None, description="Описание деятельности")
+
+    # масштаб — определяет применимость признаков риска
+    size_category: Literal["micro", "small", "medium", "large", "unknown"] = Field(
+        default="unknown",
+        description=(
+            "Масштаб организации. Существенно для оценки: признаки вроде "
+            "массового адреса значимы для малого бизнеса и неприменимы к крупному"
+        ),
+    )
+    employees: int | None = Field(default=None, description="Среднесписочная численность")
+    branches: int | None = Field(
+        default=None,
+        description=(
+            "Сколько филиалов у организации. None — источник не ответил, "
+            "число НЕ УСТАНОВЛЕНО, а не равно нулю"
+        ),
+    )
+    representative_offices: int | None = Field(
+        default=None, description="Сколько представительств. None — не установлено"
+    )
+    revenue_latest: float | None = Field(
+        default=None, description="Выручка за последний отчётный год, рублей"
+    )
+
+    # служебное
+    source: str = Field(default="", description="Откуда получены данные")
+    retrieved_at: datetime | None = Field(default=None, description="Время получения")
+
+
+# ──────────────────────────  Факты и риски  ──────────────────────────
+
+FactKind = Literal[
+    "registry", "arbitration", "bankruptcy", "enforcement",
+    "procurement", "registry_flag", "news",
+]
+
+
+class Fact(BaseModel):
+    """Единица знания о компании.
+
+    Ключевое требование проекта: у каждого факта есть проверяемый источник.
+    Утверждение, не опирающееся на факт с валидным fact_id, вырезается
+    из итогового отчёта автоматически.
+    """
+
+    fact_id: str = Field(
+        description="Устойчивый идентификатор для ссылки из текста, например ARB-1"
+    )
+    kind: FactKind = Field(description="Категория факта")
+    statement: str = Field(description="Утверждение на естественном языке")
+    source_url: str = Field(
+        description="Ссылка на первоисточник. Без неё факт не существует"
+    )
+    source_type: str = Field(description="Тип источника: registry_api, court, news")
+    retrieved_at: datetime = Field(description="Когда получено")
+    event_date: date | None = Field(
+        default=None,
+        description="Дата САМОГО СОБЫТИЯ, а не публикации о нём. В оценку риска идёт она",
+    )
+    payload: dict = Field(
+        default_factory=dict, description="Структурированные данные факта"
+    )
+
+
+class RoleCounts(BaseModel):
+    """Счётчики в разрезе роли — процессуальной в суде, стороны в контракте."""
+
+    count: int = Field(default=0, description="Количество записей в этой роли")
+    total_amount: float = Field(
+        default=0.0, description="Суммарная сумма по этой роли, рублей"
+    )
+
+
+class ArbitrationSummary(BaseModel):
+    """Арбитражные дела в сжатом виде.
+
+    Роль важнее суммы: ответчик на 50 млн и истец на 50 млн — противоположные
+    сигналы. Источник отдаёт общую сумму без разделения по роли, поэтому
+    разделение считается здесь.
+    """
+
+    total: int = Field(default=0, description="Всего дел в базе источника")
+    total_claim_amount: float = Field(
+        default=0.0,
+        description="Общая цена исков по ВСЕМ делам, из агрегата источника, БЕЗ разделения по роли",
+    )
+    as_defendant: RoleCounts = Field(
+        default_factory=RoleCounts,
+        description="Компания ОТВЕТЧИК — к ней предъявлены требования. Тревожный признак",
+    )
+    as_plaintiff: RoleCounts = Field(
+        default_factory=RoleCounts,
+        description="Компания ИСТЕЦ — она сама взыскивает. Обычно не является риском",
+    )
+    as_both: RoleCounts = Field(
+        default_factory=RoleCounts,
+        description=(
+            "Компания числится И истцом, И ответчиком в одном деле: встречный иск "
+            "либо участие её обособленного подразделения. Требования к ней есть, "
+            "поэтому трактуй ближе к роли ответчика, но не смешивай с ним"
+        ),
+    )
+    other_participation: int = Field(
+        default=0,
+        description=(
+            "Дел, где ИНН компании не встретился ни в истцах, ни в ответчиках: "
+            "участие третьим лицом либо под другим идентификатором"
+        ),
+    )
+    roles_counted_from: int = Field(
+        default=0,
+        description=(
+            "По СКОЛЬКИМ делам посчитана разбивка по ролям. У организаций с "
+            "тысячами дел выгрузить все невозможно, поэтому разбивка строится "
+            "по выборке. Если это число меньше total — разбивка НЕПОЛНАЯ"
+        ),
+    )
+    roles_complete: bool = Field(
+        default=True, description="Охвачены ли разбивкой все дела"
+    )
+    active_cases: int = Field(default=0, description="Дел в активной стадии (в выборке)")
+    last_case_date: date | None = Field(default=None, description="Дата последнего дела")
+
+
+class EnforcementSummary(BaseModel):
+    """Исполнительные производства ФССП: долги, которые уже взыскивают."""
+
+    total: int = Field(default=0, description="Всего производств")
+    total_amount: float = Field(default=0.0, description="Общая сумма, рублей")
+    outstanding: float = Field(default=0.0, description="Непогашенный остаток, рублей")
+
+
+class InspectionSummary(BaseModel):
+    """Проверки надзорных органов."""
+
+    total: int = Field(default=0, description="Всего проверок в базе источника")
+    with_violations: int = Field(
+        default=0, description="Из просмотренных — сколько выявили нарушения"
+    )
+    counted_from: int = Field(default=0, description="По скольким проверкам посчитано")
+    complete: bool = Field(default=True, description="Охвачены ли все проверки")
+
+
+class ProcurementSummary(BaseModel):
+    """Регулируемые закупки: 44-ФЗ и 223-ФЗ.
+
+    Роль в контракте меняет смысл на противоположный, ровно как
+    процессуальная роль в судебном деле. Поставщик — исполнитель заказа,
+    это опыт. Заказчик — тот, кто закупает сам; для организации это
+    признак государственного участия, а не выигранных подрядов.
+    """
+
+    contracts_44: int = Field(default=0, description="Контрактов по 44-ФЗ")
+    contracts_223: int = Field(default=0, description="Контрактов по 223-ФЗ")
+    as_supplier: RoleCounts = Field(
+        default_factory=lambda: RoleCounts(),
+        description=(
+            "Контракты, где организация ИСПОЛНИТЕЛЬ. Это опыт работы "
+            "по государственному и регулируемому заказу"
+        ),
+    )
+    as_customer: RoleCounts = Field(
+        default_factory=lambda: RoleCounts(),
+        description=(
+            "Контракты, где организация САМА ЗАКУПАЕТ. Это НЕ выигранные "
+            "подряды: заказчиками по 223-ФЗ выступают госкорпорации, "
+            "компании с госучастием, естественные монополии, ГУП и МУП"
+        ),
+    )
+    other_participation: int = Field(
+        default=0,
+        description="Контракты, где ИНН организации не найден ни в одной стороне",
+    )
+    roles_counted_from: int = Field(
+        default=0, description="По скольким контрактам разобраны роли"
+    )
+    roles_complete: bool = Field(
+        default=True,
+        description="False — роли разобраны по выборке, а не по всем контрактам",
+    )
+    total_amount: float = Field(
+        default=0.0,
+        description=(
+            "Сумма по просмотренным контрактам БЕЗ разделения ролей. "
+            "НЕ выдавай её за объём выигранных подрядов"
+        ),
+    )
+    counted_from: int = Field(default=0, description="По скольким контрактам посчитано")
+    complete: bool = Field(default=True, description="Охвачены ли все контракты")
+
+
+class FinancialYear(BaseModel):
+    """Финансовые показатели за один год."""
+
+    year: int = Field(description="Отчётный год")
+    revenue: float | None = Field(default=None, description="Выручка, рублей")
+    profit: float | None = Field(default=None, description="Чистая прибыль, рублей")
+    assets: float | None = Field(default=None, description="Итог баланса, рублей")
+
+
+class FinancialSummary(BaseModel):
+    """Финансовое состояние — нужно для калибровки оценки риска.
+
+    Набор значимых признаков различается для крупного бизнеса и малого:
+    массовый адрес у крупной компании невозможен, а у однодневки решает.
+    """
+
+    years: list[FinancialYear] = Field(
+        default_factory=list, description="Показатели по годам, свежие первыми"
+    )
+    employees: int | None = Field(default=None, description="Среднесписочная численность")
+    branches: int | None = Field(
+        default=None, description="Сколько филиалов. None — не установлено"
+    )
+    representative_offices: int | None = Field(
+        default=None, description="Сколько представительств. None — не установлено"
+    )
+    capital: float | None = Field(
+        default=None,
+        description=(
+            "Уставный капитал, рублей. Для микро- и малого бизнеса минимальный "
+            "капитал — заметный признак; для крупного значения не имеет"
+        ),
+    )
+    size_category: Literal["micro", "small", "medium", "large", "unknown"] = Field(
+        default="unknown",
+        description=(
+            "Категория по выручке и численности. Определяет, какие признаки "
+            "риска вообще применимы к организации"
+        ),
+    )
+
+
+class PersonProfile(BaseModel):
+    """Сведения о физическом лице — руководителе или учредителе.
+
+    Риски по человеку часто весомее корпоративных: проблемный руководитель
+    переносит практику из компании в компанию.
+    """
+
+    inn: str | None = Field(default=None, description="ИНН физического лица")
+    fio: str | None = Field(default=None, description="ФИО")
+    role_in_company: str | None = Field(
+        default=None, description="Кем является в проверяемой организации"
+    )
+    share_percent: float | None = Field(
+        default=None,
+        description=(
+            "Доля в уставном капитале, проценты. Владелец 78% и владелец 5% "
+            "влияют на компанию несопоставимо — не описывай их одинаково"
+        ),
+    )
+    manages_count: int = Field(
+        default=0, description="Сколько организаций возглавляет, включая проверяемую"
+    )
+    owns_count: int = Field(
+        default=0, description="Сколько организаций учредил, включая проверяемую"
+    )
+    checked: bool = Field(
+        default=True,
+        description=(
+            "Удалось ли проверить человека. False — ИНН в реестре не указан "
+            "либо источник не ответил: личные риски НЕ ПРОВЕРЕНЫ, "
+            "а не отсутствуют"
+        ),
+    )
+    not_checked_reason: str | None = Field(
+        default=None, description="Почему человек не проверен. Заполняется при checked=False"
+    )
+    sole_proprietor: bool = Field(default=False, description="Имеет статус ИП")
+    personal_bankruptcy: bool = Field(
+        default=False, description="Есть сведения о личном банкротстве"
+    )
+    mass_manager: bool = Field(default=False, description="Признан массовым руководителем")
+    mass_founder: bool = Field(default=False, description="Признан массовым учредителем")
+    unfair_supplier: bool = Field(default=False, description="В реестре недобросовестных поставщиков")
+    sanctioned: bool = Field(default=False, description="В санкционных списках")
+    unreliable: bool = Field(
+        default=False,
+        description="ФНС признала сведения об этом лице недостоверными",
+    )
+    disqualified: bool = Field(
+        default=False, description="Дисквалифицирован, запрещено руководить организациями"
+    )
+
+
+class RelatedCompany(BaseModel):
+    """Организация, связанная с проверяемой через людей или владельцев.
+
+    Здесь собрано и то, как связь найдена, и то, что удалось про эту
+    организацию выяснить. Голый ИНН бесполезен: без названия и статуса
+    читатель отчёта не поймёт, что перед ним.
+    """
+
+    inn: str | None = Field(default=None, description="ИНН связанной организации")
+    ogrn: str | None = Field(default=None, description="ОГРН, если ИНН неизвестен")
+    name: str | None = Field(default=None, description="Краткое наименование")
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Состояние в реестре. Значение, отличное от «Действует» — "
+            "ликвидация, исключение по решению ФНС — существенный признак"
+        ),
+    )
+    registered_at: date | None = Field(default=None, description="Дата регистрации")
+    okved_text: str | None = Field(default=None, description="Основной вид деятельности")
+    link: str = Field(
+        description=(
+            "Как найдена связь: через руководителя, учредителя, "
+            "владельца-организацию, управляющую организацию или реорганизацию"
+        )
+    )
+    via: str | None = Field(
+        default=None, description="Через кого именно — ФИО человека или название организации"
+    )
+    triage_status: str = Field(
+        default="not_checked",
+        description=(
+            "checked — карточка получена, отметки достоверны; "
+            "unavailable — источник не ответил, риски НЕ ПРОВЕРЕНЫ; "
+            "not_checked — до организации не дошла очередь из-за лимита"
+        ),
+    )
+    flags: list[str] = Field(
+        default_factory=list,
+        description="Сработавшие отметки: банкротство, санкции, РНП, массовость и прочие",
+    )
+    suspicious: bool = Field(
+        default=False,
+        description=(
+            "Организация прошла триаж и требует внимания: недействующий статус, "
+            "поднятая отметка или сообщения о банкротстве"
+        ),
+    )
+    deep_summary: str | None = Field(
+        default=None,
+        description=(
+            "Итог полной проверки: суды, приставы, надзор. Заполняется только "
+            "для подозрительных организаций"
+        ),
+    )
+    source_url: str | None = Field(default=None, description="Карточка организации")
+
+
+class AffiliationGraph(BaseModel):
+    """Связи организации через людей, владельцев и реорганизацию.
+
+    Смысл: сама организация может быть безупречной, а её владелец —
+    держать рядом проблемное юрлицо. Проверка одной компании этого
+    не покажет никогда, потому что общего идентификатора у них нет.
+    """
+
+    inn: str = Field(description="ИНН проверяемой организации")
+    people: list[PersonProfile] = Field(
+        default_factory=list, description="Руководители и учредители — физические лица"
+    )
+    owner_organizations: list[RelatedCompany] = Field(
+        default_factory=list,
+        description="Владельцы-организации и управляющая организация",
+    )
+    predecessors: list[RelatedCompany] = Field(
+        default_factory=list,
+        description=(
+            "Правопредшественники: организации, из которых эта возникла "
+            "при реорганизации. У них другой ИНН, и прошлое тянется оттуда"
+        ),
+    )
+    successors: list[RelatedCompany] = Field(
+        default_factory=list,
+        description="Правопреемники: организации, в которые эта перешла",
+    )
+    related_companies: list[RelatedCompany] = Field(
+        default_factory=list,
+        description="Иные организации, связанные через людей и владельцев",
+    )
+    suspicious_count: int = Field(
+        default=0, description="Сколько связанных организаций вызвали подозрение"
+    )
+    shareholders_undisclosed: bool = Field(
+        default=False,
+        description=(
+            "Организация — акционерное общество, состав владельцев в реестре "
+            "НЕ РАСКРЫВАЕТСЯ. Пустой список владельцев здесь означает "
+            "невозможность проверки, а не отсутствие собственников"
+        ),
+    )
+    coverage_note: str | None = Field(
+        default=None,
+        description=(
+            "Чего проверка НЕ охватила: упор в лимит, неответивший источник, "
+            "нераскрытые акционеры. Обязательно передай пользователю"
+        ),
+    )
+
+
+class BrandInfo(BaseModel):
+    """Рыночное наименование компании.
+
+    Ключевое для веб-поиска: в реестре организация записана как
+    'ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "БПМСОФТ"', а в публикациях
+    её называют иначе. Поиск по юридическому наименованию не найдёт ничего.
+    """
+
+    resolved: bool = Field(description="Удалось ли установить рыночное наименование")
+    brand: str | None = Field(default=None, description="Рыночное наименование")
+    domain: str | None = Field(default=None, description="Официальный сайт")
+    summary: str | None = Field(default=None, description="Описание деятельности")
+    social_links: dict[str, str] = Field(
+        default_factory=dict, description="Ссылки на официальные аккаунты"
+    )
+    reason: str | None = Field(
+        default=None, description="Почему не удалось, если resolved=False"
+    )
+
+
+class SourceResult(BaseModel):
+    """Результат обращения к одному источнику.
+
+    Инструмент никогда не возвращает голый список фактов. Пустой список без
+    статуса читается и человеком, и моделью как «нарушений нет» — то есть
+    отсутствие данных молча превращается в положительное заключение.
+    Это худший вид ошибки в системе оценки рисков.
+    """
+
+    source: str = Field(description="Идентификатор источника")
+    status: SourceStatus = Field(
+        description=(
+            "ok — источник ответил; unavailable — не ответил, выводы делать нельзя; "
+            "partial — ответил частично; skipped — не опрашивался"
+        )
+    )
+    reason: str | None = Field(default=None, description="Причина, если status не 'ok'")
+    facts: list[Fact] = Field(default_factory=list, description="Полученные факты")
+    arbitration: ArbitrationSummary | None = Field(default=None)
+    enforcement: EnforcementSummary | None = Field(default=None)
+    inspections: InspectionSummary | None = Field(default=None)
+    procurement: ProcurementSummary | None = Field(default=None)
+    flags: dict[str, bool] = Field(
+        default_factory=dict, description="Реестровые отметки: признак -> установлен ли"
+    )
+
+
+class RiskCollection(BaseModel):
+    """Сводный результат всех реестровых проверок.
+
+    Собирается за одно обращение: каждое обращение агента к инструменту
+    требует отдельного прогона языковой модели, и пять последовательных
+    вызовов обходятся в пять таких прогонов.
+
+    Истолкования здесь нет — только исходные факты. Оценка риска
+    вычисляется отдельно и детерминированно.
+    """
+
+    inn: str = Field(description="ИНН проверенной организации")
+    results: list[SourceResult] = Field(description="Результаты по каждому источнику")
+    facts: list[Fact] = Field(
+        default_factory=list, description="Все факты одним списком, для ссылок из текста"
+    )
+    sources_ok: int = Field(default=0, description="Сколько источников ответило")
+    sources_failed: int = Field(default=0, description="Сколько не ответило")
+    coverage_note: str | None = Field(
+        default=None,
+        description=(
+            "Заполняется, если часть источников недоступна. Обязательно передать "
+            "пользователю: проверка неполная, отсутствие находок ничего не доказывает"
+        ),
+    )
+
+
+class ContextResult(BaseModel):
+    """Обёртка над контекстом с явным статусом источника.
+
+    Инструмент никогда не возвращает голый контекст: «источник недоступен»
+    обязано структурно отличаться от «данных нет».
+    """
+
+    status: SourceStatus = Field(description="Состояние источника")
+    reason: str | None = Field(
+        default=None,
+        description=(
+            "Чего собрать НЕ УДАЛОСЬ. Заполняется И ПРИ status='ok': карточка "
+            "собирается из двух служб, и отказ второй не отменяет результат, "
+            "но оставляет поля пустыми. Пустое поле при непустом reason "
+            "означает «не смогли получить», а НЕ «сведений не существует». "
+            "Обязательно передай содержание пользователю"
+        ),
+    )
+    context: CompanyContext | None = Field(default=None, description="Контекст компании")
+
+
+# ──────────────────────────  Полнота проверки  ──────────────────────────
+
+class ServiceUsage(BaseModel):
+    """Сколько обращений израсходовано к одной службе."""
+
+    service: str = Field(description="Служба-источник")
+    requests: int = Field(description="Обращений по этой организации")
+    ok: int = Field(default=0, description="Из них вернули данные")
+    empty: int = Field(default=0, description="Ответили, но данных нет")
+    failed: int = Field(default=0, description="Не ответили")
+    daily_spent: int | None = Field(
+        default=None,
+        description=(
+            "Израсходовано по ключу за сутки — по данным самой службы. "
+            "Счётчик общий на ключ и включает обращения по другим "
+            "организациям, а не только по этой. null — служба такого "
+            "счётчика не сообщает; это НЕ ноль"
+        ),
+    )
+
+
+class DataGap(BaseModel):
+    """Чего не получили и по какой причине.
+
+    Причина существеннее самого факта отсутствия: «источник молчал»
+    и «сведений действительно нет» ведут к противоположным выводам.
+    """
+
+    what: str = Field(description="Какие сведения отсутствуют")
+    kind: Literal["source_failed", "not_requested", "no_data", "not_implemented"] = Field(
+        description=(
+            "source_failed — источник не ответил, ПРОВЕРКА НЕ СОСТОЯЛАСЬ; "
+            "not_requested — проверку не запускали; "
+            "no_data — проверка прошла, сведений действительно нет; "
+            "not_implemented — направление в системе пока не реализовано"
+        )
+    )
+    reason: str | None = Field(default=None, description="Подробность отказа")
+
+
+class CoverageReport(BaseModel):
+    """Отчёт о полноте проверки конкретной организации."""
+
+    inn: str = Field(description="ИНН, по которому собран отчёт")
+    checked: bool = Field(
+        description=(
+            "Были ли вообще обращения по этой организации. False — проверка "
+            "не проводилась, и делать выводы не о чем"
+        )
+    )
+    total_requests: int = Field(default=0, description="Всего обращений по организации")
+    services: list[ServiceUsage] = Field(
+        default_factory=list, description="Расход по каждой службе"
+    )
+    methods_ok: list[str] = Field(
+        default_factory=list, description="Направления, вернувшие данные"
+    )
+    methods_failed: list[str] = Field(
+        default_factory=list, description="Направления, не ответившие"
+    )
+    obtained: list[str] = Field(
+        default_factory=list, description="Какие сведения удалось собрать"
+    )
+    gaps: list[DataGap] = Field(
+        default_factory=list, description="Чего собрать не удалось и почему"
+    )
+    session_requests: dict[str, int] = Field(
+        default_factory=dict,
+        description="Обращений с момента запуска сервера, по службам — по всем организациям",
+    )
