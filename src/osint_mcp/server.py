@@ -574,6 +574,16 @@ async def get_verdict(
             examples=["7724744134"],
         ),
     ],
+    profile: Annotated[
+        bool,
+        Field(
+            description=(
+                "true — вернуть также деловой свод (profile): субъект, "
+                "проверки, судебная нагрузка, вердикт — структурированно, "
+                "для показа менеджеру без вызова остальных инструментов"
+            ),
+        ),
+    ] = False,
 ) -> ScoreResult:
     """Итоговая оценка организации: вердикт + баллы + причины со ссылками.
 
@@ -624,6 +634,11 @@ async def get_verdict(
     log.info("tool_call", tool="get_verdict", inn=inn,
              verdict=result.verdict.label, score=result.verdict.total_score,
              floored=result.verdict.floored)
+    if profile:
+        # Деловой свод поверх результата: те же данные, порядок для
+        # менеджера. Не пересчёт — компоновка.
+        from osint_mcp.tools.profile import build_profile
+        result.profile = build_profile(context_result.context, risk, result)
     return result
 
 

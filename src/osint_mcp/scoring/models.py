@@ -165,6 +165,14 @@ class ScoreResult(BaseModel):
             "сигнал, что пул критериев стоит расширить"
         ),
     )
+    profile: dict | None = Field(
+        default=None,
+        description=(
+            "Деловой свод для менеджера (заполняется только при "
+            "profile=true в get_verdict): субъект, проверки, судебная "
+            "нагрузка, вердикт — те же данные, порядок для чтения"
+        ),
+    )
     criteria_version: str = Field(
         description=(
             "Хэш scoring.yaml на момент расчёта. Одинаковый YAML — "
