@@ -178,8 +178,8 @@ def build_profile(
         "оценка": score.verdict.label,
     }
     if score.verdict.floored:
-        verdict_block["жёсткое ограничение"] = (
-            f"оценка не может быть выше «{score.verdict.label}»: "
+        verdict_block["ограничение"] = (
+            f"оценка ограничена уровнем «{score.verdict.label}»: "
             f"сработал запретительный критерий «{score.verdict.floor_criterion}»"
         )
     if score.reasons:
