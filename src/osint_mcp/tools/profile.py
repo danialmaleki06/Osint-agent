@@ -172,14 +172,14 @@ def build_profile(
             )
 
     # ── 4. Вердикт ──
+    # Балл и версия правил — служебные сведения (для аудита и логов).
+    # Менеджеру они не нужны: его язык — вердикт и факты за ним.
     verdict_block = {
         "оценка": score.verdict.label,
-        "балл": score.verdict.total_score,
-        "версия правил": score.criteria_version,
     }
     if score.verdict.floored:
         verdict_block["жёсткое ограничение"] = (
-            f"вердикт не может быть выше «{score.verdict.label}»: "
+            f"оценка не может быть выше «{score.verdict.label}»: "
             f"сработал запретительный критерий «{score.verdict.floor_criterion}»"
         )
     if score.reasons:
