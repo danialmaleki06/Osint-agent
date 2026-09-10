@@ -48,25 +48,29 @@ def test_same_url_different_subject_kept(store):
     assert n == 1
 
 
-def test_confirm_returns_extfact_with_weight(store):
+def test_confirm_returns_review_with_agent_mark(store):
     store.add("111", [pf("SRCH-1")])
-    ext = store.confirm("111", "SRCH-1", weight=-100.0)
-    assert ext is not None
-    assert ext.kind == "dog_connection"
-    assert ext.payload["weight"] == -100.0
-    assert ext.payload["confirmed_by"] == "human"
-    assert ext.source_url == "https://example.org/x"
+    res = store.confirm("111", "SRCH-1", weight=-100.0,
+                        confirmed_by="agent",
+                        rationale="Прямая связь с питомником")
+    assert res is not None
+    assert res["weight"] == -100.0
+    assert res["confirmed_by"] == "agent"       # это подсказка ИИ
+    assert "питомником" in res["rationale"]
+    assert res["source_url"] == "https://example.org/x"  # ссылка на месте
     # После подтверждения в pending его нет
     assert store.list_pending("111") == []
     # Но он в confirmed
     assert len(store.confirmed_facts("111")) == 1
 
 
-def test_confirm_weight_is_human_decision(store):
-    """Вес подтверждения задаёт человек, движок его не вычисляет."""
+def test_confirm_weight_is_agent_hint(store):
+    """Вес выставляет агент — это его подсказка, человек видит её с ссылкой."""
     store.add("111", [pf("SRCH-1")])
-    ext = store.confirm("111", "SRCH-1", weight=-5.0)
-    assert ext.payload["weight"] == -5.0
+    res = store.confirm("111", "SRCH-1", weight=-5.0,
+                        confirmed_by="agent", rationale="незначительно")
+    assert res["weight"] == -5.0
+    assert res["confirmed_by"] == "agent"
 
 
 def test_confirm_missing_returns_none(store):

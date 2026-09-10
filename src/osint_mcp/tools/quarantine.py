@@ -77,15 +77,16 @@ class QuarantineStore:
             for r in cur.fetchall()
         ]
 
-    def confirm(self, subject: str, fact_id: str, weight: float) -> ExtFact | None:
-        """Подтвердить находку: она становится ExtFact с весом от человека.
+    def confirm(
+        self, subject: str, fact_id: str, weight: float,
+        confirmed_by: str = "agent", rationale: str = "",
+    ) -> dict | None:
+        """Подтвердить находку с весом.
 
-        Вес задаёт подтверждающий (это и есть 'редактирующий YAML' в
-        миниатюре — только для конкретного факта). Движок скоринга его
-        не вычисляет.
+        weight выставляет агент (подсказка) или человек (переоценка) —
+        whoever подтверждает. confirmed_by и rationale фиксируются:
+        пользователь всегда видит, чья это оценка и с чем она связана.
         """
-        # RETURNING в sqlite3 из Python нестабилен для UPDATE — сначала
-        # читаем строку, потом обновляем статус.
         cur = self._conn.execute(
             "SELECT kind, statement, source_url, trust, found_at "
             "FROM pending_facts WHERE subject=? AND fact_id=? "
@@ -101,14 +102,12 @@ class QuarantineStore:
             (weight, datetime.now(timezone.utc).isoformat(), subject, fact_id),
         )
         self._conn.commit()
-        return ExtFact(
-            fact_id=fact_id, kind=row["kind"],
-            statement=row["statement"], source_url=row["source_url"],
-            source_type="confirmed",  # человек подтвердил
-            trust=row["trust"], retrieved_at=datetime.now(timezone.utc),
-            payload={"weight": weight, "confirmed_by": "human",
-                     "subject": subject},
-        )
+        return {
+            "fact_id": fact_id, "kind": row["kind"],
+            "statement": row["statement"], "source_url": row["source_url"],
+            "weight": weight, "confirmed_by": confirmed_by,
+            "rationale": rationale,
+        }
 
     def reject(self, subject: str, fact_id: str) -> bool:
         """Отклонить находку как мусор."""
@@ -122,7 +121,8 @@ class QuarantineStore:
         return cur.rowcount > 0
 
     def confirmed_facts(self, subject: str) -> list[ExtFact]:
-        """Все подтверждённые факты субъекта — их подмешивают в скоринг."""
+        """Все подтверждённые факты субъекта — подсказанные агентом и
+        переоценённые человеком. Вес хранится при факте."""
         cur = self._conn.execute(
             "SELECT * FROM pending_facts WHERE subject=? AND status='confirmed'",
             (subject,),
@@ -134,7 +134,7 @@ class QuarantineStore:
                 source_type="confirmed",
                 trust=r["trust"],
                 retrieved_at=datetime.fromisoformat(r["reviewed_at"]),
-                payload={"weight": r["weight"], "confirmed_by": "human"},
+                payload={"weight": r["weight"], "subject": subject},
             )
             for r in cur.fetchall()
         ]
