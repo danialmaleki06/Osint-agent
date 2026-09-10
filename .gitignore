@@ -237,3 +237,4 @@ __marimo__/
 # локальные рабочие заметки
 TODO_LOCAL.md
 quarantine.db
+config_snapshots/

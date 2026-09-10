@@ -5,6 +5,8 @@
 и пороги. Всё «что и насколько важно» — в YAML.
 """
 
+import hashlib
+import json
 import math
 from datetime import date, datetime, timezone
 from functools import lru_cache
@@ -99,6 +101,13 @@ class ScoringConfig(BaseModel):
     groups: dict[str, GroupSpec]
     criteria: dict[str, CriterionSpec]
     verdicts: list[VerdictSpec]
+    criteria_version: str = Field(
+        default="",
+        description=(
+            "Заполняется движком при загрузке: хэш содержимого YAML. "
+            "В YAML его задавать не нужно — значение из файла игнорируется"
+        ),
+    )
 
     def validate_semantics(self) -> None:
         """Ошибки в YAML — это ошибки запуска, а не молчаливая ерунда."""
@@ -129,6 +138,30 @@ class ScoringConfig(BaseModel):
 
 # ──────────────────────────  Загрузка  ──────────────────────────
 
+# Журнал версий правил: какой YAML действовал под каким хэшем.
+# Не база данных и не история досье — просто снимок конфига при каждой
+# новой версии, чтобы вердикт из прошлого можно было сопоставить с
+# правилами, по которым он считался.
+_SNAPSHOT_DIR = _TABLE_PATH.parent / "config_snapshots"
+
+
+def _record_config_snapshot(path: Path, version: str, normalized: str) -> None:
+    """Сохранить снимок YAML при появлении новой версии правил.
+
+    Одинаковый контент = одинаковый хэш = запись не дублируется.
+    Файл-журнал: config_snapshots/<version>.yaml
+    """
+    try:
+        _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        snap = _SNAPSHOT_DIR / f"{version}.yaml"
+        if not snap.exists():
+            snap.write_text(normalized, encoding="utf-8")
+    except OSError:
+        # Журнал — вспомогательная вещь: не смогли записать, работаем
+        # дальше без него. Хэш в ScoreResult уже стоит.
+        pass
+
+
 @lru_cache(maxsize=1)
 def load_config(path: Path | None = None) -> ScoringConfig:
     p = path or _TABLE_PATH
@@ -139,6 +172,13 @@ def load_config(path: Path | None = None) -> ScoringConfig:
     except ValidationError as e:
         raise ValueError(f"scoring.yaml не соответствует схеме: {e}") from e
     cfg.validate_semantics()
+    # Версия правил = хэш от нормализованного содержимого, а не от файла:
+    # перенос строк и перестановка ключей не меняют правила.
+    normalized = json.dumps(raw, sort_keys=True, ensure_ascii=False)
+    cfg.criteria_version = hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()[:16]
+    _record_config_snapshot(p, cfg.criteria_version, normalized)
     return cfg
 
 
@@ -462,5 +502,6 @@ def score_company(
         pending=pending or [],
         warnings=warnings,
         unmatched_fact_kinds=unmatched,
+        criteria_version=cfg.criteria_version,
         scored_at=now,
     )

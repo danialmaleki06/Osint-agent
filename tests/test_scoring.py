@@ -299,6 +299,54 @@ def test_pending_requires_source_url():
         )
 
 
+# ── criteria_version: воспроизводимость правил ──────────────────────
+
+def test_criteria_version_stable():
+    """Одинаковый YAML → одинаковая версия в каждом ScoreResult."""
+    a = score_company([])
+    b = score_company([])
+    assert a.criteria_version
+    assert a.criteria_version == b.criteria_version
+
+
+def test_criteria_version_changes_with_yaml(tmp_path):
+    """Поменяли вес — версия изменилась; старая версия сохранилась в снимке."""
+    import shutil
+    import yaml
+    snap_dir = Path("src/osint_mcp/config_data/config_snapshots")
+    old_version = score_company([]).criteria_version
+
+    base = yaml.safe_load(
+        Path("src/osint_mcp/config_data/scoring.yaml").read_text(encoding="utf-8")
+    )
+    base["baseline"] = 55  # правим правила
+    p = tmp_path / "changed.yaml"
+    p.write_text(yaml.dump(base, allow_unicode=True), encoding="utf-8")
+
+    new_version = score_company([], config_path=p).criteria_version
+    assert new_version != old_version
+
+    # Снимок старой версии лежит в журнале — по нему можно восстановить правила
+    old_snap = snap_dir / f"{old_version}.yaml"
+    assert old_snap.exists()
+    restored = yaml.safe_load(old_snap.read_text(encoding="utf-8"))
+    assert restored["baseline"] == 60  # в старой версии был ещё 60
+
+
+def test_criteria_version_ignores_formatting(tmp_path):
+    """Перестановка ключей и переносы строк не меняют правила."""
+    import yaml
+    base = yaml.safe_load(
+        Path("src/osint_mcp/config_data/scoring.yaml").read_text(encoding="utf-8")
+    )
+    # другой порядок ключей + другой стиль
+    p = tmp_path / "reordered.yaml"
+    p.write_text(yaml.dump(base, sort_keys=True, allow_unicode=True, default_flow_style=False), encoding="utf-8")
+    v1 = score_company([], config_path=p).criteria_version
+    v2 = score_company([]).criteria_version
+    assert v1 == v2
+
+
 # ── Воспроизводимость ───────────────────────────────────────────────
 
 def test_deterministic():
