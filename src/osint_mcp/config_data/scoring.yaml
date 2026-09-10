@@ -1,0 +1,208 @@
+# ─────────────────────────────────────────────────────────────────────
+# Скоринг: критерии, веса, вердикты.
+#
+# Этот файл — единственное место, где задано «что важно и насколько».
+# Код знает только КАК считать (операторы, агрегация, затухание, пороги),
+# а ЧТО считать — здесь. Правка этого файла не требует изменения кода.
+#
+# Структура критерия:
+#   group        — группа из секции groups, веса групп нормируются на 100
+#   description  — человекочитаемое описание (попадает в служебные поля)
+#   match        — какие факты берёт критерий:
+#                    kind     — значение Fact.kind
+#                    field    — путь внутри payload (можно с точкой: a.b);
+#                               зарезервированное имя "status" — payload.status
+#                    op       — оператор: contains_any | eq | gt | lt | exists
+#                    values   — значения для оператора
+#   aggregate    — как свести匹配нные факты к числу: count | sum | max | age_days
+#                  (age_days считает возраст от context.registered_at в днях)
+#   field        — поле payload для sum/max
+#   thresholds   — ступени: выше/ниже порога — свой score.
+#                  above=«значение > порога», below=«значение < порога».
+#                  Проверяются сверху вниз, срабатывает первая подходящая.
+#   score        — ВЕС критерия в баллах. Ставится редактирующим YAML
+#                  вручную, код его не вычисляет и не нормирует:
+#                  отрицательные идут в итог целиком (не ослабляются
+#                  весом группы), положительные масштабируются весом
+#                  группы. Без thresholds — фиксированный балл.
+#   decay        — затухание по дате события: half_life_days — срок,
+#                  за который вклад факта уменьшается вдвое. Считается от
+#                  event_date факта; факты без даты не затухают.
+#   verdict_floor— жёсткий пол вердикта: если критерий сработал, итоговая
+#                  оценка не может быть ВЫШЕ указанной, сколько бы
+#                  позитивного ни набралось. Пол не меняет балл — он режет
+#                  вердикт в самом конце.
+#   reason       — шаблон краткой причины. Плейсхолдеры: {value}, {sum},
+#                  {count}, {statement} (первый сработавший факт).
+# Плейсхолдеры: {inn} и др. — см. engine.py, _render_reason.
+# ─────────────────────────────────────────────────────────────────────
+
+# База, от которой считаются отклонения. Компания без сработавших
+# критериев получает ровно её.
+baseline: 60
+
+groups:
+  registry_risk:
+    weight: 45
+  litigation:
+    weight: 25
+  finance:
+    weight: 20
+  person:
+    weight: 10
+
+# ── Жёсткие вердикты (пол) ──────────────────────────────────────────
+# Названия оценок — в verdicts ниже. Порядок в списке = порядок строгости.
+
+criteria:
+  liquidated:
+    group: registry_risk
+    description: "Организация ликвидирована или в процессе ликвидации/реорганизации"
+    match:
+      kind: registry_flag
+      field: status
+      op: contains_any
+      values: ["ликвид", "прекращ", "реорганиз"]
+    score: -100
+    warn_always: true
+    verdict_floor: "нельзя"
+    reason: "Организация не действует: {statement}"
+
+  bankruptcy:
+    group: registry_risk
+    description: "Сообщения в реестре банкротств (ЕФРСБ)"
+    match:
+      kind: bankruptcy
+    score: -90
+    warn_always: true
+    verdict_floor: "нельзя"
+    reason: "Процедура банкротства: {statement}"
+
+  sanctioned:
+    group: registry_risk
+    description: "Санкционные отметки"
+    match:
+      kind: registry_flag
+      field: flag
+      op: contains_any
+      values: ["Санкции", "СанкцУчр", "НелегалФин"]
+    score: -85
+    warn_always: true
+    verdict_floor: "нельзя"
+    reason: "Санкционные/финансовые отметки: {statement}"
+
+  unfair_supplier:
+    group: registry_risk
+    description: "Реестр недобросовестных поставщиков"
+    match:
+      kind: registry_flag
+      field: flag
+      op: contains_any
+      values: ["НедобПост"]
+    score: -50
+    warn_always: true
+    verdict_floor: "не стоит"
+    reason: "Компания в реестре недобросовестных поставщиков"
+
+  mass_management:
+    group: person
+    description: "Массовый руководитель или учредитель"
+    match:
+      kind: registry_flag
+      field: flag
+      op: contains_any
+      values: ["МассРуковод", "МассУчред", "ДисквЛица"]
+    score: -30
+    warn_always: true
+    verdict_floor: "не стоит"
+    reason: "Признаки ненадёжного руководства: {statement}"
+
+  enforcement_debt:
+    group: litigation
+    description: "Исполнительные производства (ФССП) — сумма долга"
+    match:
+      kind: enforcement
+      field: amount
+    aggregate: sum
+    field: amount
+    thresholds:
+      - { above: 10000000, score: -35 }
+      - { above: 1000000,  score: -20 }
+      - { above: 100000,   score: -8 }
+      - { above: 0,        score: -3 }
+    decay:
+      half_life_days: 365
+    warn_always: true
+    reason: "Долги ФССП: {sum} ₽ по {count} производствам"
+
+  defendant_cases:
+    group: litigation
+    description: "Арбитражные дела, где компания ответчик"
+    match:
+      kind: arbitration
+      field: role
+      op: eq
+      values: ["ответчик"]
+    aggregate: count
+    thresholds:
+      - { above: 20, score: -25 }
+      - { above: 5,  score: -12 }
+      - { above: 0,  score: -5 }
+    decay:
+      half_life_days: 730
+    warn_always: true
+    reason: "Ответчик в {count} арбитражных делах"
+
+  plaintiff_ok:
+    group: litigation
+    description: "Компания сама взыскивает долги — защитная активность, небольшой плюс"
+    match:
+      kind: arbitration
+      field: role
+      op: eq
+      values: ["истец"]
+    aggregate: count
+    thresholds:
+      - { above: 2, score: 3 }
+    decay:
+      half_life_days: 730
+    warn_always: false
+    reason: "Компания активно защищает интересы ({count} дел в роли истца)"
+
+  suspicious_affiliates:
+    group: person
+    description: "Подозрительные связанные организации"
+    match:
+      kind: registry_flag
+      field: link
+      op: exists
+    aggregate: count
+    thresholds:
+      - { above: 3, score: -20 }
+      - { above: 0, score: -8 }
+    warn_always: true
+    reason: "{count} подозрительных связей в аффилированной сети"
+
+  company_age:
+    group: finance
+    description: "Возраст компании — сколько лет на рынке"
+    match:
+      kind: registry
+    aggregate: age_days
+    thresholds:
+      - { above: 3650, score: 15, label: "10+ лет на рынке" }
+      - { above: 1825, score: 8,  label: "5+ лет на рынке" }
+      - { below: 365,  score: -8, label: "молодая компания, меньше года" }
+    reason: "{label}"
+
+# ── Вердикты ────────────────────────────────────────────────────────
+# Проверяются сверху вниз: срабатывает первая строка, где total >= min
+# (или total <= max для отрицательных). require_reason — оценка ниже
+# этой строки обязана иметь хотя бы одну краткую причину.
+
+verdicts:
+  - { min: 75,  label: "надёжный" }
+  - { min: 50,  label: "можно работать" }
+  - { min: 0,   label: "с осторожностью", require_reason: false }
+  - { max: -1,  label: "не стоит", require_reason: true }
+  - { max: -60, label: "нельзя", require_reason: true }

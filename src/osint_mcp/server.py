@@ -12,6 +12,7 @@
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import structlog
@@ -34,6 +35,15 @@ from osint_mcp.tools.context_builder import build_company_context as _build_cont
 from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
 from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
+from osint_mcp.scoring import score_company as _score_company
+from osint_mcp.scoring.models import PendingFact, ScoreResult
+from osint_mcp.tools.quarantine import QuarantineStore
+from osint_mcp.tools.web_search_source import search_pending as _search_pending
+
+# Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
+_QUARANTINE_PATH = Path(__file__).parent / "config_data" / "quarantine.db"
+_QUARANTINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+_quarantine = QuarantineStore(_QUARANTINE_PATH)
 
 SERVER_NAME = "osint-mcp"
 VERSION = "0.4.0"
@@ -53,7 +63,8 @@ mcp = MCPServer(SERVER_NAME, version=VERSION)
 
 TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_context", "collect_risk_facts", "check_affiliations",
-         "check_coverage"]
+         "check_coverage", "get_verdict", "search_unverified",
+         "review_pending"]
 
 _source = DaDataSource()
 _checko = CheckoSource()
@@ -552,6 +563,196 @@ def check_coverage(
     log.info("tool_call", tool="check_coverage", inn=inn,
              checked=result.checked, requests=result.total_requests)
     return result
+
+
+@mcp.tool()
+async def get_verdict(
+    inn: Annotated[
+        str,
+        Field(
+            description="Подтверждённый ИНН организации, 10 цифр",
+            examples=["7724744134"],
+        ),
+    ],
+) -> ScoreResult:
+    """Итоговая оценка организации: вердикт + баллы + причины со ссылками.
+
+    ПОРЯДОК РАБОТЫ:
+      1. resolve_company     — определить организацию
+      2. get_company_context — собрать карточку
+      3. collect_risk_facts  — проверить риски
+      4. get_verdict         — получить оценку            <-- ты здесь
+
+    Оценку СЧИТАЕТ ДВИЖОК по критериям из scoring.yaml — она
+    детерминирована и воспроизводима. Твоя задача — ПЕРЕСКАЗАТЬ её
+    пользователю, а не пересчитывать и не оспаривать.
+
+    КАК ОТВЕЧАТЬ:
+      1. Назови вердикт дословно (verdict.label).
+      2. При(require_reason) вердикте перескажи reasons — это обязательная
+         краткая причина, не опускай.
+      3. Warnings — СВЯТОЕ. Каждый элемент warnings обязан быть доведён
+         до пользователя ДОСЛОВНО, в любом ответе, при ЛЮБОЙ оценке —
+         включая «надёжный». Положительный вердикт не отменяет тяжёлого
+         факта: если пользователь узнает о долгах ФССП после подписания
+         договора, это провал проверки, а не «не критично». Формулируй:
+         «Оценка: можно работать. ВАЖНО: <каждое warning>».
+      4. Каждый тезис подкрепляй fact_ids из matched и ссылками из
+         source_urls — вердикт без доказательств не имеет силы.
+      5. НЕ придумывай баллы и не складывай свои: total_score уже готов.
+      6. matched — полный разбор; groups — вклад по группам.
+      7. pending — находки из нереестровых источников (карантин). Они НЕ
+         влияют на вердикт, но пользователь должен их увидеть: покажи
+         каждый с ОБЯЗАТЕЛЬНОЙ ссылкой (source_url) в блоке «не проверено,
+         нашлось в открытом виде». Не подтверждай находку сам и не
+         превращай её в вывод — предложи проверить человеку.
+      8. unmatched_fact_kinds непустой → часть собранных данных в оценку
+         не вошла (нет критерия). Упомяни, что проверка может быть
+         расширена, НЕ выдавай это за «риски отсутствуют».
+
+    verdict.floored = true — балл выглядел лучше, но жёсткий пол
+    (verdict_floor, напр. банкротство) урезал вердикт. Объясни это
+    пользователю: «несмотря на X, оценка не может быть выше Y из-за Z».
+    """
+    ledger.set_subject(inn)
+    risk = await _collect_risk_facts(inn, _checko)
+    context_result = await _build_context(inn, _source, _checko)
+    result = _score_company(
+        facts=risk.facts,
+        context=context_result.context,
+    )
+    log.info("tool_call", tool="get_verdict", inn=inn,
+             verdict=result.verdict.label, score=result.verdict.total_score,
+             floored=result.verdict.floored)
+    return result
+
+
+@mcp.tool()
+async def search_unverified(
+    inn: Annotated[
+        str,
+        Field(description="ИНН организации, по которой ищем", examples=["7724744134"]),
+    ],
+    query: Annotated[
+        str,
+        Field(
+            description="Поисковый запрос. Пример: «ООО Ромашка собаки питомник»",
+            examples=["ООО Ромашка собаки питомник"],
+        ),
+    ],
+    kind: Annotated[
+        str,
+        Field(
+            description="Вид факта для находок, например dog_connection",
+            examples=["dog_connection", "news_mention"],
+        ),
+    ],
+    limit: Annotated[int, Field(description="Сколько находок искать (макс 10)")] = 5,
+) -> dict:
+    """Найти упоминания в открытом вебе → всё в карантин, вердикт НЕ трогает.
+
+    КОГДА ВЫЗЫВАТЬ: пользователь просит проверить компании по открытому
+    вебу, по критериям, которых нет в госреестрах (репутация, упоминания,
+    связи с чем-либо).
+
+    ГАРАНТИИ:
+      1. Каждая находка С ОБЯЗАТЕЛЬНОЙ ссылкой (source_url) — данные не из
+         реестра без ссылки не существуют.
+      2. Находки НЕ ВЛИЯЮТ на get_verdict: они лежат в карантине.
+      3. В вердикт находка попадает ТОЛЬКО после review_pending
+         (подтверждение человеком).
+
+    КАК ОТВЕЧАТЬ: покажи каждую находку со ссылкой в блоке «не проверено,
+    нашлось в открытом виде». НЕ утверждай, что связь реальна: находка —
+    это совпадение слов в поиске, а не установленный факт.
+    """
+    ledger.set_subject(inn)
+    found = _search_pending(query, kind, limit=min(limit, 10))
+    added = _quarantine.add(inn, found)
+    log.info("tool_call", tool="search_unverified", inn=inn,
+             found=len(found), added=added)
+    return {
+        "inn": inn,
+        "query": query,
+        "found": len(found),
+        "added_to_quarantine": added,
+        "hits": [f.model_dump(mode="json") for f in found],
+        "note": (
+            "Находки в карантине: вердикт не изменился. Покажи каждую со "
+            "ссылкой в блоке «не проверено». Подтверждение — review_pending"
+        ),
+    }
+
+
+@mcp.tool()
+def review_pending(
+    inn: Annotated[
+        str,
+        Field(description="ИНН организации", examples=["7724744134"]),
+    ],
+    action: Annotated[
+        str, Field(description="«list» — показать карантин; «confirm» — подтвердить; «reject» — отклонить"),
+    ],
+    fact_id: Annotated[
+        str | None,
+        Field(description="ID находки (обязателен для confirm/reject)"),
+    ] = None,
+    weight: Annotated[
+        float,
+        Field(
+            description=(
+                "Вес для confirm. Ставит ЧЕЛОВЕК, сообщив его тебе. "
+                "Код вес не вычисляет"
+            ),
+        ),
+    ] = None,
+) -> dict:
+    """Карантин: показать / подтвердить / отклонить находку.
+
+    ПОРЯДОК:
+      1. action=list — покажи карантин пользователя со ссылками.
+      2. Человек решает судьбу каждой находки. НЕ решай за него.
+      3. action=confirm — НУЖЕН weight от человека. Спроси его, если не дали.
+      4. action=reject — находка уходит как мусор, учитывается в точности
+         источника.
+
+    ВАЖНО: ты не подтверждаешь находки сам. Подтверждение без явно
+    переданного человеком weight — ошибка. Если weight не передан —
+    вернись к пользователю и спроси.
+    """
+    if action == "list":
+        pending = _quarantine.list_pending(inn)
+        return {
+            "inn": inn,
+            "pending": [p.model_dump(mode="json") for p in pending],
+            "count": len(pending),
+        }
+
+    if action == "confirm":
+        if weight is None:
+            return {
+                "error": "weight обязателен: спроси человека, какой вес "
+                         "поставить этой находке. Код вес не вычисляет."
+            }
+        ext = _quarantine.confirm(inn, fact_id or "", weight)
+        if ext is None:
+            return {"error": f"Находка {fact_id} не найдена в карантине"}
+        log.info("tool_call", tool="review_pending", inn=inn,
+                 action="confirm", fact_id=fact_id, weight=weight)
+        return {
+            "confirmed": True,
+            "fact": ext.model_dump(mode="json"),
+            "note": "Факт подтверждён. В след. get_verdict попадёт в "
+                    "unmatched, пока в scoring.yaml нет критерия на его kind",
+        }
+
+    if action == "reject":
+        ok = _quarantine.reject(inn, fact_id or "")
+        log.info("tool_call", tool="review_pending", inn=inn,
+                 action="reject", fact_id=fact_id, ok=ok)
+        return {"rejected": ok}
+
+    return {"error": f"Неизвестное action: {action} (list/confirm/reject)"}
 
 
 def _serve_http() -> None:

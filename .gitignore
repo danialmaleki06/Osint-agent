@@ -233,3 +233,7 @@ __marimo__/
 
 # Виртуальное окружение uv
 .venv
+
+# локальные рабочие заметки
+TODO_LOCAL.md
+quarantine.db

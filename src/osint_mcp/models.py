@@ -8,10 +8,11 @@ Pydantic здесь работает в трёх ролях одновремен
 Один источник правды — рассинхронизироваться нечему.
 """
 
+import re
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # «Не найдено» и «выбирайте из нескольких» — разные состояния, и путать
 # их нельзя: по второму агент обязан показать перечень кандидатов,
@@ -208,10 +209,88 @@ class CompanyContext(BaseModel):
 
 # ──────────────────────────  Факты и риски  ──────────────────────────
 
+# Ядро видов фактов: реестровые источники проекта. Захардкожено
+# намеренно — это контракт с парсерами Checko/DaData, и произвольные
+# строки сюда попадать не должны.
+CORE_FACT_KINDS = frozenset({
+    "registry", "arbitration", "bankruptcy", "enforcement",
+    "procurement", "registry_flag", "news",
+})
+
 FactKind = Literal[
     "registry", "arbitration", "bankruptcy", "enforcement",
     "procurement", "registry_flag", "news",
 ]
+
+# Формат вида факта для пополняемых источников (адаптеры, плагины).
+# Должен быть совместим с FactKind: новый вид расширяет ядро, а не
+# конфликтует с ним. Примеры валидных: "banned_list", "rss_fns",
+# "custom_site_vacancy". Невалидные: "Registry" (регистр), "a-b"
+# (дефис), "" (пустое).
+_EXT_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+
+
+def is_valid_ext_kind(kind: str) -> bool:
+    """Проверка вида факта из пополняемого источника.
+
+    Правила: латиница в нижнем регистре, цифры, подчёркивания;
+    начинается с буквы; 3–64 символа. Ядро (FactKind) проходит
+    всегда — расширения не должны ломать существующие источники.
+    """
+    if not kind:
+        return False
+    if kind in CORE_FACT_KINDS:
+        return True
+    return bool(_EXT_KIND_PATTERN.match(kind))
+
+
+class ExtFact(BaseModel):
+    """Факт из пополняемого источника (адаптер, плагин, пользовательский парсер).
+
+    Отличие от Fact: kind — валидированная строка, а не Literal. Новый
+    источник приносит свой вид факта без правки core-моделей. В скоринг
+    попадает на общих основаниях: пока в scoring.yaml нет критерия с
+    этим kind, факты лежат в unmatched_fact_kinds и оценку не меняют.
+    """
+
+    fact_id: str = Field(
+        description="Устойчивый идентификатор, например BAN-1",
+    )
+    kind: str = Field(
+        description=(
+            "Вид факта пополняемого источника. Формат: ^[a-z][a-z0-9_]{2,63}$ "
+            "или один из CORE_FACT_KINDS"
+        ),
+    )
+    statement: str = Field(description="Утверждение на естественном языке")
+    source_url: str = Field(description="Ссылка на первоисточник")
+    source_type: str = Field(
+        description="Тип источника: registry_api, court, news, custom",
+    )
+    trust: Literal["registry", "reference", "mention"] = Field(
+        default="mention",
+        description=(
+            "Ступень доверия источника: registry — факт как факт; "
+            "reference — подтверждает реестровый факт; mention — просто "
+            "упоминание. По умолчанию минимум"
+        ),
+    )
+    retrieved_at: datetime = Field(description="Когда получено")
+    event_date: date | None = Field(
+        default=None,
+        description="Дата самого события, не публикации",
+    )
+    payload: dict = Field(default_factory=dict)
+
+    @field_validator("kind")
+    @classmethod
+    def _kind_format(cls, v: str) -> str:
+        if not is_valid_ext_kind(v):
+            raise ValueError(
+                f"kind «{v}» не соответствует формату ^[a-z][a-z0-9_]{{2,63}} "
+                f"и не входит в ядро {sorted(CORE_FACT_KINDS)}"
+            )
+        return v
 
 
 class Fact(BaseModel):
