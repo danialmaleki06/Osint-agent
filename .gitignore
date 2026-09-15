@@ -238,3 +238,4 @@ __marimo__/
 TODO_LOCAL.md
 quarantine.db
 config_snapshots/
+node_modules/
