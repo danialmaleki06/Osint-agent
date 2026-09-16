@@ -37,7 +37,9 @@ from osint_mcp.tools.inn import validate_inn as _validate_inn
 from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
 from osint_mcp.scoring import score_company as _score_company
 from osint_mcp.scoring.engine import load_config as _load_scoring_config
-from osint_mcp.scoring.models import PendingFact, ScoreResult, Verdict
+from osint_mcp.scoring.models import (
+    PendingFact, ScoreResult, SearchUnverifiedResult, Verdict,
+)
 from osint_mcp.tools.quarantine import QuarantineStore
 from osint_mcp.tools.web_search_source import search_pending as _search_pending
 
@@ -622,32 +624,39 @@ async def get_verdict(
     детерминирована и воспроизводима. Твоя задача — ПЕРЕСКАЗАТЬ её
     пользователю, а не пересчитывать и не оспаривать.
 
-    КАК ОТВЕЧАТЬ:
-      1. Назови вердикт дословно (verdict.label).
-      2. При(require_reason) вердикте перескажи reasons — это обязательная
-         краткая причина, не опускай.
-      3. Warnings — СВЯТОЕ. Каждый элемент warnings обязан быть доведён
-         до пользователя ДОСЛОВНО, в любом ответе, при ЛЮБОЙ оценке —
-         включая «надёжный». Положительный вердикт не отменяет тяжёлого
-         факта: если пользователь узнает о долгах ФССП после подписания
-         договора, это провал проверки, а не «не критично». Формулируй:
-         «Оценка: можно работать. ВАЖНО: <каждое warning>».
-      4. Каждый тезис подкрепляй fact_ids из matched и ссылками из
-         source_urls — вердикт без доказательств не имеет силы.
-      5. НЕ придумывай баллы и не складывай свои: total_score уже готов.
-      6. matched — полный разбор; groups — вклад по группам.
-      7. pending — находки из нереестровых источников (карантин). Они НЕ
-         влияют на вердикт, но пользователь должен их увидеть: покажи
-         каждый с ОБЯЗАТЕЛЬНОЙ ссылкой (source_url) в блоке «не проверено,
-         нашлось в открытом виде». Не подтверждай находку сам и не
-         превращай её в вывод — предложи проверить человеку.
-      8. unmatched_fact_kinds непустой → часть собранных данных в оценку
-         не вошла (нет критерия). Упомяни, что проверка может быть
-         расширена, НЕ выдавай это за «риски отсутствуют».
+    КАК ОТВЕЧАТЬ — ответ строится ДВУМЯ СЛОЯМИ, оба обязательны:
+
+      СЛОЙ 1. Начни ответ заголовком «КРАТКИЙ ИТОГ» и двумя-тремя
+        строками: вердикт дословно (verdict.label), балл (total_score),
+        суть решения для руководителя. Без деталей и таблиц.
+
+      СЛОЙ 2. ЗАГОЛОВКОМ «ПОЛНЫЙ РАЗБОР» сразу после итога — НЕ пропускай:
+        1. matched — по каждому сработавшему критерию: название, балл,
+           причина и ссылка из source_urls; тезисы подкрепляй fact_ids —
+           вердикт без доказательств не имеет силы.
+        2. groups — вклад каждой группы в балл.
+        3. Если reasons непустой — перескажи каждый элемент: это
+           обязательная краткая причина, не опускай.
+        4. Warnings — СВЯТОЕ. Каждый элемент warnings обязан быть доведён
+           до пользователя ДОСЛОВНО, при ЛЮБОЙ оценке — включая
+           «надёжный». Положительный вердикт не отменяет тяжёлого факта:
+           если пользователь узнает о долгах ФССП после подписания
+           договора, это провал проверки, а не «не критично».
+        5. pending — находки из нереестровых источников (карантин). Они НЕ
+           влияют на вердикт, но пользователь должен их увидеть: покажи
+           каждый с обязательной ссылкой (pending[].source_url) в блоке
+           «не проверено, нашлось в открытом виде». Не подтверждай находку
+           сам и не превращай её в вывод — предложи проверить человеку.
+        6. Что проверить НЕ удалось: направления со статусом
+           unavailable/partial и unmatched_fact_kinds — отсутствие данных
+           не доказывает отсутствие рисков, скажи это прямо.
+
+      НЕ придумывай баллы и не складывай свои: total_score уже готов.
 
     verdict.floored = true — балл выглядел лучше, но жёсткий пол
-    (verdict_floor, напр. банкротство) урезал вердикт. Объясни это
-    пользователю: «несмотря на X, оценка не может быть выше Y из-за Z».
+    (поле verdict в ScoreResult: floor_criterion, напр. банкротство)
+    урезал вердикт. Объясни это пользователю: «несмотря на X, оценка
+    не может быть выше Y из-за Z».
     """
     ledger.set_subject(inn)
     risk = await _collect_risk_facts(inn, _checko)
@@ -683,7 +692,7 @@ async def get_verdict(
             scored_at=datetime.now(timezone.utc),
         )
     result = _score_company(
-        facts=risk.facts,
+        facts=risk.facts + _quarantine.confirmed_facts(inn),
         context=context_result.context,
     )
     log.info("tool_call", tool="get_verdict", inn=inn,
@@ -718,7 +727,7 @@ async def search_unverified(
         ),
     ],
     limit: Annotated[int, Field(description="Сколько находок искать (макс 10)")] = 5,
-) -> dict:
+) -> SearchUnverifiedResult:
     """Найти упоминания в открытом вебе → всё в карантин, вердикт НЕ трогает.
 
     КОГДА ВЫЗЫВАТЬ: пользователь просит проверить компании по открытому
@@ -726,7 +735,7 @@ async def search_unverified(
     связи с чем-либо).
 
     ГАРАНТИИ:
-      1. Каждая находка С ОБЯЗАТЕЛЬНОЙ ссылкой (source_url) — данные не из
+      1. Каждая находка С ОБЯЗАТЕЛЬНОЙ ссылкой (hits[].source_url) — данные не из
          реестра без ссылки не существуют.
       2. Находки НЕ ВЛИЯЮТ на get_verdict: они лежат в карантине.
       3. В вердикт находка попадает ТОЛЬКО после review_pending
@@ -741,17 +750,17 @@ async def search_unverified(
     added = _quarantine.add(inn, found)
     log.info("tool_call", tool="search_unverified", inn=inn,
              found=len(found), added=added)
-    return {
-        "inn": inn,
-        "query": query,
-        "found": len(found),
-        "added_to_quarantine": added,
-        "hits": [f.model_dump(mode="json") for f in found],
-        "note": (
+    return SearchUnverifiedResult(
+        inn=inn,
+        query=query,
+        found=len(found),
+        added_to_quarantine=added,
+        hits=list(found),
+        note=(
             "Находки в карантине: вердикт не изменился. Покажи каждую со "
             "ссылкой в блоке «не проверено». Подтверждение — review_pending"
         ),
-    }
+    )
 
 
 @mcp.tool()

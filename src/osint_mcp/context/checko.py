@@ -29,6 +29,8 @@ from tenacity import (
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.keys import ROTATE_STATUS_CODES, QuotaExhausted
+from osint_mcp.keys import checko as checko_pool
 from osint_mcp.tools.country import detect_country
 from osint_mcp.models import (
     AffiliationGraph,
@@ -88,9 +90,14 @@ def _why(error: httpx.HTTPStatusError) -> str:
     неверный ключ, метод недоступен на тарифе. Код 403 сам по себе
     не говорит, чинить тариф или искать ошибку в коде.
     """
-    code = error.response.status_code
+    return _why_like(error.response)
+
+
+def _why_like(resp: httpx.Response) -> str:
+    """То же по готовому ответу — для отказов до raise_for_status."""
+    code = resp.status_code
     try:
-        message = ((error.response.json() or {}).get("meta") or {}).get("message")
+        message = ((resp.json() or {}).get("meta") or {}).get("message")
     except Exception:                                       # noqa: BLE001
         message = None
     return f"Checko ответила {code}: {message}" if message else f"Checko ответила {code}"
@@ -155,16 +162,40 @@ class CheckoSource:
         retry=retry_if_exception_type(httpx.TransportError),
         reraise=True,
     )
-    async def _get(self, endpoint: str, params: dict[str, Any]) -> dict:
-        url = f"{settings.checko_base_url}/{endpoint}"
-        query = {"key": settings.require("checko_api_key"), **params}
-        try:
+    async def _request(self, url: str, params: dict[str, Any]) -> httpx.Response:
+        """Запрос с автоподстановкой ключа из пула.
+
+        Отказ «ключ не годится» (401/403/429) повторяется со следующим
+        ключом, пока пул не исчерпается — тогда наружу выходит
+        QuotaExhausted с причиной последнего отказа.
+        """
+        params = {**params, "key": checko_pool.current()}
+        for attempt in range(len(checko_pool.keys()) + 1):
             if self._client is not None:
-                resp = await self._client.get(url, params=query)
+                resp = await self._client.get(url, params=params)
             else:
                 async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-                    resp = await client.get(url, params=query)
-            resp.raise_for_status()
+                    resp = await client.get(url, params=params)
+            if resp.status_code in ROTATE_STATUS_CODES and attempt < len(checko_pool.keys()):
+                if not checko_pool.rotate(f"HTTP {resp.status_code}"):
+                    break
+                params = {**params, "key": checko_pool.current()}
+                continue
+            break
+        if resp.status_code in ROTATE_STATUS_CODES:
+            raise QuotaExhausted(_why_like(resp))
+        resp.raise_for_status()
+        return resp
+
+    async def _get(self, endpoint: str, params: dict[str, Any]) -> dict:
+        url = f"{settings.checko_base_url}/{endpoint}"
+        try:
+            resp = await self._request(url, params)
+        except QuotaExhausted as e:
+            # Пометку об исчерпании делает пул; журналу же нужен сам факт
+            # отказа — иначе coverage примет источник за непроверенный.
+            ledger.record("checko", endpoint, "failed", str(e))
+            raise
         except httpx.HTTPStatusError as e:
             ledger.record("checko", endpoint, "failed", _why(e))
             raise
@@ -194,6 +225,9 @@ class CheckoSource:
         except httpx.HTTPStatusError as e:
             return None, SourceResult(source=source, status="unavailable",
                                       reason=_why(e))
+        except QuotaExhausted as e:
+            return None, SourceResult(source=source, status="unavailable",
+                                      reason=f"Ключи Checko исчерпаны: {e}")
         except (httpx.TransportError, httpx.TimeoutException) as e:
             return None, SourceResult(source=source, status="unavailable",
                                       reason=f"Сеть недоступна: {type(e).__name__}")

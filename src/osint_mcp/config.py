@@ -1,6 +1,6 @@
 """Настройки. Ключи читаются из окружения либо из .env, в код не попадают."""
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,10 +12,42 @@ class Settings(BaseSettings):
     )
 
     dadata_api_key: str = Field(default="", description="Ключ DaData")
+    # Список ключей через запятую — пул на случай суточного лимита.
+    dadata_api_keys: str = Field(
+        default="", description="Список ключей DaData через запятую (пул)"
+    )
     dadata_secret_key: str = Field(
         default="", description="Секретный ключ DaData — нужен только для метода бренда"
     )
     checko_api_key: str = Field(default="", description="Ключ Checko")
+    # Список ключей через запятую — пул на случай суточного лимита.
+    checko_api_keys: str = Field(
+        default="", description="Список ключей Checko через запятую (пул)"
+    )
+
+    @field_validator("dadata_api_keys", "checko_api_keys", mode="after")
+    @classmethod
+    def _allow_list(cls, v: str) -> str:
+        """Принять и формат с несколькими ключами, и JSON-список."""
+        s = (v or "").strip()
+        if s.startswith("[") and s.endswith("]"):
+            import json
+
+            try:
+                return ",".join(str(x) for x in json.loads(s))
+            except ValueError:
+                return s
+        return s
+
+    def dadata_key_pool(self) -> list[str]:
+        """Ключи DaData: сначала список, затем одиночный формат."""
+        keys = [k.strip() for k in self.dadata_api_keys.split(",") if k.strip()]
+        return keys or ([self.dadata_api_key] if self.dadata_api_key else [])
+
+    def checko_key_pool(self) -> list[str]:
+        """Ключи Checko: сначала список, затем одиночный формат."""
+        keys = [k.strip() for k in self.checko_api_keys.split(",") if k.strip()]
+        return keys or ([self.checko_api_key] if self.checko_api_key else [])
 
     dadata_base_url: str = "https://suggestions.dadata.ru/suggestions/api/4_1/rs"
     dadata_brand_url: str = "https://api.dadata.ru/findById/brand"

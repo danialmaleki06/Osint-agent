@@ -239,3 +239,18 @@ TODO_LOCAL.md
 quarantine.db
 config_snapshots/
 node_modules/
+
+# отчёты и логи локальных прогонов (пробники, агент, тесты)
+# _-префикс — рабочие артефакты, в репозиторий не попадают:
+# эталонные описания живут в README, живые выводы воспроизводимы
+_report*.md
+_agent*.md
+*_run*.log
+probe_*.log
+check_keys.log
+test_run.log
+smoke.log
+instructions.log
+opencode_probe.log
+opencode_agent*.log
+opencode_*.log

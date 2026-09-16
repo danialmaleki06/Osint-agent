@@ -24,6 +24,8 @@ from tenacity import (
 from osint_mcp import ledger
 from osint_mcp.config import settings
 from osint_mcp.context.okved import industry_terms
+from osint_mcp.keys import ROTATE_STATUS_CODES, QuotaExhausted
+from osint_mcp.keys import dadata as dadata_pool
 from osint_mcp.models import (
     BrandInfo,
     Candidate,
@@ -101,11 +103,11 @@ class DaDataSource:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, key: str | None = None) -> dict[str, str]:
         return {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Authorization": f"Token {settings.require('dadata_api_key')}",
+            "Authorization": f"Token {key or dadata_pool.current()}",
         }
 
     @retry(
@@ -117,12 +119,12 @@ class DaDataSource:
     async def _post(self, endpoint: str, payload: dict[str, Any]) -> list[dict]:
         url = f"{settings.dadata_base_url}/{endpoint}"
         try:
-            if self._client is not None:
-                resp = await self._client.post(url, json=payload, headers=self._headers())
-            else:
-                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-                    resp = await client.post(url, json=payload, headers=self._headers())
-            resp.raise_for_status()
+            resp = await self._post_raw(url, payload)
+        except QuotaExhausted as e:
+            # Факт отказа должен остаться в журнале: coverage обязан
+            # отличать «источник молчал» от «сведений нет».
+            ledger.record("dadata", endpoint, "failed", str(e))
+            raise
         except httpx.HTTPStatusError as e:
             ledger.record("dadata", endpoint, "failed",
                           f"служба ответила {e.response.status_code}")
@@ -134,6 +136,31 @@ class DaDataSource:
         items = resp.json().get("suggestions", [])
         ledger.record("dadata", endpoint, "ok" if items else "empty")
         return items
+
+    async def _post_raw(self, url: str, payload: dict[str, Any]) -> httpx.Response:
+        """Запрос с ротацией ключей при 401/403/429 — см. keys.KeyPool."""
+        key = dadata_pool.current()
+        headers = self._headers(key)
+        keys_count = len(dadata_pool.keys())
+        for attempt in range(keys_count + 1):
+            if self._client is not None:
+                resp = await self._client.post(url, json=payload, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code in ROTATE_STATUS_CODES and attempt < keys_count:
+                if not dadata_pool.rotate(f"HTTP {resp.status_code}"):
+                    break
+                key = dadata_pool.current()
+                headers = self._headers(key)
+                continue
+            break
+        if resp.status_code in ROTATE_STATUS_CODES:
+            reason = f"DaData ответила {resp.status_code}"
+            dadata_pool.mark_exhausted(key, reason)
+            raise QuotaExhausted(reason)
+        resp.raise_for_status()
+        return resp
 
     # ─────────────────────────  разбор ответа  ─────────────────────────
 
@@ -439,7 +466,7 @@ class DaDataSource:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Authorization": f"Token {settings.require('dadata_api_key')}",
+            "Authorization": f"Token {dadata_pool.current()}",
             "X-Secret": settings.dadata_secret_key,
         }
         try:
@@ -520,7 +547,7 @@ class DaDataSource:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Authorization": f"Token {settings.require('dadata_api_key')}",
+            "Authorization": f"Token {dadata_pool.current()}",
         }
         if settings.dadata_secret_key:
             headers["X-Secret"] = settings.dadata_secret_key

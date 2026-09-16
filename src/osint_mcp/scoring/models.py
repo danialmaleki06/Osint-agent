@@ -128,6 +128,21 @@ class PendingReview(BaseModel):
     )
 
 
+class SearchUnverifiedResult(BaseModel):
+    """Результат веб-поиска: всё в карантин, вердикт не тронут."""
+
+    inn: str
+    query: str
+    found: int = Field(description="Сколько находок вернул поиск")
+    added_to_quarantine: int = Field(
+        description="Сколько из них записано в карантин (новые)",
+    )
+    hits: list[PendingFact] = Field(
+        description="Сами находки — каждая с source_url",
+    )
+    note: str = Field(description="Как агенту показывать находки пользователю")
+
+
 class ScoreResult(BaseModel):
     """Полный результат оценки организации."""
 
