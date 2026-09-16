@@ -50,14 +50,40 @@ async def build_company_context(
         return_exceptions=True,
     )
 
-    # Реестровая карточка обязательна: без неё контекста нет
-    if isinstance(base_res, BaseException) or base_res.status != "ok" or not base_res.context:
+    # Реестровая карточка обязательна: без неё контекста нет. Но если DaData
+    # недоступна (нет ключа, лимит, сбой), карточку собирает Checko — он
+    # отдаёт те же реестровые сведения. Источники независимы: молчание
+    # одного не должно ронять проверку целиком.
+    base_ctx = None
+    base_reason = None
+    if not isinstance(base_res, BaseException) and base_res.status == "ok" and base_res.context:
+        base_ctx = base_res.context
+    else:
         if isinstance(base_res, BaseException):
-            return ContextResult(status="unavailable",
-                                 reason=f"Ошибка источника: {type(base_res).__name__}")
-        return base_res
+            base_reason = f"Ошибка источника DaData: {type(base_res).__name__}"
+        else:
+            base_reason = base_res.reason
+        fallback = await ck.get_context(inn)
+        if fallback.status == "ok" and fallback.context:
+            base_ctx = fallback.context
+            base_ctx.brand_resolved = False
+            _fallback_note = (
+                f"Базовая карточка собрана Checko (DaData недоступна: {base_reason})."
+            )
+        elif fallback.status == "ok":
+            # Оба ответили «не найдено» — DaData тоже не нашла либо её не было.
+            return ContextResult(
+                status="ok",
+                reason=(f"Организация не найдена в реестре ({base_reason or 'DaData не ответила данными'}; "
+                        f"проверка Checko: {fallback.reason})"),
+            )
+        else:
+            if isinstance(base_res, BaseException):
+                return ContextResult(status="unavailable",
+                                     reason=f"Ошибка источника: {type(base_res).__name__}")
+            return base_res
 
-    ctx = base_res.context
+    ctx = base_ctx
 
     # Рыночное наименование — необязательное обогащение
     if not isinstance(brand, BaseException) and brand.resolved:
@@ -125,9 +151,10 @@ async def build_company_context(
             ctx.former_names = former
             ctx.name_variants = name_variants(*ctx.name_variants, *former)
 
-    # Расшифровка кода деятельности: на бесплатном тарифе карточка её
-    # не содержит, поэтому берём из официального классификатора
-    if ctx.okved_code and not ctx.okved_text:
+    # Расшифровка кода деятельности: классификатор тянет через DaData.
+    # При её недоступности — локальный okved-справочник уже дал текст в
+    # fallback-карточке Checko (поле ОКВЭД.Наим), повторный вызов не нужен.
+    if ctx.okved_code and not ctx.okved_text and ctx.source == "dadata":
         ctx.okved_text = await dd.resolve_okved_text(ctx.okved_code)
 
     log.info("context_built", inn=ctx.inn, brand=ctx.brand,
@@ -137,6 +164,11 @@ async def build_company_context(
         gaps.append("Рыночное наименование не установлено. Веб-поиск будет вестись "
                     "только по юридическому наименованию, и отсутствие негативных "
                     "находок НИЧЕГО НЕ ДОКАЖЕТ — обязательно оговори это в выводах.")
+
+    try:
+        gaps.insert(0, _fallback_note)   # noqa: F821 — определена только при fallback
+    except NameError:
+        pass
 
     # Отдельное состояние на случай, когда обязательный источник ответил,
     # а все обогащающие — нет: карточка есть, но она заведомо неполна,

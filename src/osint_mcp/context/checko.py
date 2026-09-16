@@ -1238,3 +1238,88 @@ class CheckoSource:
         log.info("checko.timeline", inn=inn, former_names=len(former),
                  notable=len(notable))
         return former, notable, None
+
+    # ───────────────  резервная карточка и resolve (без DaData)  ───────────────
+
+    async def get_context(self, inn: str) -> "ContextResult":
+        """Резервная карточка организации из Checko.
+
+        Нужна, когда DaData недоступна (нет ключа, лимит, сбой): без неё
+        система отказывалась работать целиком, хотя Checko отдаёт все
+        реестровые сведения — наименование, статус, адрес, руководителя,
+        учредителей, капитал. Источник помечается 'checko', чтобы досье
+        честно показывало, откуда пришли данные.
+        """
+        from osint_mcp.context.okved import industry_terms
+        from osint_mcp.models import CompanyContext, ContextResult
+        from osint_mcp.tools.names import name_variants
+
+        endpoint = "entrepreneur" if len(inn.strip()) == 12 else "company"
+        data, failure = await self._fetch(endpoint, inn, "checko.context")
+        if failure:
+            return ContextResult(status="unavailable",
+                                 reason=failure.reason)
+        if not data or not data.get("ИНН"):
+            return ContextResult(status="ok",
+                                 reason="Организация не найдена в реестре")
+
+        legal = data.get("НаимПолн") or data.get("НаимСокр") or ""
+        short = data.get("НаимСокр")
+        okved = data.get("ОКВЭД") or {}
+        okved_code = okved.get("Код")
+        addr = data.get("ЮрАдрес") or {}
+        director = next(
+            (r for r in (data.get("Руковод") or [])
+             if (r.get("ВидДолжн") or "").find("РУКОВОДИТЕЛЬ") >= 0),
+            None,
+        ) if data.get("Руковод") else (
+            (data.get("Руковод") or [None])[0]
+        )
+
+        founders: list[str] = []
+        founder_blocks = data.get("Учред") or {}
+        for f in (founder_blocks.get("ФЛ") or []):
+            if f.get("ФИО"):
+                founders.append(f["ФИО"])
+        for f in (founder_blocks.get("РосОрг") or []) + (founder_blocks.get("ИнОрг") or []):
+            if f.get("НаимПолн") or f.get("НаимСокр"):
+                founders.append(f.get("НаимПолн") or f.get("НаимСокр"))
+
+        registered = _parse_date(data.get("ДатаРег"))
+        capital = (data.get("УстКап") or {}).get("Сумма")
+
+        ctx = CompanyContext(
+            inn=data.get("ИНН") or inn,
+            ogrn=data.get("ОГРН"),
+            name_legal=legal,
+            name_short=short,
+            status=(data.get("Статус") or {}).get("Наим"),
+            registered_at=registered,
+            address_full=addr.get("АдресРФ"),
+            city=addr.get("НасПункт"),
+            region=(data.get("Регион") or {}).get("Наим"),
+            director_fio=(director or {}).get("ФИО"),
+            director_post=(director or {}).get("НаимДолжн"),
+            founders=founders,
+            okved_code=okved_code,
+            okved_text=okved.get("Наим"),
+            capital=capital,
+            name_variants=name_variants(legal, short, data.get("НаимАнгл")),
+            industry_terms=industry_terms(okved_code),
+            brand_resolved=False,
+            source="checko",
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        log.info("context_checko_fallback", inn=ctx.inn, name=ctx.name_legal,
+                 variants=len(ctx.name_variants))
+        return ContextResult(status="ok", context=ctx)
+
+    async def resolve_inn(self, inn: str) -> "ContextResult":
+        """Резервное определение организации по ИНН/ОГРН/ОКПО через карточку.
+
+        Checko не умеет полнотекстовый поиск по названию, поэтому резервный
+        resolve работает только по идентификатору. Для имён остаётся только
+        DaData — при её недоступности агенту честно сообщается, что по
+        названию найти не выйдет, а по номеру — можно.
+        """
+        return await self.get_context(inn)

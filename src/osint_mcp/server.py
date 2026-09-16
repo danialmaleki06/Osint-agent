@@ -36,7 +36,8 @@ from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
 from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
 from osint_mcp.scoring import score_company as _score_company
-from osint_mcp.scoring.models import PendingFact, ScoreResult
+from osint_mcp.scoring.engine import load_config as _load_scoring_config
+from osint_mcp.scoring.models import PendingFact, ScoreResult, Verdict
 from osint_mcp.tools.quarantine import QuarantineStore
 from osint_mcp.tools.web_search_source import search_pending as _search_pending
 
@@ -195,6 +196,30 @@ async def resolve_company(
     дальше, — включая имя и ИНН выбранной организации. Прочти его.
     """
     result = await _source.resolve(query)
+    # Источники независимы: если DaData недоступна, а запрос — идентификатор
+    # (ИНН/ОГРН/ОКПО), организацию определяет Checko своей карточкой.
+    # По названию Checko искать не умеет — это честно сообщается в hint.
+    if result.status == "unavailable":
+        from osint_mcp.tools.inn import validate_inn as _vinn
+        probe = _vinn(query)
+        if probe.valid:
+            fallback = await _checko.get_context(probe.inn)
+            if fallback.status == "ok" and fallback.context:
+                ctx = fallback.context
+                from osint_mcp.models import Candidate, ResolveResult as _RR
+                result = _RR(
+                    query=query, status="ok", confidence="high",
+                    total_found=1,
+                    candidates=[Candidate(
+                        inn=ctx.inn, ogrn=ctx.ogrn, name=ctx.name_legal,
+                        short_name=ctx.name_short, city=ctx.city,
+                        status=ctx.status, registered_at=ctx.registered_at,
+                        director=ctx.director_fio, okved=ctx.okved_code,
+                    )],
+                    hint=(f"DaData недоступна, организация определена Checko: "
+                          f"{ctx.name_legal}, ИНН {ctx.inn}. Продолжай с этим ИНН. "
+                          f"Карточка соберётся из Checko."),
+                )
     log.info("tool_call", tool="resolve_company", query=query,
              confidence=result.confidence, found=result.total_found)
     return result
@@ -627,6 +652,36 @@ async def get_verdict(
     ledger.set_subject(inn)
     risk = await _collect_risk_facts(inn, _checko)
     context_result = await _build_context(inn, _source, _checko)
+
+    # ЗАЩИТА ОТ «ЧИСТО НЕПРОВЕРЕННОГО». Пустые факты неотличимы от чистых:
+    # если ни один источник не ответил (в т.ч. молчание из-за не заданных
+    # ключей), движок посчитал бы baseline «можно работать» по компании,
+    # которую не проверял никто. Такая оценка хуже отсутствия оценки —
+    # она выглядит достоверно. Отказываемся считать, пока источники молчат.
+    if context_result.context is None and risk.sources_ok == 0:
+        reason = (
+            "Реестровые источники недоступны"
+            + (f": {context_result.reason}" if context_result.reason else "")
+            + ". Оценка НЕ ВЫСТАВЛЕНА: ни один источник не ответил, "
+            "выдавать вердикт по непроверенной организации нельзя. "
+            "Проверьте ключи DaData/Checko в .env и доступность API."
+        )
+        log.warning("verdict_refused", inn=inn,
+                    sources_failed=risk.sources_failed,
+                    context_status=context_result.status)
+        return ScoreResult(
+            inn=inn,
+            verdict=Verdict(label="нельзя", total_score=0.0),
+            groups=[],
+            matched=[],
+            reasons=["Оценка не производилась — " + reason],
+            warnings=["Оценка НЕ ВЫСТАВЛЕНА: источники недоступны, "
+                      "организацию никто не проверял. НЕ РАБОТАЙТЕ "
+                      "с этим вердиктом как с реальной оценкой."],
+            pending=[],
+            criteria_version=_load_scoring_config().criteria_version,
+            scored_at=datetime.now(timezone.utc),
+        )
     result = _score_company(
         facts=risk.facts,
         context=context_result.context,

@@ -245,8 +245,23 @@ class DaDataSource:
         endpoint = "findById/party" if _looks_like_id(query) else "suggest/party"
         payload: dict[str, Any] = {"query": query, "count": limit}
 
+        if not settings.dadata_api_key:
+            return ResolveResult(
+                query=query, status="unavailable", confidence="none",
+                reason="Не задан DADATA_API_KEY",
+                hint=("Источник недоступен. Это НЕ означает, что компания не найдена. "
+                      "Если запрос — ИНН/ОГРН, попробуй ещё раз: сработает резервный "
+                      "определитель через Checko."),
+            )
+
         try:
             items = await self._post(endpoint, payload)
+        except RuntimeError as e:
+            return ResolveResult(
+                query=query, status="unavailable", confidence="none",
+                reason=str(e),
+                hint="Источник недоступен. Это НЕ означает, что компания не найдена.",
+            )
         except httpx.HTTPStatusError as e:
             return ResolveResult(
                 query=query, status="unavailable", confidence="none",
@@ -376,8 +391,14 @@ class DaDataSource:
             return ContextResult(status="skipped",
                                  reason=f"ИНН не прошёл проверку: {check.reason}")
 
+        if not settings.dadata_api_key:
+            return ContextResult(status="unavailable",
+                                 reason="Не задан DADATA_API_KEY")
+
         try:
             items = await self._post("findById/party", {"query": check.inn})
+        except RuntimeError as e:
+            return ContextResult(status="unavailable", reason=str(e))
         except httpx.HTTPStatusError as e:
             return ContextResult(status="unavailable",
                                  reason=f"DaData ответила {e.response.status_code}")
@@ -411,6 +432,9 @@ class DaDataSource:
         if not settings.dadata_secret_key:
             return BrandInfo(resolved=False,
                              reason="Не задан секретный ключ DaData, метод недоступен")
+        if not settings.dadata_api_key:
+            return BrandInfo(resolved=False,
+                             reason="Не задан DADATA_API_KEY, метод недоступен")
 
         headers = {
             "Content-Type": "application/json",
