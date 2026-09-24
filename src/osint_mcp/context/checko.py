@@ -770,6 +770,41 @@ class CheckoSource:
                  employees=employees, size=summary.size_category)
         return summary, None
 
+    @staticmethod
+    def _extra_okved(data: dict) -> list[str]:
+        """Дополнительные ОКВЭДы строкой «код — название».
+
+        Основной код говорит, чем компания зарегистрирована, дополнительные
+        — чем занимается фактически: появление нового кода часто означает
+        запуск нового направления. Приходят в карточке даром.
+        """
+        result: list[str] = []
+        for item in (data.get("ОКВЭДДоп") or []):
+            if not isinstance(item, dict):
+                continue
+            code, name = item.get("Код"), item.get("Наим")
+            if code and name:
+                result.append(f"{code} — {name}")
+        return result
+
+    @staticmethod
+    def _trademarks(data: dict) -> list[str]:
+        """Товарные знаки компании.
+
+        Зарегистрированный знак — подтверждение, что рыночное имя
+        используется в обороте; название знака — готовая строка для
+        коммерческого профиля. Список бывает пуст — поле опциональное.
+        """
+        result: list[str] = []
+        for item in (data.get("ТоварЗнак") or []):
+            if isinstance(item, dict):
+                mark = item.get("Наим") or item.get("Номер")
+                if mark:
+                    result.append(str(mark))
+            elif item:
+                result.append(str(item))
+        return result
+
     def _card_extras(self, card: dict | None) -> CardExtras | None:
         """Налоги, лицензии, контакты, массовость адреса — из той же карточки.
 
@@ -800,6 +835,8 @@ class CheckoSource:
             tax_paid_total=taxes.get("СумУпл"),
             tax_year=int(taxes["СведУплГод"]) if taxes.get("СведУплГод") else None,
             tax_mode=list(taxes.get("ОсобРежим") or []),
+            okved_extra=self._extra_okved(card),
+            trademarks=self._trademarks(card),
             mass_address_orgs=list(addr.get("МассАдрес") or []),
             address_unreliable=bool(addr.get("Недост")),
             licenses=licenses,

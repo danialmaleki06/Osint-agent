@@ -18,6 +18,7 @@ from osint_mcp.context.bo_nalog import BoNalogSource
 from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.dadata import DaDataSource
 from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
+from osint_mcp.context.hh import HhSource
 from osint_mcp.context.rmsp import RmspSource
 from osint_mcp.models import CompanyContext, ContextResult, TimelineEvent
 from osint_mcp.tools.country import detect_country
@@ -162,6 +163,14 @@ async def build_company_context(
         # Рыночное имя обязано попасть в варианты для поиска — иначе
         # публикации, где компанию называют только так, не найдутся
         ctx.name_variants = name_variants(*ctx.name_variants, brand.brand)
+
+    # Найм — сигнал направления: что компания ищет и куда растёт. Ищем
+    # по рыночному имени (под ним работодатель обычно и зарегистрирован
+    # на hh), при его отсутствии — по краткому юридическому. Источник
+    # бесплатен, исключений наружу не бросает: отказ приходит в reason.
+    search_name = ((ctx.brand or ctx.name_short) if ctx.brand_resolved
+                   else ctx.name_short) or ctx.name_legal
+    ctx.hiring = await HhSource().get_hiring(search_name)
 
     # Пробелы в сборе. Каждое необязательное обогащение может не состояться,
     # и тогда соответствующее поле останется пустым. Пустое поле неотличимо

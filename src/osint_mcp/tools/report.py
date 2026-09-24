@@ -12,7 +12,7 @@ collect_risk_facts и карточка опрашивают те же служб
 Разница режимов — в том, сколько собранного доходит до пользователя.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from osint_mcp.models import CompanyContext, RiskCollection
 from osint_mcp.scoring.models import ScoreResult
@@ -158,6 +158,42 @@ def _event_lines(ctx: CompanyContext) -> list[str]:
     return lines
 
 
+def _sales_lines(ctx: CompanyContext) -> list[str]:
+    """Коммерческие сигналы: чем жива компания и когда с ней говорить.
+
+    Это не риски, а окна возможностей для продаж и анализа направления:
+    вакансии показывают потребности, новые ОКВЭДы — расширение,
+    события истории — момент перестройки (смена директора часто
+    пересматривает подрядчиков). Нейтрально к вердикту, в краткий
+    отчёт не входит: ради этого просят «подробно».
+    """
+    lines: list[str] = []
+    extras = ctx.extras
+    if extras and extras.okved_extra:
+        lines.append("доп. ОКВЭДы (чем занимается фактически): "
+                     + "; ".join(extras.okved_extra[:5]))
+    if extras and extras.trademarks:
+        lines.append("товарные знаки: " + ", ".join(extras.trademarks[:5]))
+    hiring = ctx.hiring
+    if hiring is not None:
+        if hiring.open_vacancies:
+            roles = "; ".join(hiring.roles[:5])
+            more = (f" и ещё {hiring.open_vacancies - len(hiring.roles[:5])}"
+                    if hiring.open_vacancies > len(hiring.roles[:5]) else "")
+            caveat = " (совпадение по имени — уточнить принадлежность)" if hiring.found_by_name else ""
+            lines.append(f"открытые вакансии: {hiring.open_vacancies}{caveat}: {roles}{more}")
+        elif hiring.reason:
+            lines.append(f"найм не проверен: {hiring.reason}")
+        else:
+            lines.append("открытых вакансий не найдено")
+    if ctx.events:
+        fresh = [ev for ev in ctx.events
+                 if ev.event_date and ev.event_date >= date.today() - timedelta(days=365)]
+        for ev in sorted(fresh, key=lambda e: e.event_date, reverse=True)[:3]:
+            lines.append(f"окно входа — {ev.event_date.isoformat()}: {ev.event}")
+    return lines
+
+
 def _full_sections(ctx: CompanyContext | None) -> list[dict]:
     """Секции полного отчёта, которых нет в кратком."""
     if ctx is None:
@@ -172,6 +208,9 @@ def _full_sections(ctx: CompanyContext | None) -> list[dict]:
     events = _event_lines(ctx)
     if events:
         sections.append({"название": "существенные события истории", "пункты": events})
+    sales = _sales_lines(ctx)
+    if sales:
+        sections.append({"название": "коммерческие сигналы", "пункты": sales})
     return sections
 
 

@@ -246,6 +246,9 @@ async def test_dead_checko_leaves_a_trace():
         return_value=httpx.Response(503))
     respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
         return_value=httpx.Response(503))
+    # найм по hh: без мока тест уходит во внешний вызов
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
 
     res = await build_company_context("7707083893")
 
@@ -283,6 +286,8 @@ async def test_branch_count_comes_from_the_complete_source():
             "Подразд": {"Филиал": [{"КПП": str(i)} for i in range(87)],
                         "Представ": [{"КПП": "1"}]},
         }}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
 
     res = await build_company_context("7707083893")
 
@@ -307,6 +312,8 @@ async def test_branch_count_unknown_is_not_zero():
         return_value=httpx.Response(200, json={"content": []}))
     respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
         return_value=httpx.Response(200, json={"data": []}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
 
     res = await build_company_context("7707083893")
 

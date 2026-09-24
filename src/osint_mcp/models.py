@@ -199,6 +199,18 @@ class CardExtras(BaseModel):
         default_factory=list,
         description="Особые налоговые режимы (УСН, ЕСХН и прочие); пусто — обычный порядок либо нет данных",
     )
+    okved_extra: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Дополнительные ОКВЭДы строкой «код — название». Основной код — "
+            "чем компания зарегистрирована, дополнительные — чем занимается "
+            "фактически; новый код часто означает запуск нового направления"
+        ),
+    )
+    trademarks: list[str] = Field(
+        default_factory=list,
+        description="Товарные знаки компании. Непустой список — рыночное имя подтверждено в обороте",
+    )
     mass_address_orgs: list[str] = Field(
         default_factory=list,
         description=(
@@ -221,6 +233,36 @@ class CardExtras(BaseModel):
     contacts: ContactInfo | None = Field(
         default=None,
         description="Телефоны, электронная почта, сайт из карточки ЕГРЮЛ",
+    )
+
+
+class HiringInfo(BaseModel):
+    """Найм компании по данным HeadHunter.
+
+    Вакансии — самый быстрый сигнал направления компании: что ищет,
+    какие технологии использует, куда растёт. Список профессий читается
+    как список текущих потребностей — для продаж это готовый повод
+    разговора, для анализа — стек и направление развития.
+    """
+
+    open_vacancies: int = Field(
+        default=0, description="Сколько открытых вакансий найдено"
+    )
+    roles: list[str] = Field(
+        default_factory=list,
+        description="Названия вакансий. Перечень = текущие потребности компании",
+    )
+    found_by_name: bool = Field(
+        default=False,
+        description=(
+            "True — вакансии найдены поиском по имени компании: возможны "
+            "совпадения названий у разных компаний, вакансии могут быть "
+            "не той организации"
+        ),
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Почему не удалось, если open_vacancies=0 и reason заполнен",
     )
 
 
@@ -385,6 +427,14 @@ class CompanyContext(BaseModel):
             "Сведения из реестра МСП (бесплатный источник ФНС): независимое "
             "подтверждение категории масштаба. None — источник не отвечал "
             "либо организация в реестре не значится"
+        ),
+    )
+    hiring: HiringInfo | None = Field(
+        default=None,
+        description=(
+            "Найм по HeadHunter: открытые вакансии и названия. Список ролей "
+            "читается как список текущих потребностей компании. None — "
+            "источник не опрашивался либо не ответил (см. hiring.reason)"
         ),
     )
 

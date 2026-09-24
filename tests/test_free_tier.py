@@ -18,7 +18,7 @@ from osint_mcp.context.apicloud import ApiCloudSource
 from osint_mcp.context.bo_nalog import BoNalogSource, merge_financial_years
 from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
 from osint_mcp.context.rmsp import RmspSource
-from osint_mcp.models import FinancialYear
+from osint_mcp.models import CardExtras, CompanyContext, FinancialYear, HiringInfo, TimelineEvent
 
 pytestmark = pytest.mark.anyio
 
@@ -249,6 +249,9 @@ async def test_excluded_msp_record_does_not_set_category():
                "dtregistryout": "10.07.2024 00:00:00", "is_active": 0}
     respx.get("https://rmsp.nalog.ru/search-proc.json").mock(
         return_value=httpx.Response(200, json={"data": [msp_row]}))
+    # найм не входит в сценарий теста — заглушаем весь домен
+    respx.get(url__regex=r"https://api\.hh\.ru/.*").mock(
+        return_value=httpx.Response(403))
 
     result = await _build_context(BPMSOFT, _Dead(), _Dead())
     ctx = result.context
@@ -290,3 +293,88 @@ async def test_invalid_checko_key_is_not_reported_as_quota():
     assert failure is not None and failure.status == "unavailable"
     assert "не принят" in failure.reason
     assert "исчерпаны" not in failure.reason
+
+
+# ─────────────  коммерческие сигналы: ОКВЭДы, знаки, найм  ─────────────
+
+def test_extra_okved_and_trademarks_parsed():
+    """Доп. ОКВЭДы и товарные знаки вытаскиваются из карточки.
+
+    Приходят даром, но раньше отбрасывались: дополнительные коды
+    показывают фактические направления деятельности, знаки
+    подтверждают рыночное имя.
+    """
+    from osint_mcp.context.checko import CheckoSource
+
+    card = {"ОКВЭДДоп": [
+        {"Код": "62.01", "Наим": "Разработка ПО"},
+        {"Код": "70.22", "Наим": "Консультирование"},
+        {"Код": None, "Наим": "битая запись"},
+    ], "ТоварЗнак": [{"Наим": "БПМСОФТ", "Номер": "123456"}]}
+    extras = CheckoSource._card_extras(CheckoSource(), card)
+
+    assert extras.okved_extra == ["62.01 — Разработка ПО", "70.22 — Консультирование"]
+    assert extras.trademarks == ["БПМСОФТ"]
+
+
+@respx.mock
+async def test_hh_vacancies_parsed():
+    """Вакансии: число, названия, честная пометка поиска по имени."""
+    respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={
+            "found": 2, "items": [{"name": "Java-разработчик"},
+                                  {"name": "Менеджер продаж"}]}))
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("БПМСОФТ")
+
+    assert info.open_vacancies == 2
+    assert info.roles == ["Java-разработчик", "Менеджер продаж"]
+    assert info.found_by_name is True
+    assert info.reason is None
+
+
+@respx.mock
+async def test_hh_without_token_reports_honestly():
+    """403 без токена — «найм не проверен», а не «вакансий нет».
+
+    API hh отдаёт данные только зарегистрированным приложениям.
+    Молча превратить отказ в пустой список — заявить, что компания
+    не нанимает, не проверив этого.
+    """
+    respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(403))
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("БПМСОФТ")
+
+    assert info.open_vacancies == 0
+    assert info.reason and "токен" in info.reason
+
+
+def test_sales_block_in_full_report():
+    """Блок «коммерческие сигналы» собирается в полном отчёте.
+
+    Окно входа — свежее событие истории: смена директора часто
+    сопровождается пересмотром подрядчиков, продажам это главный
+    повод для звонка.
+    """
+    from datetime import timedelta
+    from osint_mcp.models import HiringInfo
+    from osint_mcp.tools.report import _full_sections
+
+    ctx = CompanyContext(
+        inn="7724744134", country="RU", name_legal="ООО Т", name_short="Т",
+        registered_at=date(2010, 1, 1),
+        extras=CardExtras(okved_extra=["62.01 — Разработка ПО"],
+                          trademarks=["БПМСОФТ"]),
+        hiring=HiringInfo(open_vacancies=2, roles=["Java-разработчик"],
+                          found_by_name=True),
+        events=[TimelineEvent(event_date=date.today() - timedelta(days=30),
+                              event="Сменён генеральный директор")],
+    )
+    sections = {s["название"]: s["пункты"] for s in _full_sections(ctx)}
+    sales = sections["коммерческие сигналы"]
+
+    assert any("62.01" in line for line in sales)
+    assert any("товарные знаки" in line for line in sales)
+    assert any("2" in line and "Java-разработчик" in line for line in sales)
+    assert any("окно входа" in line for line in sales)

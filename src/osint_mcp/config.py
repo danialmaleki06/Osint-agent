@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # квотах платных справочников.
     bo_nalog_base_url: str = "https://bo.nalog.gov.ru"
     rmsp_base_url: str = "https://rmsp.nalog.ru"
+    hh_base_url: str = "https://api.hh.ru"
+    # Бесплатный токен приложения dev.hh.ru: без него API вакансий
+    # отвечает 403. Пусто — источник честно помечается недоступным.
+    hh_app_token: str = Field(
+        default="", description="Токен приложения HeadHunter для поиска вакансий"
+    )
     egrul_base_url: str = "https://egrul.nalog.ru"
 
     # ── резервный эшелон: агрегатор api-cloud.ru ─────────────────────
