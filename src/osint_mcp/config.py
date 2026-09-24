@@ -54,6 +54,24 @@ class Settings(BaseSettings):
     dadata_stat_url: str = "https://dadata.ru/api/v2/stat/daily"
     checko_base_url: str = "https://api.checko.ru/v2"
 
+    # ── бесплатные официальные источники (без ключей и квот) ──────────
+    # ГИР БО — бухгалтерская отчётность ФНС; rmsp — реестр субъектов МСП;
+    # egrul — сведения ЕГРЮЛ напрямую. Работают без ключей, поэтому
+    # финансы и подтверждение масштаба доступны даже при исчерпанных
+    # квотах платных справочников.
+    bo_nalog_base_url: str = "https://bo.nalog.gov.ru"
+    rmsp_base_url: str = "https://rmsp.nalog.ru"
+    egrul_base_url: str = "https://egrul.nalog.ru"
+
+    # ── резервный эшелон: агрегатор api-cloud.ru ─────────────────────
+    # Подключается, когда платный канал по судам или приставам молчит.
+    # Бесплатный тариф — около 200 запросов в месяц, поэтому резерв
+    # дёргается только при реальном отказе прямого источника.
+    apicloud_base_url: str = "https://api-cloud.ru/api"
+    apicloud_key: str = Field(
+        default="", description="Персональный ключ api-cloud.ru (резервные источники)"
+    )
+
     request_timeout: float = Field(default=8.0, description="Таймаут запроса, секунды")
     cache_ttl_hours: int = Field(default=24, description="Срок жизни кэша реестровых данных")
 

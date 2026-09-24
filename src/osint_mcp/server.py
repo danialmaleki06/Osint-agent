@@ -34,6 +34,8 @@ from osint_mcp.models import (
 from osint_mcp.tools.context_builder import build_company_context as _build_context
 from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
+from osint_mcp.tools.report import build_batch_entry as _build_batch_entry
+from osint_mcp.tools.report import build_report as _build_report
 from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
 from osint_mcp.scoring import score_company as _score_company
 from osint_mcp.scoring.engine import load_config as _load_scoring_config
@@ -66,7 +68,8 @@ mcp = MCPServer(SERVER_NAME, version=VERSION)
 
 TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_context", "collect_risk_facts", "check_affiliations",
-         "check_coverage", "get_verdict", "search_unverified",
+         "check_coverage", "get_company_report", "check_companies_batch",
+         "get_verdict", "search_unverified",
          "review_pending"]
 
 _source = DaDataSource()
@@ -375,9 +378,11 @@ async def check_affiliations(
        пакет в 78,8 процента — юридическое лицо.
        ДЕЛАЙ при непустом списке: назови владельца и его долю (поле via)
        ПЕРЕД тем, как перечислять совладельцев-физлиц.
-       ЕСЛИ ДОЛЯ БОЛЬШЕ ПОЛОВИНЫ: предложи пользователю проверить этого
-       владельца отдельным вызовом — его трудности становятся трудностями
-       проверяемой компании.
+       При deep=true владелец УЖЕ проверен по полной программе — суды,
+       приставы, надзор — независимо от наличия отметок: трудности
+       владельца это трудности компании. Результат смотри в его
+       deep_summary, отдельный вызов не нужен. Если deep_summary
+       содержит «НЕ ПРОВЕРЕНО» — скажи об этом, это не «чисто».
        ЕСЛИ ПРОМОЛЧИШЬ: раздел о собственниках опишет миноритариев
        и умолчит о том, кто на самом деле управляет компанией.
 
@@ -593,6 +598,208 @@ def check_coverage(
 
 
 @mcp.tool()
+async def get_company_report(
+    inn: Annotated[
+        str,
+        Field(
+            description="Подтверждённый ИНН организации, 10 или 12 цифр",
+            examples=["7724744134"],
+        ),
+    ],
+    detail: Annotated[
+        str,
+        Field(
+            description=(
+                'Объём отчёта: "brief" — карточка + вердикт, '
+                '"full" — всё собранное, включая финансы по годам, '
+                "налоги, лицензии, события истории"
+            ),
+            examples=["brief", "full"],
+        ),
+    ] = "brief",
+) -> dict:
+    """Отчёт по организации, объём зависит от запроса пользователя.
+
+    КОГДА ВЫЗЫВАТЬ: пользователь просит «проверь компанию», «расскажи
+    про контрагента» — без уточнения, какую именно часть. Один вызов
+    заменяет цепочку get_company_context → collect_risk_facts →
+    get_verdict, экономя прогоны модели.
+
+    ВЫБОР ОБЪЁМА — по словам пользователя:
+
+    detail = "brief" — ПО УМОЛЧАНИЮ.
+      Пользователь спросил кратко, вскользь, «в двух словах», «просто
+      проверь», или вам нужен только вердикт.
+      Возвращает: карточка (наименование, статус, деятельность, масштаб,
+      руководитель), вердикт с баллом, warnings, риски в двух-трёх
+      строках, что не собралось.
+
+    detail = "full" — пользователь просил ПОДРОБНО.
+      Ключевые слова: «подробно», «полностью», «максимально», «всё что
+      есть», «детально», «глубокая проверка», «досье». Если пользователь
+      дал хотя бы одно такое слово — берите full, НЕ brief.
+      Возвращает всё из brief плюс: финансы по годам с динамикой и
+      ссылками на отчётности ФНС, налоги и недоимку, лицензии, контакты,
+      массовый адрес, существенные события истории (смены руководителя
+      и учредителей), статусы всех источников, карантинные находки.
+
+    КАК ОТВЕЧАТЬ:
+      1. Начните с вердикта и его оснований (score.reasons).
+      2. Warnings доведите дословно ПРИ ЛЮБОЙ оценке.
+      3. Поле «что_не_собралось» перескажите рядом с выводом: пустые
+         поля там означают «не смогли получить», а не «сведений нет».
+      4. В full-режиме каждую цифру финансов подкрепляйте ссылкой на
+         отчётность ФНС из блока «финансы и налоги».
+      5. pending — только в full: покажите в блоке «не проверено,
+         нашлось в открытом виде», не превращая в вывод.
+
+    Оценку считает движок по scoring.yaml — пересказывайте, а не
+    пересчитывайте.
+    """
+    ledger.set_subject(inn)
+    context_result = await _build_context(inn, _source, _checko)
+    risk = await _collect_risk_facts(
+        inn, _checko,
+        name=(context_result.context.name_short or context_result.context.name_legal
+              if context_result.context else None),
+    )
+
+    # Та же защита, что в get_verdict: молчание всех источников —
+    # не «чистая проверка», и вердиктом это выдавать нельзя.
+    if context_result.context is None and risk.sources_ok == 0:
+        return {
+            "inn": inn,
+            "вердикт": "нельзя",
+            "оценка_не_выставлена": (
+                "Реестровые источники недоступны"
+                + (f": {context_result.reason}" if context_result.reason else "")
+                + ". Оценка НЕ ВЫСТАВЛЕНА: ни один источник не ответил. "
+                "Проверьте ключи DaData/Checko в .env и доступность API."
+            ),
+        }
+
+    score = _score_company(
+        facts=risk.facts + _quarantine.confirmed_facts(inn),
+        context=context_result.context,
+    )
+    detail_norm = detail.strip().lower()
+    if detail_norm not in ("brief", "full"):
+        detail_norm = "brief"
+    result = _build_report(detail_norm, context_result, risk, score)
+    log.info("tool_call", tool="get_company_report", inn=inn,
+             detail=detail_norm, verdict=score.verdict.label)
+    return result
+
+
+@mcp.tool()
+async def check_companies_batch(
+    inns: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Список ИНН организаций, 10 цифр каждый. "
+                'Например: ["7707083893", "7724744134"]'
+            ),
+            examples=[["7707083893", "7724744134"]],
+        ),
+    ],
+) -> dict:
+    """Пакетная проверка: несколько ИНН одним вызовом, кратко по каждому.
+
+    КОГДА ВЫЗЫВАТЬ: пользователь дал список компаний и просит проверить
+    их все. НЕ вызывайте его по одному ИНН — это тот же расход квоты,
+    но с лишними прогонами модели.
+
+    ЧТО ВОЗВРАЩАЕТ: по каждой организации краткая строка — вердикт,
+    наименование, статус, главные риски. Подробности по конкретной
+    компании — последующим вызовом инструмента подробного отчёта
+    с нужным detail; сервер не кэширует между вызовами, поэтому
+    повторный прогон по той же компании снова расходует квоту.
+
+    ОГРАНИЧЕНИЯ:
+      * Максимум 20 ИНН за вызов — больше список не примет.
+      * Расход квоты линейный: примерно 12 обращений на организацию.
+        Двадцать компаний — около 240 обращений; на бесплатном тарифе
+        это исчерпает сутки. Предупредите пользователя О ДОЦЕНКЕ квоты
+        до вызова, если список большой.
+      * ИНН с ошибкой контрольной суммы не отбраковываются заранее:
+        по ним вернётся результат со статусом skipped.
+
+    КАК ОТВЕЧАТЬ: таблицей или списком в порядке входного списка.
+    Вердикт + одна строка сути. Warnings из строк не выбрасывайте.
+    Поле «что_не_собралось» означает неполноту — не выдавайте её
+    за «чисто».
+    """
+    # Дедупликация с сохранением порядка: один ИНН дважды — одна проверка.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for raw in inns:
+        cleaned = raw.strip().replace(" ", "").replace("-", "")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique.append(cleaned)
+
+    if not unique:
+        return {"error": "Список ИНН пуст"}
+    if len(unique) > 20:
+        return {
+            "error": (
+                f"В списке {len(unique)} ИНН, максимум за вызов — 20. "
+                "Разбейте на несколько вызовов и предупредите пользователя "
+                "о расходе квоты"
+            )
+        }
+
+    entries: list[dict] = []
+    for inn in unique:
+        ledger.set_subject(inn)
+        try:
+            context_result = await _build_context(inn, _source, _checko)
+            risk = await _collect_risk_facts(inn, _checko)
+        except Exception as e:                                  # noqa: BLE001
+            log.warning("batch_item_failed", inn=inn, error=type(e).__name__)
+            entries.append({
+                "inn": inn,
+                "вердикт": "нельзя",
+                "оценка_не_выставлена": (
+                    f"Проверка не состоялась: внутренняя ошибка {type(e).__name__}. "
+                    "Это НЕ оценка компании — повторите по отдельности."
+                ),
+            })
+            continue
+
+        # Источники молчали — честно сказать, а не выдать «нельзя».
+        if context_result.context is None and risk.sources_ok == 0:
+            entries.append({
+                "inn": inn,
+                "вердикт": None,
+                "оценка_не_выставлена": (
+                    "Источники недоступны"
+                    + (f": {context_result.reason}" if context_result.reason else "")
+                    + ". Оценка не производилась."
+                ),
+            })
+            continue
+
+        score = _score_company(
+            facts=risk.facts + _quarantine.confirmed_facts(inn),
+            context=context_result.context,
+        )
+        entries.append(_build_batch_entry(context_result, risk, score))
+        log.info("batch_item", inn=inn, verdict=score.verdict.label)
+
+    return {
+        "запрошено": len(inns),
+        "проверено": len(entries),
+        "результаты": entries,
+        "note": (
+            "Ответ краткий по замыслу. Для подробного разбора конкретной "
+            "компании вызовите get_company_report с detail=full"
+        ),
+    }
+
+
+@mcp.tool()
 async def get_verdict(
     inn: Annotated[
         str,
@@ -659,20 +866,34 @@ async def get_verdict(
     не может быть выше Y из-за Z».
     """
     ledger.set_subject(inn)
-    risk = await _collect_risk_facts(inn, _checko)
+    # Карточка собирается первой: наименование из неё нужно резервному
+    # источнику банкротств, который ищет по строке, а не по ИНН.
     context_result = await _build_context(inn, _source, _checko)
+    risk = await _collect_risk_facts(
+        inn, _checko,
+        name=(context_result.context.name_short or context_result.context.name_legal
+              if context_result.context else None),
+    )
 
     # ЗАЩИТА ОТ «ЧИСТО НЕПРОВЕРЕННОГО». Пустые факты неотличимы от чистых:
     # если ни один источник не ответил (в т.ч. молчание из-за не заданных
     # ключей), движок посчитал бы baseline «можно работать» по компании,
     # которую не проверял никто. Такая оценка хуже отсутствия оценки —
     # она выглядит достоверно. Отказываемся считать, пока источники молчат.
-    if context_result.context is None and risk.sources_ok == 0:
+    #
+    # Живой прогон поймал дыру в этой защите: раньше требовалось ещё и
+    # отсутствие карточки. Но карточка из ЕГРЮЛ (последний эшелон) ничего
+    # не проверяет: суды, приставы, надзор остались непроверенными, а
+    # вердикт считался по единственному уцелевшему критерию — возрасту —
+    # и выглядел как «надёжный, 75». Карточка есть, проверки нет —
+    # оценивать нельзя точно так же.
+    if risk.sources_ok == 0:
         reason = (
             "Реестровые источники недоступны"
             + (f": {context_result.reason}" if context_result.reason else "")
-            + ". Оценка НЕ ВЫСТАВЛЕНА: ни один источник не ответил, "
+            + ". Оценка НЕ ВЫСТАВЛЕНА: ни один источник рисков не ответил, "
             "выдавать вердикт по непроверенной организации нельзя. "
+            "Карточка компании сама по себе проверкой рисков не является. "
             "Проверьте ключи DaData/Checko в .env и доступность API."
         )
         log.warning("verdict_refused", inn=inn,

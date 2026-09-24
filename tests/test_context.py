@@ -240,6 +240,12 @@ async def test_dead_checko_leaves_a_trace():
     respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
         return_value=httpx.Response(403, json={
             "meta": {"message": "Превышен суточный лимит запросов"}}))
+    # бесплатный эшелон тоже должен быть замокан: фолбэк финансов на ГИР БО
+    # вызывается при отказе платного, и без моков тест упадёт на внешнем вызове
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(503))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(503))
 
     res = await build_company_context("7707083893")
 
@@ -295,6 +301,12 @@ async def test_branch_count_unknown_is_not_zero():
         return_value=httpx.Response(200, json={"suggestions": []}))
     respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
         return_value=httpx.Response(503))
+    # бесплатный эшелон замокан: ГИР БО отвечает, но компания в ресурсе
+    # не значится — фолбэк отрабатывает и не влияет наbranches=None
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(200, json={"content": []}))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(200, json={"data": []}))
 
     res = await build_company_context("7707083893")
 

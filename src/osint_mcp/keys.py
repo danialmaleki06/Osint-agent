@@ -54,25 +54,47 @@ class KeyPool:
     # ─────────────────────────  чтение ключей  ─────────────────────────
 
     def keys(self) -> list[str]:
-        """Список ключей сейчас: без пустых и повторов, порядок задан .env."""
+        """Список ключей сейчас: без пустых, повторов и заглушек.
+
+        Заглушки отсекаются потому, что иначе они проходят весь путь
+        боевого ключа: кириллический плейсхолдер из примера конфига
+        ронял DaData на кодировании заголовка (UnicodeEncodeError),
+        латинский — доходил до сервиса и возвращал 401, который пул
+        честно докладывал как «ключи исчерпаны». Живой прогон через
+        agента поймал оба варианта.
+        """
         seen: set[str] = set()
         result: list[str] = []
         for raw in self._getter():
             key = (raw or "").strip()
-            if key and key not in seen:
-                seen.add(key)
-                result.append(key)
+            if not key or key in seen:
+                continue
+            # Заглушка: не-ASCII символы (пример «<впиши ключ>») либо
+            # очевидный шаблон из примера конфигурации.
+            if not key.isascii() or key.startswith(("<", "{")) or "..." in key:
+                self._log.warning("key_placeholder_dropped", service=self._service,
+                                  key=f"{key[:6]}…")
+                continue
+            seen.add(key)
+            result.append(key)
         return result
 
     def has_keys(self) -> bool:
         return bool(self.keys())
 
     def current(self) -> str:
-        """Ключ для следующего запроса. Без ключей — внятная ошибка."""
+        """Ключ для следующего запроса. Без ключей — внятная ошибка.
+
+        Исключение — QuotaExhausted, а не голый RuntimeError: его ловят
+        обработчики источников как штатное молчание (status=unavailable
+        с причиной), и инструмент остаётся жив вместо падения целиком.
+        Живой прогон поймал обратное: при не заданных ключах агенты
+        получали «Error executing tool» без объяснения.
+        """
         keys = self.keys()
         if not keys:
             name = self._service.upper()
-            raise RuntimeError(
+            raise QuotaExhausted(
                 f"Не задан ключ {name}: заполните {name}_API_KEY "
                 f"или {name}_API_KEYS в .env."
             )

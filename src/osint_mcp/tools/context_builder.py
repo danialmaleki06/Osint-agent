@@ -10,16 +10,58 @@
 """
 
 import asyncio
+from datetime import date, datetime
 
 import structlog
 
+from osint_mcp.context.bo_nalog import BoNalogSource
 from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.dadata import DaDataSource
-from osint_mcp.models import ContextResult
+from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
+from osint_mcp.context.rmsp import RmspSource
+from osint_mcp.models import CompanyContext, ContextResult, TimelineEvent
 from osint_mcp.tools.country import detect_country
 from osint_mcp.tools.names import name_variants
 
 log = structlog.get_logger()
+
+
+def _context_from_egrul(inn: str, row: dict) -> CompanyContext:
+    """Минимальная карточка из краткой выдачи сервиса ЕГРЮЛ.
+
+    Последний эшелон, когда не ответили ни DaData, ни Checko: наименование,
+    руководитель и дата регистрации есть, всё остальное остаётся пустым —
+    и об этом честно говорит reason сборки.
+    """
+    brief = brief_from_egrul(row)
+    return CompanyContext(
+        inn=inn,
+        ogrn=brief["ogrn"],
+        name_legal=brief["name_legal"] or inn,
+        name_short=brief["name_short"],
+        registered_at=brief["registered_at"],
+        director_fio=brief["director_fio"],
+        director_post=brief["director_post"],
+        region=brief["region"],
+        brand_resolved=False,
+        source="egrul",
+    )
+
+
+def _parse_event_date(value) -> "date | None":
+    """Дата события из источника: ISO-строка либо None.
+
+    Строка, не разобравшаяся в дату, дату не обнуляет — событие ценнее
+    своей неточности.
+    """
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
 
 async def build_company_context(
@@ -42,11 +84,14 @@ async def build_company_context(
     if guess.country == "unknown":
         return ContextResult(status="skipped", reason=guess.note)
 
-    base_res, brand, finances, history = await asyncio.gather(
+    base_res, brand, finances, history, msp_res = await asyncio.gather(
         dd.get_context(inn),
         dd.get_brand(inn),
         ck.get_finances(inn),
         ck.get_name_history(inn),
+        # Реестр МСП — бесплатный источник ФНС: квот платных справочников
+        # не расходует, опрашивается всегда
+        RmspSource().get_msp(inn),
         return_exceptions=True,
     )
 
@@ -70,6 +115,25 @@ async def build_company_context(
             _fallback_note = (
                 f"Базовая карточка собрана Checko (DaData недоступна: {base_reason})."
             )
+        elif fallback.status == "unavailable":
+            # Третий эшелон: сервис ЕГРЮЛ напрямую. Данных меньше, но для
+            # краткого отчёта и пакета хватает, а проверка не срывается
+            # из-за исчерпанных квот двух платных справочников.
+            row, egrul_failure = await EgrulSource().get_card(inn)
+            if row:
+                base_ctx = _context_from_egrul(inn, row)
+                base_ctx.brand_resolved = False
+                _fallback_note = (
+                    f"Базовая карточка собрана напрямую из сервиса ЕГРЮЛ: "
+                    f"DaData недоступна ({base_reason}), Checko недоступен "
+                    f"({fallback.reason}). Данных в карточке минимум — "
+                    f"масштаб, финансы и связи НЕ ПРОВЕРЕНЫ."
+                )
+            elif fallback.status == "unavailable":
+                base_reason = (
+                    f"DaData: {base_reason}; Checko: {fallback.reason}; "
+                    f"ЕГРЮЛ: {egrul_failure}"
+                )
         elif fallback.status == "ok":
             # Оба ответили «не найдено» — DaData тоже не нашла либо её не было.
             return ContextResult(
@@ -91,6 +155,10 @@ async def build_company_context(
         ctx.brand = brand.brand
         ctx.brand_domain = brand.domain
         ctx.brand_summary = brand.summary
+        # Официальные аккаунты идут придатком к рыночному имени: тем же
+        # платным вызовом, выбрасывать их — выбрасывать оплаченное.
+        if brand.social_links:
+            ctx.social_links = brand.social_links
         # Рыночное имя обязано попасть в варианты для поиска — иначе
         # публикации, где компанию называют только так, не найдутся
         ctx.name_variants = name_variants(*ctx.name_variants, brand.brand)
@@ -125,10 +193,45 @@ async def build_company_context(
             ctx.representative_offices = summary.representative_offices
             if summary.years:
                 ctx.revenue_latest = summary.years[0].revenue
+            # Финансовая история целиком: оценивать устойчивость по одному
+            # году нельзя — падение выручки и уход в убыток видны только
+            # в динамике.
+            ctx.fin_history = summary.years
+            ctx.extras = summary.extras
             # Бесплатный тариф справочника капитал не отдаёт — берём его из
             # карточки второго источника
             if summary.capital is not None and ctx.capital is None:
                 ctx.capital = summary.capital
+        elif not isinstance(finances, BaseException):
+            # Финансы из платного справочника не получены — переходим на
+            # ГИР БО: бесплатный официальный ресурс ФНС, ключей не требует.
+            # Динамика выручки и активов спасена даже при исчерпанной квоте.
+            try:
+                bo_years, bo_failure = await BoNalogSource().get_finances(inn)
+            except Exception as e:                              # noqa: BLE001
+                # Фолбэк не может быть важнее карточки: неожиданная ошибка
+                # бесплатного источника не роняет собранный контекст
+                bo_years, bo_failure = None, f"ошибка обращения: {type(e).__name__}"
+            if bo_years:
+                ctx.fin_history = bo_years
+                if bo_years[0].revenue is not None:
+                    ctx.revenue_latest = bo_years[0].revenue
+                # Масштаб остаётся unknown: без численности категории МСП
+                # по выручке одной мы не присваиваем — это делает скоринг
+                # по своему правилу, если решит иначе.
+                gaps.append(
+                    "Финансовая история собрана из ГИР БО (бесплатный ресурс "
+                    "ФНС): выручка и активы по годам есть, прибыль и численность "
+                    f"НЕ УСТАНОВЛЕНЫ ({finances_failure})."
+                )
+            else:
+                gaps.append(
+                    f"Масштаб и финансы НЕ УСТАНОВЛЕНЫ: {finances_failure}. "
+                    f"ГИР БО тоже не ответил: {bo_failure}. Поля size_category, "
+                    f"employees, revenue_latest и capital пусты ПОТОМУ ЧТО "
+                    f"проверка не состоялась, а не потому что сведений нет. "
+                    f"Не делай выводов о размере компании."
+                )
 
     # Прежние наименования обязаны попасть в варианты для поиска: организация
     # могла сменить название, и публикации о ней выходили под старым
@@ -139,7 +242,7 @@ async def build_company_context(
             f"что организация не переименовывалась."
         )
     else:
-        former, _, history_failure = history
+        former, notable, history_failure = history
         if history_failure:
             gaps.append(
                 f"Прежние наименования НЕ ПРОВЕРЕНЫ: {history_failure}. "
@@ -150,6 +253,52 @@ async def build_company_context(
         if former:
             ctx.former_names = former
             ctx.name_variants = name_variants(*ctx.name_variants, *former)
+        # Существенные события истории: смены руководителя, учредителей,
+        # адреса, реорганизация. Раньше отбрасывались, а частая перетасовка
+        # руководства — классический признак проблемы.
+        ctx.events = [
+            TimelineEvent(
+                event_date=_parse_event_date(rec.get("date")),
+                event=rec.get("event") or "",
+            )
+            for rec in notable or []
+            if rec.get("event")
+        ]
+
+    # Реестр МСП: бесплатное независимое подтверждение масштаба. None
+    # означает «не значится» — для крупного бизнеса это норма, для малого
+    # странность, повод перепроверить. Отказ источника — пробел в сборе.
+    if isinstance(msp_res, BaseException):
+        gaps.append(
+            f"Реестр МСП НЕ ПРОВЕРЕН: ошибка источника ({type(msp_res).__name__})."
+        )
+    else:
+        msp, msp_failure = msp_res
+        if msp is not None:
+            ctx.msp = msp
+            if msp.category and ctx.size_category == "unknown":
+                # Категорию реестра можно брать только у действующего
+                # субъекта. Живой прогон поймал обратное: компания,
+                # исключённая из МСП в 2024-м (переросла реестр: 386
+                # сотрудников), приходила как «micro» — реестр хранит
+                # историческую запись целиком. Численность при этом
+                # пригодна и после исключения: это факт, а не статус.
+                if msp.is_active:
+                    ctx.size_category = msp.category
+                    if msp.employees is not None and ctx.employees is None:
+                        ctx.employees = msp.employees
+                else:
+                    if msp.employees is not None and ctx.employees is None:
+                        ctx.employees = msp.employees
+                    gaps.append(
+                        "Организация ИСКЛЮЧЕНА из реестра МСП "
+                        f"{(msp.excluded_at.isoformat() if msp.excluded_at else 'дата неизвестна')} — "
+                        "её категория в реестре устарела и не использована. "
+                        "Масштаб оценивай по выручке и численности из финансовой "
+                        "истории, а не по size_category."
+                    )
+        elif msp_failure:
+            gaps.append(f"Реестр МСП НЕ ПРОВЕРЕН: {msp_failure}.")
 
     # Расшифровка кода деятельности: классификатор тянет через DaData.
     # При её недоступности — локальный okved-справочник уже дал текст в

@@ -34,12 +34,26 @@ MEANING: dict[tuple[str, str], str] = {
     ("checko", "inspections"): "надзорные проверки",
     ("checko", "contracts"): "государственные и регулируемые контракты",
     ("checko", "person"): "сведения о руководителях и учредителях",
+    ("bo_nalog", "request"): "финансовая отчётность из ГИР БО (бесплатный ресурс ФНС)",
+    ("rmsp", "request"): "реестр субъектов МСП (бесплатный источник ФНС)",
+    ("egrul", "card"): "краткая карточка из сервиса ЕГРЮЛ (резерв)",
+    ("apicloud", "fssp.php"): "исполнительные производства через резервный агрегатор",
+    ("apicloud", "bankrot.php"): "сообщения о банкротстве через резервный агрегатор",
+    ("apicloud", "kad_arbitr.php"): "арбитражные дела через резервный агрегатор",
 }
 
 # Направления, которые система умеет, но запускает только по требованию.
 # Их отсутствие — не отказ источника, а незапущенная проверка.
 ON_DEMAND = {
     ("checko", "person"): "связи через руководителей и учредителей",
+}
+
+# Направления, которые опрашиваются бесплатно и всегда: их отсутствие
+# в журнале — не отказ, а сбой бесплатного источника либо причина,
+# по которой проверка не доходила до них.
+FREE_ALWAYS = {
+    ("bo_nalog", "request"): "финансовая история из ГИР БО",
+    ("rmsp", "request"): "реестр МСП: независимое подтверждение масштаба",
 }
 
 # Направления, которых в системе пока нет вовсе. Перечисляются явно,
@@ -125,6 +139,13 @@ def build_coverage(inn: str) -> CoverageReport:
                 what=label,
                 kind="not_requested",
                 reason="проверка не запускалась — вызовите check_affiliations",
+            ))
+    for key, label in FREE_ALWAYS.items():
+        if key not in succeeded and key not in failures:
+            gaps.append(DataGap(
+                what=label,
+                kind="not_requested",
+                reason="бесплатный источник не опрашивался в этой сессии",
             ))
     for what, why in NOT_IMPLEMENTED:
         gaps.append(DataGap(what=what, kind="not_implemented", reason=why))

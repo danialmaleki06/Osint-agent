@@ -398,3 +398,57 @@ async def test_capital_is_taken_from_card():
 
     assert err is None
     assert summary.capital == 20000     # фактическое значение из карточки
+
+
+# ───────────────────  детали карточки: налоги, лицензии, контакты  ───────────────────
+
+@respx.mock
+async def test_card_extras_are_parsed():
+    """Налоги, лицензии, контакты и массовость адреса приходят в той же карточке."""
+    _mock("finances", "checko_finances_bpmsoft.json")
+    _mock("company", "checko_company_bpmsoft.json")
+
+    summary, err = await CheckoSource().get_finances(BPMSOFT)
+
+    assert err is None
+    extras = summary.extras
+    assert extras is not None
+    assert extras.tax_debt is None          # в фикстуре недоимки нет — поле null
+    assert extras.tax_paid_total == 128672238.81
+    assert extras.tax_year == 2025
+    assert len(extras.licenses) == 2        # две лицензии ФСТЭК
+    assert extras.licenses[0].issuer.startswith("ФЕДЕРАЛЬНАЯ СЛУЖБА")
+    assert extras.contacts.website == "http://cardsmile.ru"
+    assert "+74952873257" in extras.contacts.phones
+    assert len(extras.mass_address_orgs) == 4   # четыре ОГРН по тому же адресу
+    assert extras.address_unreliable is False
+
+
+@respx.mock
+async def test_fin_history_carries_report_urls():
+    """Ссылки bo.nalog.gov.ru привязываются к годам финансовой истории."""
+    _mock("finances", "checko_finances_bpmsoft.json")
+    _mock("company", "checko_company_bpmsoft.json")
+
+    summary, err = await CheckoSource().get_finances(BPMSOFT)
+
+    assert err is None
+    assert summary.years, "финансовая история пуста"
+    with_urls = [y for y in summary.years if y.report_url]
+    assert with_urls, "отчётности ФНС не привязались к годам"
+    assert all("bo.nalog.gov.ru" in y.report_url for y in with_urls)
+    # Год с отчётностью, которого нет в выборке пяти лет, не создаёт год сам по себе
+    assert all(y.year in {fy.year for fy in summary.years} for y in with_urls)
+
+
+@respx.mock
+async def test_extras_are_none_when_card_silent():
+    """Карточка не ответила — extras None, а не выдуманные нули."""
+    _mock("finances", "checko_finances_bpmsoft.json")
+    respx.get(f"{settings.checko_base_url}/company").mock(
+        return_value=httpx.Response(503))
+
+    summary, err = await CheckoSource().get_finances(BPMSOFT)
+
+    assert err is None
+    assert summary.extras is None

@@ -587,3 +587,123 @@ async def test_foreign_identifier_does_not_reach_the_api():
     assert not route.called, "запрос ушёл в источник, которого по стране нет"
     assert graph is None
     assert "НЕ ПРОВОДИЛАСЬ" in res.reason
+
+
+# ─────────────────  слой 4б: владельцы без отметок  ─────────────────
+
+def _mock_deep_endpoints(*, cases: dict, enforcements: dict,
+                         inspections: dict) -> None:
+    respx.get(f"{settings.checko_base_url}/legal-cases").mock(
+        return_value=httpx.Response(200, json=_wrap(cases)))
+    respx.get(f"{settings.checko_base_url}/enforcements").mock(
+        return_value=httpx.Response(200, json=_wrap(enforcements)))
+    respx.get(f"{settings.checko_base_url}/inspections").mock(
+        return_value=httpx.Response(200, json=_wrap(inspections)))
+
+
+@respx.mock
+async def test_clean_owner_gets_deep_check():
+    """Владелец-организация без отметок тоже проверяется глубоко.
+
+    Трудности владельца — это трудности компании: контрольный пакет
+    в недоверенных руках, вывод активов через родственное юрлицо.
+    Отметки и мёртвый статус этого не ловили — «чистая витрина»
+    с тяжёлыми исками проходила как благополучная.
+    """
+    _mock_cards(
+        _blank(Учред={"РосОрг": [{"ИНН": "7700000040", "ОГРН": "40",
+                                  "НаимСокр": 'ООО "Владелец"',
+                                  "Статус": {"Наим": "Действует"},
+                                  "Доля": {"Процент": 100}}]}),
+        default=_blank(ИНН="7700000040", Статус={"Наим": "Действует"}),
+    )
+    _mock_deep_endpoints(
+        cases={"Записи": [{"Номер": "А40-9/2024", "Дата": "2024-02-01",
+                           "СуммИск": 14_000_000,
+                           "Ответ": [{"ИНН": "7700000040"}], "Ист": [],
+                           "Суд": "АС Москвы"}],
+               "ЗапВсего": 1, "СтрВсего": 1},
+        enforcements={"Записи": [], "ОбщКолич": 0},
+        inspections={"Записи": [], "ЗапВсего": 0, "СтрВсего": 1},
+    )
+
+    graph, _ = await CheckoSource().check_affiliations(BPMSOFT, deep=True)
+
+    rc = next(r for r in graph.related_companies if r.inn == "7700000040")
+    assert rc.deep_summary and "ответчик" in rc.deep_summary
+    assert rc.suspicious is True, "иски против владельца не подняли флаг"
+
+
+@respx.mock
+async def test_owner_neutral_activity_is_not_suspicious():
+    """Владелец сам взыскивает долги — это работа, а не риск.
+
+    Истец по делам и «судебных дел нет» не должны делать владельца
+    подозрительным: иначе почти любой владелец с нормально идущим
+    бизнесом краснел бы зря.
+    """
+    _mock_cards(
+        _blank(Учред={"РосОрг": [{"ИНН": "7700000041", "ОГРН": "41",
+                                  "НаимСокр": 'ООО "Спокойный"',
+                                  "Статус": {"Наим": "Действует"}}]}),
+        default=_blank(ИНН="7700000041", Статус={"Наим": "Действует"}),
+    )
+    _mock_deep_endpoints(
+        cases={"Записи": [{"Номер": "А40-2/2024", "Дата": "2024-01-01",
+                           "СуммИск": 900_000,
+                           "Ответ": [], "Ист": [{"ИНН": "7700000041"}],
+                           "Суд": "АС Москвы"}],
+               "ЗапВсего": 1, "СтрВсего": 1},
+        enforcements={"Записи": [], "ОбщКолич": 0},
+        inspections={"Записи": [], "ЗапВсего": 0, "СтрВсего": 1},
+    )
+
+    graph, _ = await CheckoSource().check_affiliations(BPMSOFT, deep=True)
+
+    rc = next(r for r in graph.related_companies if r.inn == "7700000041")
+    assert rc.suspicious is False
+    assert rc.deep_summary and "истец" in rc.deep_summary
+
+
+@respx.mock
+async def test_owner_unchecked_direction_is_declared():
+    """Отказ приставов по владельцу не должен читаться как «долгов нет»."""
+    _mock_cards(
+        _blank(Учред={"РосОрг": [{"ИНН": "7700000042", "ОГРН": "42",
+                                  "НаимСокр": 'ООО "Тихий"',
+                                  "Статус": {"Наим": "Действует"}}]}),
+        default=_blank(ИНН="7700000042", Статус={"Наим": "Действует"}),
+    )
+    respx.get(f"{settings.checko_base_url}/legal-cases").mock(
+        return_value=httpx.Response(200, json=_wrap(
+            {"Записи": [], "ЗапВсего": 0, "СтрВсего": 1})))
+    respx.get(f"{settings.checko_base_url}/enforcements").mock(
+        return_value=httpx.Response(503))
+    respx.get(f"{settings.checko_base_url}/inspections").mock(
+        return_value=httpx.Response(200, json=_wrap(
+            {"Записи": [], "ЗапВсего": 0, "СтрВсего": 1})))
+
+    graph, _ = await CheckoSource().check_affiliations(BPMSOFT, deep=True)
+
+    rc = next(r for r in graph.related_companies if r.inn == "7700000042")
+    assert rc.deep_summary and "НЕ ПРОВЕРЕНО" in rc.deep_summary
+    assert "приставы" in rc.deep_summary
+    assert rc.suspicious is False, "отказ источника — не признак"
+
+
+@respx.mock
+async def test_owner_deep_skipped_when_fast():
+    """deep=False — дешёвый режим, владельцев глубоко не проверяем."""
+    _mock_cards(
+        _blank(Учред={"РосОрг": [{"ИНН": "7700000043", "ОГРН": "43",
+                                  "НаимСокр": 'ООО "Быстрый"',
+                                  "Статус": {"Наим": "Действует"}}]}),
+        default=_blank(ИНН="7700000043", Статус={"Наим": "Действует"}),
+    )
+    route = respx.get(f"{settings.checko_base_url}/legal-cases").mock(
+        return_value=httpx.Response(200, json=_wrap(
+            {"Записи": [], "ЗапВсего": 0, "СтрВсего": 1})))
+
+    await CheckoSource().check_affiliations(BPMSOFT, deep=False)
+
+    assert not route.called, "глубокая проверка ушла в быстром режиме"

@@ -13,6 +13,7 @@ import asyncio
 
 import structlog
 
+from osint_mcp.context.apicloud import ApiCloudSource
 from osint_mcp.context.checko import CheckoSource
 from osint_mcp.models import Fact, RiskCollection, SourceResult
 from osint_mcp.tools.country import detect_country
@@ -21,7 +22,11 @@ from osint_mcp.tools.inn import validate_inn
 log = structlog.get_logger()
 
 
-async def collect_risk_facts(inn: str, source: CheckoSource | None = None) -> RiskCollection:
+async def collect_risk_facts(
+    inn: str,
+    source: CheckoSource | None = None,
+    name: str | None = None,
+) -> RiskCollection:
     """Опросить все реестровые источники параллельно."""
     # Проверки рисков доступны только по России. Для организаций Беларуси
     # и Казахстана источник данных не существует, и пустой результат
@@ -65,27 +70,62 @@ async def collect_risk_facts(inn: str, source: CheckoSource | None = None) -> Ri
     names = ["checko.registry_flags", "checko.arbitration", "checko.enforcement",
              "checko.inspections", "checko.procurement"]
     results: list[SourceResult] = []
-    for name, item in zip(names, gathered):
+    for src_name, item in zip(names, gathered):
         if isinstance(item, BaseException):
             results.append(SourceResult(
-                source=name, status="unavailable",
+                source=src_name, status="unavailable",
                 reason=f"Непредвиденная ошибка: {type(item).__name__}",
             ))
         else:
             results.append(item)
 
     facts: list[Fact] = [f for r in results for f in r.facts]
-    ok = sum(1 for r in results if r.status in ("ok", "partial"))
-    failed = len(results) - ok
 
     notes: list[str] = []
-    if failed:
-        broken = ", ".join(r.source for r in results if r.status not in ("ok", "partial"))
+    failed_results = [r for r in results if r.status not in ("ok", "partial")]
+    if failed_results:
+        broken = ", ".join(r.source for r in failed_results)
         notes.append(
             f"Недоступны источники: {broken}. Проверка НЕПОЛНАЯ. "
             f"Отсутствие находок по этим направлениям ничего не доказывает — "
             f"обязательно сообщи об этом пользователю."
         )
+        # Резервный эшелон: агрегатор дёргается только когда прямой
+        # источник отказал. Бесплатный тариф агрегатора (~200 запросов
+        # в месяц) расходуется осознанно, а не впустую.
+        backup = await _backup_checks(inn, failed_results, name)
+        restored = [b for b in backup if b.status in ("ok", "partial")]
+        for b in restored:
+            results.append(b)
+            facts.extend(b.facts)
+        if restored:
+            notes.append(
+                "Отказавшие направления продублированы резервным агрегатором "
+                "(api-cloud): " + ", ".join(b.source for b in restored) +
+                ". Найденные факты помечены как резервные."
+            )
+        else:
+            notes.append(
+                "Резервный агрегатор (api-cloud) недоступен либо ключ "
+                "APICLOUD_KEY не задан — отказавшие направления не проверены."
+            )
+
+    # Счёт по НАПРАВЛЕНИЯМ, а не по записям: направление, целиком
+    # восстановленное резервным источником, проверено — его прямой
+    # отказ не считается. Банкротство резерва восстанавливает лишь часть
+    # registry_flags (там ещё санкции и отметки ФНС), поэтому направление
+    # считается проверенным только для приставов и арбитража.
+    ok = sum(1 for r in results if r.status in ("ok", "partial"))
+    restored_dirs = {
+        b.source.split(".", 1)[1] for b in results
+        if b.source.startswith("apicloud.") and b.status in ("ok", "partial")
+    } & {"enforcement", "arbitration"}
+    failed = sum(
+        1 for r in results
+        if r.status not in ("ok", "partial")
+        and r.source.startswith("checko.")
+        and r.source.split(".", 1)[1] not in restored_dirs
+    )
 
     # Частичная выгрузка — не отказ, но и не полнота: у крупных организаций
     # записей десятки тысяч, разбивка строится по выборке
@@ -103,3 +143,42 @@ async def collect_risk_facts(inn: str, source: CheckoSource | None = None) -> Ri
 
     return RiskCollection(inn=normalized, results=results, facts=facts,
                           sources_ok=ok, sources_failed=failed, coverage_note=note)
+
+
+async def _backup_checks(
+    inn: str, failed: list[SourceResult], name: str | None
+) -> list[SourceResult]:
+    """Резервные проверки через агрегатор — только по отказавшим направлениям.
+
+    Каждое направление резервируется своим методом: приставы ищутся по ИНН,
+    банкротство — по наименованию. Направления, которые прямой источник
+    ответил частично (partial), резервом не дублируются: там данные есть,
+    вопрос лишь в полноте выборки.
+    """
+    failed_sources = {r.source for r in failed if r.source.startswith("checko.")}
+    if not failed_sources:
+        return []
+
+    backup = ApiCloudSource()
+    tasks = []
+    if "checko.enforcement" in failed_sources:
+        tasks.append(backup.check_enforcement(inn))
+    if "checko.arbitration" in failed_sources:
+        tasks.append(backup.check_arbitration(inn))
+    if "checko.registry_flags" in failed_sources:
+        tasks.append(backup.check_bankruptcy(inn, name))
+
+    if not tasks:
+        return []
+    log.info("backup_checks", inn=inn, directions=sorted(failed_sources))
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    out: list[SourceResult] = []
+    for item in gathered:
+        if isinstance(item, BaseException):
+            out.append(SourceResult(
+                source="apicloud", status="unavailable",
+                reason=f"Ошибка резервного источника: {type(item).__name__}",
+            ))
+        else:
+            out.append(item)
+    return out

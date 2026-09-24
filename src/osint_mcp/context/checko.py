@@ -35,11 +35,14 @@ from osint_mcp.tools.country import detect_country
 from osint_mcp.models import (
     AffiliationGraph,
     ArbitrationSummary,
+    CardExtras,
+    ContactInfo,
     EnforcementSummary,
     Fact,
     FinancialSummary,
     FinancialYear,
     InspectionSummary,
+    LicenseInfo,
     PersonProfile,
     ProcurementSummary,
     RelatedCompany,
@@ -220,23 +223,51 @@ class CheckoSource:
         self, endpoint: str, inn: str, source: str, **extra: Any
     ) -> tuple[dict | None, SourceResult | None]:
         """Вернуть данные либо готовый SourceResult с описанием отказа."""
+        data, _, failure = await self._fetch_full(endpoint, inn, source, **extra)
+        return data, failure
+
+    async def _fetch_full(
+        self, endpoint: str, inn: str, source: str, **extra: Any
+    ) -> tuple[dict | None, dict | None, SourceResult | None]:
+        """То же, но с телом ответа целиком.
+
+        Часть сведений лежит рядом с data, а не внутри неё: ссылки на
+        отчётности ФНС приходят в блоке 'bo.nalog.ru' на верхнем уровне.
+        """
         try:
             body = await self._get(endpoint, {"inn": inn, **extra})
         except httpx.HTTPStatusError as e:
-            return None, SourceResult(source=source, status="unavailable",
-                                      reason=_why(e))
+            return None, None, SourceResult(source=source, status="unavailable",
+                                            reason=_why(e))
         except QuotaExhausted as e:
-            return None, SourceResult(source=source, status="unavailable",
-                                      reason=f"Ключи Checko исчерпаны: {e}")
+            # Причина различает два случая, которые агент обязан читать
+            # по-разному. Квота кончилась — источник отвечает, стоит
+            # вернуться позже. Ключ не принят (401) — источник не ответит
+            # и завтра: ключ неверен и нужна замена, ждать бессмысленно.
+            # Живой прогон поймал: неверный ключ читался как «исчерпан»,
+            # и отказ выглядел временной помехой.
+            text = str(e)
+            if text.startswith("Не задан ключ"):
+                # Ключей нет вовсе — это не «исчерпаны», и звук должен
+                # быть про настройку, а не про квоту
+                kind = text
+            elif "401" in text:
+                kind = ("Ключ Checko не принят сервисом (неверный или "
+                        "отозванный) — проверьте CHECKO_API_KEYS, "
+                        f"ожидать восстановления не стоит: {e}")
+            else:
+                kind = f"Ключи Checko исчерпаны: {e}"
+            return None, None, SourceResult(source=source, status="unavailable",
+                                            reason=kind)
         except (httpx.TransportError, httpx.TimeoutException) as e:
-            return None, SourceResult(source=source, status="unavailable",
-                                      reason=f"Сеть недоступна: {type(e).__name__}")
+            return None, None, SourceResult(source=source, status="unavailable",
+                                            reason=f"Сеть недоступна: {type(e).__name__}")
 
         meta = body.get("meta") or {}
         if meta.get("status") != "ok":
-            return None, SourceResult(source=source, status="unavailable",
-                                      reason=meta.get("message") or "Источник вернул ошибку")
-        return body.get("data") or {}, None
+            return None, None, SourceResult(source=source, status="unavailable",
+                                            reason=meta.get("message") or "Источник вернул ошибку")
+        return body.get("data") or {}, body, None
 
     async def _fetch_pages(
         self, endpoint: str, inn: str, source: str, **extra: Any
@@ -681,7 +712,7 @@ class CheckoSource:
 
     async def get_finances(self, inn: str) -> tuple[FinancialSummary | None, str | None]:
         """Финансовые показатели по годам. Возвращает (данные, причина отказа)."""
-        data, failure = await self._fetch("finances", inn, "checko.finances")
+        data, full_body, failure = await self._fetch_full("finances", inn, "checko.finances")
         if failure:
             return None, failure.reason
 
@@ -693,7 +724,21 @@ class CheckoSource:
                 revenue=block.get(self._REVENUE),
                 profit=block.get(self._PROFIT),
                 assets=block.get(self._ASSETS),
+                balance=block.get("1700"),
+                equity=block.get("1300"),
             ))
+
+        # Ссылки на официальные отчётности ФНС: проверяемый первоисточник
+        # любого финансового утверждения. Блок живёт рядом с data —
+        # на верхнем уровне тела ответа.
+        report_urls: dict[int, str] = {}
+        bo = (full_body or {}).get("bo.nalog.ru")
+        if isinstance(bo, dict):
+            for year_key, url in (bo.get("Отчет") or {}).items():
+                if str(year_key).isdigit() and isinstance(url, str) and url:
+                    report_urls[int(year_key)] = url
+        for fy in years:
+            fy.report_url = report_urls.get(fy.year)
 
         # Численность лежит в карточке организации
         employees = capital = None
@@ -719,10 +764,51 @@ class CheckoSource:
             branches=branches,
             representative_offices=representatives,
             size_category=self._size_category(latest_revenue, employees),
+            extras=self._card_extras(card),
         )
         log.info("checko.finances", inn=inn, years=len(years),
                  employees=employees, size=summary.size_category)
         return summary, None
+
+    def _card_extras(self, card: dict | None) -> CardExtras | None:
+        """Налоги, лицензии, контакты, массовость адреса — из той же карточки.
+
+        Всё это приходит в ответе компании и раньше отбрасывалось.
+        Card — при отказе карточки None: поля останутся «не установленными»,
+        а не нулями; говорить «недоимки нет» на молчании источника нельзя.
+        """
+        if not card:
+            return None
+
+        taxes = card.get("Налоги") or {}
+        licenses: list[LicenseInfo] = []
+        for lic in card.get("Лиценз") or []:
+            activities = lic.get("ВидДеят") or []
+            licenses.append(LicenseInfo(
+                number=lic.get("Номер") or "",
+                issuer=lic.get("ЛицОрг"),
+                issued_at=_parse_date(lic.get("ДатаНач") or lic.get("Дата")),
+                activity=activities[0] if activities else None,
+            ))
+
+        addr = card.get("ЮрАдрес") or {}
+        contacts_raw = card.get("Контакты") or {}
+        website = contacts_raw.get("ВебСайт")
+
+        return CardExtras(
+            tax_debt=taxes.get("СумНедоим"),
+            tax_paid_total=taxes.get("СумУпл"),
+            tax_year=int(taxes["СведУплГод"]) if taxes.get("СведУплГод") else None,
+            tax_mode=list(taxes.get("ОсобРежим") or []),
+            mass_address_orgs=list(addr.get("МассАдрес") or []),
+            address_unreliable=bool(addr.get("Недост")),
+            licenses=licenses,
+            contacts=ContactInfo(
+                phones=list(contacts_raw.get("Тел") or []),
+                emails=list(contacts_raw.get("Емэйл") or []),
+                website=website,
+            ),
+        )
 
     # ─────────────────────────  люди и связи  ─────────────────────────
 
@@ -790,12 +876,18 @@ class CheckoSource:
             return None, "источник вернул пустую карточку"
         return data, None
 
-    async def _deep_summary(self, inn: str) -> str | None:
-        """Полная проверка подозрительной организации, сжатая в одну строку.
+    async def _deep_checks(
+        self, inn: str
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Три направления полной проверки, разобранные по значению.
 
-        Возвращать сюда полные списки фактов нельзя: пять организаций
-        по десять дел каждая вытеснят из окна модели само досье.
-        Поэтому здесь только итоговые числа и ссылка на первоисточник.
+        Возвращает (тревожное, нейтральное, непроверенное). Тревожное —
+        то, что делает организацию проблемной: иски ПРОТИВ неё, долги
+        приставам, нарушения надзора. Нейтральное — активность, которая
+        риском не является: организация сама взыскивает долги, судебных
+        дел нет вовсе. Разделение нужно, потому что владельца-организацию
+        без реестровых отметок мы тоже проверяем глубоко, и «сам судится
+        с должниками» не должно превращать её в подозрительную.
         """
         arb, enf, insp = await asyncio.gather(
             self.check_arbitration(inn),
@@ -804,18 +896,19 @@ class CheckoSource:
             return_exceptions=True,
         )
 
-        parts: list[str] = []
+        findings: list[str] = []
+        neutral: list[str] = []
         unchecked: list[str] = []
 
         if isinstance(arb, SourceResult) and arb.arbitration:
             a = arb.arbitration
             if a.as_defendant.count:
                 amount = f" на {a.as_defendant.total_amount:,.0f} ₽".replace(",", " ")
-                parts.append(f"ответчик по {a.as_defendant.count} делам{amount}")
+                findings.append(f"ответчик по {a.as_defendant.count} делам{amount}")
             if a.as_plaintiff.count:
-                parts.append(f"истец по {a.as_plaintiff.count} делам")
+                neutral.append(f"истец по {a.as_plaintiff.count} делам")
             if not a.total:
-                parts.append("судебных дел нет")
+                neutral.append("судебных дел нет")
         else:
             unchecked.append("суды")
 
@@ -823,16 +916,29 @@ class CheckoSource:
             e = enf.enforcement
             if e.total:
                 debt = f"{e.outstanding:,.0f} ₽".replace(",", " ")
-                parts.append(f"исполнительных производств {e.total}, остаток долга {debt}")
+                findings.append(
+                    f"исполнительных производств {e.total}, остаток долга {debt}")
         else:
             unchecked.append("приставы")
 
         if isinstance(insp, SourceResult) and insp.inspections:
             if insp.inspections.with_violations:
-                parts.append(f"проверок с нарушениями {insp.inspections.with_violations}")
+                findings.append(
+                    f"проверок с нарушениями {insp.inspections.with_violations}")
         else:
             unchecked.append("надзорные проверки")
 
+        return findings, neutral, unchecked
+
+    async def _deep_summary(self, inn: str) -> str | None:
+        """Полная проверка подозрительной организации, сжатая в одну строку.
+
+        Возвращать сюда полные списки фактов нельзя: пять организаций
+        по десять дел каждая вытеснят из окна модели само досье.
+        Поэтому здесь только итоговые числа и ссылка на первоисточник.
+        """
+        findings, neutral, unchecked = await self._deep_checks(inn)
+        parts = findings + neutral
         if unchecked:
             parts.append(f"НЕ ПРОВЕРЕНО: {', '.join(unchecked)}")
 
@@ -1169,6 +1275,50 @@ class CheckoSource:
                 if isinstance(summary, str):
                     rc.deep_summary = summary
 
+        # ── слой 4б: владельцы без отметок — прямая проверка ────────────
+        # Отметки и мёртвый статус ловят брошенные юрлица, но слепы к
+        # «чистой витрине»: действующая организация без единой отметки,
+        # утопленная в исках. Для рядового связанного юрлица такой риск
+        # слабо относится к проверяемой компании, а вот трудности
+        # владельца — это её трудности: пакетный владелец отвечает по
+        # обязательствам, вводит организацию в недоверие, выводит активы.
+        # Поэтому глубокой проверки ради себя требуют владельцы-
+        # организации и управляющая организация, отметки ли у них есть.
+        # НЕ ПРОВЕРЕНО в сводке честно называет направление, которое
+        # не ответило — иначе refusal приставов прочитается как «долгов нет».
+        if deep and owners:
+            no_inn = [rc for rc in owners if not rc.inn]
+            if no_inn:
+                notes.append(
+                    f"У {len(no_inn)} владельцев нет ИНН в реестре — "
+                    f"глубоко не проверены."
+                )
+            owner_cap = settings.affiliation_max_deep
+            # Уже проверенный слоем 4 владелец (по отметкам) не проверяется
+            # второй раз — это двойной расход квоты за те же данные.
+            picked_owners = [rc for rc in owners
+                             if rc.inn and not rc.deep_summary][:owner_cap]
+            if len(owners) > owner_cap:
+                notes.append(
+                    f"Владельцев-организаций {len(owners)}, проверено глубоко "
+                    f"{len(picked_owners)} — упор в лимит."
+                )
+            owner_checks = await asyncio.gather(
+                *(self._deep_checks(rc.inn) for rc in picked_owners),
+                return_exceptions=True,
+            )
+            for rc, got in zip(picked_owners, owner_checks):
+                if isinstance(got, BaseException):
+                    rc.deep_summary = "НЕ ПРОВЕРЕНО: суды, приставы, надзор"
+                    continue
+                findings, neutral, unchecked = got
+                rc.deep_summary = "; ".join(findings + neutral + [
+                    f"НЕ ПРОВЕРЕНО: {', '.join(unchecked)}"] if unchecked
+                    else findings + neutral) or None
+                if findings:
+                    rc.suspicious = True
+                    rc.triage_status = "checked"
+
         # ── факты для ссылок из текста отчёта ───────────────────────────
         facts: list[Fact] = []
         n = 0
@@ -1232,7 +1382,8 @@ class CheckoSource:
     _RENAME = re.compile(r"аименование изменено с\s+[\"«](?P<old>.+?)[\"»]\s+на\s+[\"«](?P<new>.+?)[\"»]")
     _NOTABLE = ("аименование изменено", "становится генеральным директором",
                 "больше не является генеральным директором", "дрес изменен",
-                "еорганизац", "иквидац")
+                "еорганизац", "иквидац", "удалена запись об учредителе",
+                "становится новым учредителем", "становится учредителем")
 
     async def get_name_history(self, inn: str) -> tuple[list[str], list[dict], str | None]:
         """Прошлые наименования организации и существенные события.

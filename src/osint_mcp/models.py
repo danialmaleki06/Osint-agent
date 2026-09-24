@@ -106,6 +106,149 @@ class ResolveResult(BaseModel):
     )
 
 
+class FinancialYear(BaseModel):
+    """Финансовые показатели за один год."""
+
+    year: int = Field(description="Отчётный год")
+    revenue: float | None = Field(default=None, description="Выручка, рублей")
+    profit: float | None = Field(default=None, description="Чистая прибыль, рублей")
+    assets: float | None = Field(default=None, description="Итог баланса, рублей")
+    balance: float | None = Field(
+        default=None,
+        description="Валюта баланса (итог актива и пассива), рублей",
+    )
+    equity: float | None = Field(
+        default=None,
+        description=(
+            "Собственный капитал, рублей. Отрицательный при положительном "
+            "балансе — устойчивый признак предбанкротного состояния"
+        ),
+    )
+    report_url: str | None = Field(
+        default=None,
+        description=(
+            "Прямая ссылка на официальную отчётность ФНС (bo.nalog.gov.ru). "
+            "Первичная проверяемая ссылка для любого финансового утверждения"
+        ),
+    )
+
+
+class LicenseInfo(BaseModel):
+    """Лицензия организации.
+
+    Лицензия — контроль подтверждённой законности деятельности. Для
+    регулируемых отраслей её отсутствие не «нет данных», а стоп-сигнал.
+    """
+
+    number: str = Field(description="Номер лицензии")
+    issuer: str | None = Field(default=None, description="Лицензирующий орган")
+    issued_at: date | None = Field(default=None, description="Дата выдачи")
+    activity: str | None = Field(default=None, description="Лицензированный вид деятельности")
+
+
+class ContactInfo(BaseModel):
+    """Контакты из карточки ЕГРЮЛ.
+
+    Сайт нужен не для связи, а для проверки: совпадение домена карточки
+    с доменом рыночного наименования отделяет настоящую компанию от омонима.
+    """
+
+    phones: list[str] = Field(default_factory=list, description="Телефоны")
+    emails: list[str] = Field(default_factory=list, description="Адреса электронной почты")
+    website: str | None = Field(default=None, description="Сайт из карточки ЕГРЮЛ")
+
+
+class TimelineEvent(BaseModel):
+    """Существенное событие истории организации.
+
+    Частые смены руководителя или учредителей — признак конфликта
+    собственников, перетасовки под проблему или самой однодневки.
+    Единичная смена — норма жизни; оценивается частота и свежесть.
+    """
+
+    event_date: date | None = Field(default=None, description="Дата события")
+    event: str = Field(description="Формулировка из реестра, как записано")
+
+
+class CardExtras(BaseModel):
+    """Дополнительно к карточке: налоги, лицензии, контакты, массовость адреса.
+
+    Всё это приходит из той же карточки Checko и раньше отбрасывалось.
+    Пустое поле здесь означает «в карточке не заполнено»: различать
+    «проверено, отсутствует» и «не смогли получить» обязан reason
+    результата сборки, а не эта модель.
+    """
+
+    tax_debt: float | None = Field(
+        default=None,
+        description=(
+            "Задолженность по налогам (недоимка), рублей. None — сведений "
+            "в карточке нет, а НЕ отсутствие долга. Положительное значение — "
+            "сильный негативный сигнал"
+        ),
+    )
+    tax_paid_total: float | None = Field(
+        default=None,
+        description=(
+            "Всего уплачено налогов и взносов за последний отчётный год, рублей. "
+            "Резко не сходится с заявленным масштабом — признак серой деятельности"
+        ),
+    )
+    tax_year: int | None = Field(default=None, description="Отчётный год налоговых сведений")
+    tax_mode: list[str] = Field(
+        default_factory=list,
+        description="Особые налоговые режимы (УСН, ЕСХН и прочие); пусто — обычный порядок либо нет данных",
+    )
+    mass_address_orgs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "ОГРН организаций, зарегистрированных по тому же адресу. "
+            "Список длиннее единицы — массовый адрес. Существенно для микро "
+            "и малого бизнеса, к крупным неприменимо"
+        ),
+    )
+    address_unreliable: bool = Field(
+        default=False,
+        description=(
+            "Адрес признан ФНС недостоверным. Сам по себе стоп-сигнал: "
+            "связь с организацией по такому адресу не гарантирована"
+        ),
+    )
+    licenses: list[LicenseInfo] = Field(
+        default_factory=list,
+        description="Действующие лицензии организации",
+    )
+    contacts: ContactInfo | None = Field(
+        default=None,
+        description="Телефоны, электронная почта, сайт из карточки ЕГРЮЛ",
+    )
+
+
+class MspInfo(BaseModel):
+    """Сведения из единого реестра субъектов МСП (rmsp.nalog.ru).
+
+    Реестр — независимое подтверждение масштаба: категория выставляется
+    ФНС по выручке и численности, а не по нашей оценке. Исключение
+    действующей компании из реестра — повод перепроверить масштаб.
+    """
+
+    in_registry: bool = Field(default=False, description="Значится ли в реестре МСП")
+    category: str | None = Field(
+        default=None, description="Категория: micro, small или medium; None — не указана"
+    )
+    employees: int | None = Field(
+        default=None, description="Среднесписочная численность по данным реестра"
+    )
+    included_at: date | None = Field(default=None, description="Дата включения в реестр")
+    excluded_at: date | None = Field(
+        default=None, description="Дата исключения из реестра, если произошло"
+    )
+    is_active: bool = Field(
+        default=True,
+        description="Действующий субъект реестра. False — исключён: данные могли устареть",
+    )
+
+
 class CompanyContext(BaseModel):
     """Опорный контекст компании. Вход для всех последующих проверок.
 
@@ -191,15 +334,58 @@ class CompanyContext(BaseModel):
     branches: int | None = Field(
         default=None,
         description=(
-            "Сколько филиалов у организации. None — источник не ответил, "
-            "число НЕ УСТАНОВЛЕНО, а не равно нулю"
+            "Сколько филиалов у организации. None — источник не ответил или "
+            "карточка не содержит сведений, число НЕ УСТАНОВЛЕНО, а не равно "
+            "нулю. Явный ноль означает: сведения есть, филиалов нет"
         ),
     )
     representative_offices: int | None = Field(
-        default=None, description="Сколько представительств. None — не установлено"
+        default=None,
+        description=(
+            "Сколько представительств. None — не установлено; явный ноль — "
+            "сведения есть, представительств нет"
+        ),
     )
     revenue_latest: float | None = Field(
         default=None, description="Выручка за последний отчётный год, рублей"
+    )
+    fin_history: list[FinancialYear] = Field(
+        default_factory=list,
+        description=(
+            "Финансовая история до пяти лет, свежие первыми. Оценивать "
+            "устойчивость по одному году нельзя: падение выручки, уход "
+            "в убыток и проедание собственного капитала видны только в динамике"
+        ),
+    )
+    social_links: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Официальные аккаунты (telegram, vk и прочие) — придаток рыночного "
+            "наименования. Заполняется только при brand_resolved=True"
+        ),
+    )
+    events: list[TimelineEvent] = Field(
+        default_factory=list,
+        description=(
+            "Существенные события истории: смены наименования, руководителя, "
+            "адреса, реорганизация. Даты и формулировки — как в реестре"
+        ),
+    )
+    extras: CardExtras | None = Field(
+        default=None,
+        description=(
+            "Налоги, лицензии, контакты, массовость адреса. None — карточка "
+            "второго источника не отвечала; при source='checko' заполнено всегда, "
+            "когда карточка получена"
+        ),
+    )
+    msp: MspInfo | None = Field(
+        default=None,
+        description=(
+            "Сведения из реестра МСП (бесплатный источник ФНС): независимое "
+            "подтверждение категории масштаба. None — источник не отвечал "
+            "либо организация в реестре не значится"
+        ),
     )
 
     # служебное
@@ -447,15 +633,6 @@ class ProcurementSummary(BaseModel):
     complete: bool = Field(default=True, description="Охвачены ли все контракты")
 
 
-class FinancialYear(BaseModel):
-    """Финансовые показатели за один год."""
-
-    year: int = Field(description="Отчётный год")
-    revenue: float | None = Field(default=None, description="Выручка, рублей")
-    profit: float | None = Field(default=None, description="Чистая прибыль, рублей")
-    assets: float | None = Field(default=None, description="Итог баланса, рублей")
-
-
 class FinancialSummary(BaseModel):
     """Финансовое состояние — нужно для калибровки оценки риска.
 
@@ -486,6 +663,10 @@ class FinancialSummary(BaseModel):
             "Категория по выручке и численности. Определяет, какие признаки "
             "риска вообще применимы к организации"
         ),
+    )
+    extras: CardExtras | None = Field(
+        default=None,
+        description="Налоги, лицензии, контакты, массовость адреса — из той же карточки",
     )
 
 
