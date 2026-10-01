@@ -61,9 +61,27 @@ async def test_bo_finances_parsed():
     # gainSum 2769645 тыс. руб -> 2 769 645 000 руб (сходится с Checko)
     assert latest.revenue == pytest.approx(2_769_645_000.0)
     assert latest.assets == pytest.approx(2_113_081_000.0)
-    # Ссылка на официальную отчётность есть
-    assert latest.report_url and "bo.nalog.gov.ru" in latest.report_url
-    assert "period=2025" in latest.report_url
+    # Ссылка на официальную отчётность есть и ведёт на рабочий PDF:
+    # /download/bfo/pdf/{correction.id} (проверено живьём 29.09.2026)
+    assert latest.report_url == "https://bo.nalog.gov.ru/download/bfo/pdf/57110232"
+
+
+@respx.mock
+async def test_bo_report_url_absent_without_correction_id():
+    """Нет идентификатора correction — нет и ссылки: битые ссылки хуже отсутствующих."""
+    _mock_bo()
+    fixture_path = FIXTURES / "bo_nalog_bfo_bpmsoft.json"
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    for rep in (data if isinstance(data, list) else data.get("content", [])):
+        rep.pop("typeCorrections", None)
+    respx.get(f"{settings.bo_nalog_base_url}/nbo/organizations/4578289/bfo").mock(
+        return_value=httpx.Response(200, json=data)
+    )
+
+    years, failure = await BoNalogSource().get_finances(BPMSOFT)
+
+    assert failure is None and years
+    assert all(y.report_url is None for y in years)
 
 
 @respx.mock
@@ -333,6 +351,51 @@ async def test_hh_vacancies_parsed():
     assert info.reason is None
 
 
+def test_hh_search_query_strips_legal_form():
+    """Полное юр. имя нормализуется до рыночного: hh ищет по подстроке.
+
+    Запрос «ООО "БПМСОФТ"» давал пустой результат — работодатели
+    зарегистрированы как «БПМСОФТ».
+    """
+    from osint_mcp.context.hh import _search_query
+
+    assert _search_query('ООО "БПМСОФТ"') == "БПМСОФТ"
+    assert _search_query("ООО «БПМСОФТ»") == "БПМСОФТ"
+    assert _search_query('ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "БПМСОФТ"') == "БПМСОФТ"
+    assert _search_query("БПМСОФТ") == "БПМСОФТ"
+    assert _search_query("") == ""
+
+
+@respx.mock
+async def test_hh_full_name_finds_vacancies():
+    """Запрос полным юр. именем находит те же вакансии (нормализация)."""
+    route = respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={
+            "found": 1, "items": [{"name": "Разработчик"}]}))
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring('ООО "БПМСОФТ"')
+
+    assert info.open_vacancies == 1
+    sent_text = route.calls.last.request.url.params["text"]
+    assert sent_text == "БПМСОФТ"
+
+
+@respx.mock
+async def test_hh_sends_token_in_fallback_client():
+    """Токен приложения уходит и во внутреннем клиенте: без него 403.
+
+    Раньше ветка без внешнего клиента шла с _HEADERS — Authorization
+    терялся, и найм «не проверялся» даже при настроенном HH_APP_TOKEN.
+    """
+    route = respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={"found": 0, "items": []}))
+    from osint_mcp.context.hh import HhSource
+    await HhSource().get_hiring("БПМСОФТ")
+
+    auth = route.calls.last.request.headers.get("Authorization")
+    assert auth and auth.startswith("Bearer ")
+
+
 @respx.mock
 async def test_hh_without_token_reports_honestly():
     """403 без токена — «найм не проверен», а не «вакансий нет».
@@ -371,7 +434,7 @@ def test_sales_block_in_full_report():
         events=[TimelineEvent(event_date=date.today() - timedelta(days=30),
                               event="Сменён генеральный директор")],
     )
-    sections = {s["название"]: s["пункты"] for s in _full_sections(ctx)}
+    sections = {s["название"]: s["пункты"] for s in _full_sections(ctx, None)}
     sales = sections["коммерческие сигналы"]
 
     assert any("62.01" in line for line in sales)

@@ -1,0 +1,109 @@
+"""Тесты источника обогащения по сайту: WHOIS-возраст домена, самоназвание.
+
+Офлайн: socket-запрос WHOIS и HTTP к сайту подменяются заглушками.
+Проверяются парсинг дат tcinet, приоритет H1 над meta, честность отказов.
+"""
+
+import httpx
+import pytest
+import respx
+
+from osint_mcp.context.site import _domain_of, domain_age, site_self_description
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+def test_domain_of_strips_www_and_path():
+    assert _domain_of("https://www.bpmsoft.ru/platform/x") == "bpmsoft.ru"
+    assert _domain_of("http://cardsmile.ru") == "cardsmile.ru"
+    assert _domain_of(None) is None
+    assert _domain_of("мусор без точки") is None
+
+
+async def test_domain_age_parses_tcinet(monkeypatch):
+    """Ответ tcinet: строка 'created: ...' — дата извлекается."""
+    captured = {}
+
+    def fake_query(domain: str, server: str) -> str:
+        captured["domain"] = domain
+        captured["server"] = server
+        return (
+            "domain:     BPMSOFT.RU\n"
+            "nserver:    ns1.reg.ru.\n"
+            "created:       2023-04-18T10:00:00Z\n"
+            "paid-till:     2026-11-08T21:00:10Z\n"
+        )
+
+    monkeypatch.setattr("osint_mcp.context.site._query_whois", fake_query)
+    created, reason = await domain_age("https://bpmsoft.ru")
+
+    assert reason is None
+    assert created is not None and created.year == 2023 and created.month == 4
+    assert captured["domain"] == "bpmsoft.ru"
+    assert captured["server"] == "whois.tcinet.ru"
+
+
+async def test_domain_age_unknown_zone_is_reason_not_crash(monkeypatch):
+    """Зона без настроенного WHOIS-сервера — честная причина, не ошибка."""
+    created, reason = await domain_age("https://example.com")
+    assert created is None
+    assert reason and "WHOIS" in reason
+
+
+async def test_domain_age_network_failure_reported(monkeypatch):
+    """Отказ сети — (None, reason), молчание не путается с «домен молодой»."""
+
+    def fail_query(domain: str, server: str) -> str:
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr("osint_mcp.context.site._query_whois", fail_query)
+    created, reason = await domain_age("https://bpmsoft.ru")
+    assert created is None
+    assert reason and "WHOIS недоступен" in reason
+
+
+async def test_self_description_prefers_h1_over_meta(respx_mock=None):
+    """H1 информативнее meta: берём заголовок, meta — запасной вариант."""
+    async with respx.mock:
+        respx.get("https://bpmsoft.ru").mock(return_value=httpx.Response(200, text="""
+        <html><head>
+          <title>Заголовок вкладки</title>
+          <meta name="description" content="мета-описание сайта">
+        </head><body>
+          <h1>AI-driven low-code платформа для автоматизации бизнес-процессов</h1>
+          <p>текст страницы</p>
+        </body></html>
+        """))
+        desc, reason = await site_self_description("https://bpmsoft.ru")
+
+    assert reason is None
+    assert desc == "AI-driven low-code платформа для автоматизации бизнес-процессов"
+
+
+async def test_self_description_falls_back_to_meta():
+    async with respx.mock:
+        respx.get("https://bpmsoft.ru").mock(return_value=httpx.Response(200, text="""
+        <html><head>
+          <meta name="description" content="Российская low-code платформа BPMSoft">
+        </head><body><p>без h1</p></body></html>
+        """))
+        desc, reason = await site_self_description("https://bpmsoft.ru")
+
+    assert reason is None
+    assert desc == "Российская low-code платформа BPMSoft"
+
+
+async def test_self_description_dead_site_is_reason_not_crash():
+    """Мёртвый DNS — (None, reason). Для «действующей» компании это сигнал,
+    и он обязан дойти до отчёта, а не утонуть в исключении."""
+    async with respx.mock:
+        respx.get("http://cardsmile.ru").mock(side_effect=httpx.ConnectError("dns"))
+        desc, reason = await site_self_description("http://cardsmile.ru")
+
+    assert desc is None
+    assert reason and "недоступен" in reason

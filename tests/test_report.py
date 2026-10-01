@@ -10,11 +10,14 @@ from datetime import date, datetime, timezone
 import pytest
 
 from osint_mcp.models import (
+    ArbitrationSummary,
     CardExtras,
     CompanyContext,
     ContextResult,
     FinancialYear,
     RiskCollection,
+    RoleCounts,
+    SourceLink,
     SourceResult,
     TimelineEvent,
 )
@@ -138,7 +141,9 @@ def test_brief_without_context():
 
 # ───────────────────────────  full  ───────────────────────────
 
-def test_full_includes_fin_history_and_report_urls():
+def test_full_includes_fin_history_without_urls():
+    """Финансы по годам в отчёте есть, ссылки на PDF в отчёте не выводятся:
+    они отдаются дозапросом get_company_links."""
     ctx = make_context(fin_history=[
         FinancialYear(year=2024, revenue=2_112_308_000.0, profit=244_840_000.0,
                       report_url="https://bo.nalog.gov.ru/download/bfo/pdf/57110232"),
@@ -149,7 +154,23 @@ def test_full_includes_fin_history_and_report_urls():
     fin = sections["финансы и налоги"]
     text = "\n".join(fin["пункты"])
     assert "2.1 млрд" in text or "2,1 млрд" in text or "2112308" in text.replace(" ", "")
-    assert "bo.nalog.gov.ru" in text, "ссылка на отчётность ФНС потерялась"
+    assert "bo.nalog.gov.ru" not in text, "ссылки в отчёте — им место в get_company_links"
+
+
+def test_source_links_live_in_context_not_report():
+    """Ссылки собираются в контекст всегда, но в отчёты не попадают."""
+    ctx = make_context(
+        fin_history=[FinancialYear(year=2024, revenue=1.0,
+                                   report_url="https://bo.nalog.gov.ru/download/bfo/pdf/1")],
+        source_links=[SourceLink(what="карточка ЕГРЮЛ", url="https://checko.ru/company/1",
+                                 source="checko")],
+    )
+    for detail in ("brief", "full"):
+        report = build_report(detail, make_context_result(ctx), make_risk(), make_score())
+        flat = str(report)
+        assert "checko.ru" not in flat, f"ссылка утекла в {detail}"
+    # А в контексте они живы
+    assert ctx.source_links[0].url == "https://checko.ru/company/1"
 
 
 def test_full_flags_revenue_drop():
@@ -168,6 +189,202 @@ def test_full_tax_debt_visible():
     report = build_report("full", make_context_result(ctx), make_risk(), make_score())
     fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
     assert any("задолженность по налогам" in line for line in fin["пункты"])
+
+
+def test_margin_trend_falls_two_years():
+    """Маржа тает два года подряд суммарно от 5 п.п. — строка появляется."""
+    ctx = make_context(fin_history=[
+        FinancialYear(year=2024, revenue=1_000.0, profit=100.0),   # 10%
+        FinancialYear(year=2023, revenue=1_000.0, profit=150.0),   # 15%
+        FinancialYear(year=2022, revenue=1_000.0, profit=250.0),   # 25% → -15 п.п. за 2 падения
+    ])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    assert any("маржа тает" in line for line in fin["пункты"])
+
+
+def test_margin_noise_is_silent():
+    """Болтанка в пределах полпункта и разовое падение — не тревога."""
+    ctx = make_context(fin_history=[
+        FinancialYear(year=2024, revenue=1_000.0, profit=120.0),   # 12%
+        FinancialYear(year=2023, revenue=1_000.0, profit=125.0),   # 12.5% (дроп 0.5 — шум)
+        FinancialYear(year=2022, revenue=1_000.0, profit=124.0),   # 12.4%
+    ])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    assert not any("маржа" in line for line in fin["пункты"])
+
+
+def test_productivity_line_shown():
+    """Выручка на сотрудника: нейтральная мера, без утверждений."""
+    ctx = make_context(fin_history=[FinancialYear(year=2024, revenue=2_776_964_500.0)],
+                       employees=386)
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    prof = next(s for s in report["разбор"] if s["название"] == "профиль деятельности")
+    assert any("выручка на сотрудника" in line for line in prof["пункты"])
+    assert not any("зарплат" in line.lower() for line in prof["пункты"]), \
+        "зарплатоёмкость из налогов врёт — её не должно быть"
+
+
+def test_gov_share_warns_on_high_dependence():
+    """Госконтракты ≥30% выручки — предупреждение о зависимости от бюджета."""
+    from osint_mcp.models import ProcurementSummary
+    risk = RiskCollection(
+        inn="7724744134",
+        results=[SourceResult(
+            source="checko.procurement", status="ok",
+            procurement=ProcurementSummary(
+                contracts_44=10,
+                as_supplier=RoleCounts(count=10, total_amount=500_000_000.0),
+            ))],
+    )
+    ctx = make_context(fin_history=[FinancialYear(year=2024, revenue=1_000_000_000.0)])
+    report = build_report("full", make_context_result(ctx), risk, make_score())
+    sales = next(s for s in report["разбор"] if s["название"] == "коммерческие сигналы")
+    assert any("зависимость от бюджета" in line for line in sales["пункты"])
+
+
+def test_gov_share_silent_on_small_sample():
+    """Меньше трёх контрактов — не система: строка не создаётся."""
+    from osint_mcp.models import ProcurementSummary
+    risk = RiskCollection(
+        inn="7724744134",
+        results=[SourceResult(
+            source="checko.procurement", status="ok",
+            procurement=ProcurementSummary(
+                contracts_44=1,
+                as_supplier=RoleCounts(count=1, total_amount=900_000.0),
+            ))],
+    )
+    ctx = make_context(fin_history=[FinancialYear(year=2024, revenue=1_000_000.0)])
+    report = build_report("full", make_context_result(ctx), risk, make_score())
+    sales = [s for s in report["разбор"] if s["название"] == "коммерческие сигналы"]
+    if sales:
+        assert not any("госконтракты" in line for line in sales[0]["пункты"])
+
+
+def test_rename_hint_in_profile():
+    """Переименования в профиле: подсказка искать по прежним именам."""
+    ctx = make_context(business_model="product",
+                       former_names=['ООО "КАРДСМАЙЛ"', 'ООО "ЛАНИТ ОМНИ"'])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    prof = next(s for s in report["разбор"] if s["название"] == "профиль деятельности")
+    assert any("переименований" in line and "КАРДСМАЙЛ" in line for line in prof["пункты"])
+
+
+def test_full_debt_load_with_revenue_share():
+    """Долг мерится прибылью: 150 млн при 100 млн прибыли = 2 года, тревоги нет."""
+    ctx = make_context(fin_history=[FinancialYear(
+        year=2024, revenue=100_000_000.0, profit=100_000_000.0,
+        loans=60_000_000.0, short_debt=90_000_000.0,
+    )])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    text = "\n".join(fin["пункты"])
+    assert "обязательства всего: 150.0 млн ₽" in text
+    assert "годам прибыли" not in text
+
+
+def test_full_debt_three_years_of_profit_is_high():
+    """Долг >= 3 лет прибыли — высокая долговая нагрузка."""
+    ctx = make_context(fin_history=[FinancialYear(
+        year=2024, revenue=100_000_000.0, profit=10_000_000.0,
+        loans=60_000_000.0, short_debt=90_000_000.0,
+    )])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    assert any("15 годам прибыли" in line for line in fin["пункты"])
+
+
+def test_full_profile_lines_shown_when_heuristics_resolved():
+    """Эвристики модели и стадии попадают в отчёт с осторожными формулировками."""
+    ctx = make_context(business_model="outsourced", business_stage="growth")
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    section = next(s for s in report["разбор"] if s["название"] == "профиль деятельности")
+    text = "\n".join(section["пункты"])
+    assert "подряд/аутсорс" in text
+    assert "окно входа" in text
+    assert "зависит от потока заказов" in text
+
+
+def test_full_profile_absent_when_unknown():
+    """Не хватило данных на эвристику — секции нет: догадку не пишем."""
+    ctx = make_context()  # business_model/stage не заданы
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    assert not any(s["название"] == "профиль деятельности" for s in report["разбор"])
+
+
+def test_full_plaintiff_active_climate_signal():
+    """Поток активных исков о взыскании — компания сама ждёт оплаты:
+    косвенный сигнал кассового климата, для отсрочек осторожно."""
+    risk = RiskCollection(
+        inn="7724744134",
+        results=[SourceResult(
+            source="checko.arbitration", status="ok",
+            arbitration=ArbitrationSummary(
+                total=10,
+                as_plaintiff=RoleCounts(count=7, total_amount=12_000_000.0),
+                as_plaintiff_active=RoleCounts(count=4, total_amount=8_000_000.0),
+            ),
+        )],
+        facts=[], sources_ok=1,
+    )
+    report = build_report("full", make_context_result(make_context()), risk, make_score())
+    section = next(
+        (s for s in report["разбор"] if s["название"] == "платёжный климат"), None)
+    assert section is not None, "сигнал платёжного климата потерялся"
+    text = "\n".join(section["пункты"])
+    assert "активных исков о взыскании: 4" in text
+    assert "осторожно" in text
+
+
+def test_full_plaintiff_idle_is_silent():
+    """Истец без активных исков — сигнал не выводится: старые дела
+    ничего не говорят о сегодняшнем платежном климате."""
+    risk = RiskCollection(
+        inn="7724744134",
+        results=[SourceResult(
+            source="checko.arbitration", status="ok",
+            arbitration=ArbitrationSummary(
+                total=5,
+                as_plaintiff=RoleCounts(count=5, total_amount=2_000_000.0),
+                as_plaintiff_active=RoleCounts(),
+            ),
+        )],
+        facts=[], sources_ok=1,
+    )
+    report = build_report("full", make_context_result(make_context()), risk, make_score())
+    assert not any(s["название"] == "платёжный климат" for s in report["разбор"])
+
+
+def test_full_liquidity_below_one_is_warning():
+    """Деньги + дебиторка не покрывают краткосрочные долги — зависимость
+    от непрерывного потока выручки. Рост кредиторки сам по себе не тревога:
+    торговый кредит финансирует растущий бизнес."""
+    ctx = make_context(fin_history=[FinancialYear(
+        year=2024, revenue=10_000_000.0,
+        cash=48_700_000.0, receivables=797_765_000.0,
+        short_debt=1_556_994_000.0,
+    )])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    text = "\n".join(fin["пункты"])
+    assert "платёжеспособность зависит от непрерывного потока выручки" in text
+    # Рост кредиторки над дебиторкой больше НЕ выводится как тревога
+    assert "живёт на чужие деньги" not in text
+
+
+def test_full_zero_debt_is_silent():
+    """Займов нет (нули в отчётности) — строки платёжеспособности не выводятся:
+    отсутствие долгов не новостное сообщение, а норма."""
+    ctx = make_context(fin_history=[FinancialYear(
+        year=2024, revenue=10_000_000.0, loans=0.0, short_debt=0.0,
+        receivables=1_000_000.0, payables=500_000.0,
+    )])
+    report = build_report("full", make_context_result(ctx), make_risk(), make_score())
+    fin = next(s for s in report["разбор"] if s["название"] == "финансы и налоги")
+    assert not any("обязательства всего" in line for line in fin["пункты"])
+    assert not any("непрерывного потока" in line for line in fin["пункты"])
 
 
 def test_full_mass_address_filtered_by_size():

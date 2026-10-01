@@ -321,6 +321,218 @@ async def test_branch_count_unknown_is_not_zero():
     assert "НЕ УСТАНОВЛЕН" in res.reason
 
 
+# ─────────────────  ссылки на первоисточники  ─────────────────
+
+@respx.mock
+async def test_source_links_collected_even_when_sources_fail():
+    """Карточка есть — карточка ЕГРЮЛ в ссылках есть, от чего бы то ни было.
+
+    Ссылки собираются всегда при сборе контекста, но в отчёты не идут:
+    их отдаёт дозапрос get_company_links.
+    """
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party()]}))
+    respx.post(settings.dadata_brand_url).mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.post(f"{settings.dadata_base_url}/suggest/okved2").mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
+        return_value=httpx.Response(503))
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(200, json={"content": []}))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(200, json={"data": []}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
+
+    res = await build_company_context("7707083893")
+
+    links = res.context.source_links
+    assert links, "ссылка на карточку реестра пропала при отказе обогащений"
+    card = next(l for l in links if "ЕГРЮЛ" in l.what)
+    # Контур по ОГРН: ИНН-формат карточек Checko отдаёт 404 (живая проверка)
+    assert card.url == "https://focus.kontur.ru/entity?query=1027700132195"
+    # Обогащения пали — финансовых ссылок нет, и это честно
+    assert all(l.source != "bo_nalog" for l in links)
+
+
+@respx.mock
+async def test_profile_heuristics_product_vs_outsourced():
+    """Товарный знак у ИТ-компании — продуктовая; без знака по 62.02 — подряд."""
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party(okved="62.01")]}))
+    respx.post(settings.dadata_brand_url).mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.post(f"{settings.dadata_base_url}/suggest/okved2").mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.get(f"{settings.checko_base_url}/finances").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {}}))
+    respx.get(f"{settings.checko_base_url}/timeline").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": []}))
+    respx.get(f"{settings.checko_base_url}/company").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {
+            # Товарный знак при основном 62.01 — признак продукта
+            "ТоварЗнак": [{"Наим": "БПМСОФТ"}],
+        }}))
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(200, json={"content": []}))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(200, json={"data": []}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
+
+    res = await build_company_context("7707083893")
+
+    assert res.context.business_model == "product"
+
+
+@respx.mock
+async def test_it_okved_gets_registry_link():
+    """ОКВЭД 62/63 — эвристика ИТ-компании: ссылка на официальный реестр
+    Минцифры для точной проверки (бесплатного API реестра нет)."""
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party(okved="62.01")]}))
+    respx.post(settings.dadata_brand_url).mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.post(f"{settings.dadata_base_url}/suggest/okved2").mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
+        return_value=httpx.Response(503))
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(200, json={"content": []}))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(200, json={"data": []}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
+
+    res = await build_company_context("7707083893")
+
+    links = res.context.source_links
+    it_link = next((l for l in links if l.source == "mincifry_registry"), None)
+    assert it_link is not None, "для ОКВЭД 62.xx нет ссылки на реестр ИТ"
+    assert "gosuslugi.ru/itorgs" in it_link.url
+    assert "62.01" in it_link.what
+
+
+DDG_URL = "https://lite.duckduckgo.com/lite/"
+
+
+def _mock_free_tier_base():
+    """Общие моки бесплатного эшелона для тестов сборки контекста."""
+    respx.post(settings.dadata_brand_url).mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.post(f"{settings.dadata_base_url}/suggest/okved2").mock(
+        return_value=httpx.Response(200, json={"suggestions": []}))
+    respx.get(f"{settings.bo_nalog_base_url}/advanced-search/organizations/search").mock(
+        return_value=httpx.Response(200, json={"content": []}))
+    respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
+        return_value=httpx.Response(200, json={"data": []}))
+    respx.get(url__regex=rf"{settings.hh_base_url}/.*").mock(
+        return_value=httpx.Response(403))
+
+
+@respx.mock
+async def test_fssp_manual_link_always_present():
+    """Ссылка на банк данных ФССП собирается всегда: точная проверка долгов
+    по ИНН возможна только вручную (автопоиск приблизителен, API — по ключу)."""
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party()]}))
+    _mock_free_tier_base()
+    respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
+        return_value=httpx.Response(503))
+    respx.post(DDG_URL).mock(return_value=httpx.Response(200, text="none"))
+
+    res = await build_company_context("7707083893")
+
+    fssp = next((l for l in res.context.source_links if l.source == "fssp_manual"), None)
+    assert fssp is not None, "ссылка на ФССП пропала"
+    assert "fssp.gov.ru/iss/ip" in fssp.url and "7707083893" in fssp.url
+
+
+@respx.mock
+async def test_brand_falls_back_to_trademark():
+    """Платный метод бренда недоступен → товарный знак из карточки.
+
+    Пробел «рыночное наименование не установлено» ломал репутационный
+    поиск: знак — бесплатный намёк на бренд из уже полученной карточки.
+    """
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party(okved="62.01")]}))
+    _mock_free_tier_base()
+    respx.get(f"{settings.checko_base_url}/finances").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {}}))
+    respx.get(f"{settings.checko_base_url}/timeline").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": []}))
+    respx.get(f"{settings.checko_base_url}/company").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {
+            "ТоварЗнак": [{"Наим": "ВЕКТОР"}],
+        }}))
+
+    res = await build_company_context("7707083893")
+
+    ctx = res.context
+    assert ctx.brand_resolved is True
+    assert ctx.brand == "ВЕКТОР"
+    assert "ВЕКТОР" in ctx.name_variants
+    assert "товарного знака" in (res.reason or "")
+
+
+@respx.mock
+async def test_brand_falls_back_to_web_search():
+    """Без знаков и с мёртвым реестровым сайтом бренд ищется веб-поиском.
+
+    Сайт из реестра не отвечает → DDG находит официальный сайт по имени →
+    сайт открывается и отвечает своим именем → домен становится брендом.
+    """
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party(name='ООО "РОМАШКА"', okved="62.01")]}))
+    _mock_free_tier_base()
+    respx.get(f"{settings.checko_base_url}/finances").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {}}))
+    respx.get(f"{settings.checko_base_url}/timeline").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": []}))
+    respx.get(f"{settings.checko_base_url}/company").mock(
+        return_value=httpx.Response(200, json={"meta": {"status": "ok"}, "data": {
+            # Сайт из реестра мёртв (как cardsmile.ru у БПМСОФТ)
+            "Контакты": {"ВебСайт": "http://dead-registry-site.ru"},
+        }}))
+    respx.get("http://dead-registry-site.ru").mock(
+        return_value=httpx.Response(200, text="<html><body>заглушка без h1</body></html>"))
+    # DDG находит официальный сайт
+    respx.post(DDG_URL).mock(return_value=httpx.Response(200, text=(
+        "<td class='result-link'><a class='result-link' "
+        "href='https://romashka.ru/about'>РОМАШКА — официальный сайт</a></td>")))
+    respx.get("https://romashka.ru/about").mock(
+        return_value=httpx.Response(200, text="<html><h1>Ромашка — софт для бизнеса</h1></html>"))
+    # После выбора бренда обогащение снимает самоназвание с корня домена
+    respx.get("https://romashka.ru").mock(
+        return_value=httpx.Response(200, text="<html><h1>Ромашка — софт для бизнеса</h1></html>"))
+
+    res = await build_company_context("7707083893")
+
+    ctx = res.context
+    assert ctx.brand_resolved is True
+    assert ctx.brand == "ROMASHKA"
+    assert ctx.brand_domain == "https://romashka.ru", "хранится корень, не глубинная страница"
+    assert "официальному сайту" in (res.reason or "")
+
+
+@respx.mock
+async def test_brand_gap_honest_when_all_fallbacks_fail():
+    """Ни знака, ни сайта, поисковик молчит — пробел остаётся честным."""
+    respx.post(FIND_URL).mock(return_value=httpx.Response(
+        200, json={"suggestions": [_party(name='ООО "РОМАШКА"', okved="62.01")]}))
+    _mock_free_tier_base()
+    respx.get(url__regex=rf"{settings.checko_base_url}/.*").mock(
+        return_value=httpx.Response(503))
+    respx.post(DDG_URL).mock(return_value=httpx.Response(200, text="no results here"))
+
+    res = await build_company_context("7707083893")
+
+    assert res.context.brand_resolved is False
+    assert "Рыночное наименование не установлено" in (res.reason or "")
+
+
 # ─────────────────  иностранные идентификаторы на входе  ─────────────────
 
 BY_URL = f"{settings.dadata_base_url}/findById/party_by"

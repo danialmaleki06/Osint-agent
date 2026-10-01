@@ -10,6 +10,9 @@
   * отчётность сдают не все: банки, страховые и часть крупных компаний
     публикуют её в своих формах, а не в ГИР БО — пустой ответ означает
     «в ресурсе не значится», а не «компания без денег»;
+  * прямая ссылка на PDF возможна не для каждой записи: когда в ответе
+    нет идентификатора correction, ссылка не строится вовсе — битые
+    ссылки в отчёте хуже отсутствующей;
   * суммы приходят в ТЫСЯЧАХ рублей — переводим в рубли сразу,
     чтобы не плодить два масштаба в одной модели;
   * поиск только по ИНН; точное соответствие обязательно.
@@ -30,6 +33,21 @@ log = structlog.get_logger()
 
 # Суммы ГИР БО приходят в тысячах рублей
 _THOUSANDS = 1_000.0
+
+# Прямая ссылка на PDF отчёта. Скачивание работает по идентификатору
+# correction из typeCorrections (проверено живьём 29.09.2026), а не по id
+# записи: /download/bfo/pdf/{rep.id} отвечает 400. Старый роут
+# /bfo/pdf/{org}?period=&detailId= теперь отдаёт пустую оболочку SPA.
+_PDF_URL = "https://bo.nalog.gov.ru/download/bfo/pdf/{detail_id}"
+
+
+def _report_url(rep: dict[str, Any]) -> str | None:
+    """Ссылка на PDF отчёта за год; None — когда идентификатора нет."""
+    for tc in rep.get("typeCorrections") or []:
+        detail_id = (tc.get("correction") or {}).get("id")
+        if detail_id:
+            return _PDF_URL.format(detail_id=detail_id)
+    return None
 
 
 class BoNalogSource:
@@ -116,10 +134,7 @@ class BoNalogSource:
                 # Суммы приходят в тысячах рублей — переводим сразу
                 revenue=float(gain) * _THOUSANDS if gain is not None else None,
                 assets=float(actives) * _THOUSANDS if actives is not None else None,
-                report_url=(
-                    f"https://bo.nalog.gov.ru/bfo/pdf/{org_id}?period={period}&detailId={rep.get('id')}"
-                    if rep.get("id") else None
-                ),
+                report_url=_report_url(rep),
             ))
 
         years.sort(key=lambda y: y.year, reverse=True)

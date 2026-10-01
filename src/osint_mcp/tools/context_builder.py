@@ -10,7 +10,9 @@
 """
 
 import asyncio
+import re
 from datetime import date, datetime
+from urllib.parse import urlparse
 
 import structlog
 
@@ -19,10 +21,25 @@ from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.dadata import DaDataSource
 from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
 from osint_mcp.context.hh import HhSource
+from osint_mcp.context.site import domain_age, site_self_description
 from osint_mcp.context.rmsp import RmspSource
-from osint_mcp.models import CompanyContext, ContextResult, TimelineEvent
+from osint_mcp.models import CompanyContext, ContextResult, SourceLink, TimelineEvent
+from osint_mcp.tools.web_search_source import search_web
+
+# Домены, которые не бывают официальным сайтом компании: соцсети,
+# агрегаторы и реестры. Веб-фолбэк бренда их пропускает.
+_NOT_A_COMPANY_SITE = (
+    "wikipedia.org", "youtube.com", "t.me", "telegram.me", "vk.com",
+    "facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com",
+    "rusprofile.ru", "checko.ru", "list-org.com", "sbis.ru",
+    "kontur.ru", "audit-it.ru", "spark-interfax.ru", "zakupki.gov.ru",
+    "bo.nalog.gov.ru", "rmsp.nalog.ru", "egrul.nalog.ru", "dadata.ru",
+    "github.com", "habr.com", "vc.ru", "tinkoff.ru", "tbank.ru",
+    "companies.rbc.ru", "rbccompanies.com", "gosuslugi.ru",
+)
+
 from osint_mcp.tools.country import detect_country
-from osint_mcp.tools.names import name_variants
+from osint_mcp.tools.names import core_name, name_variants
 
 log = structlog.get_logger()
 
@@ -47,6 +64,54 @@ def _context_from_egrul(inn: str, row: dict) -> CompanyContext:
         brand_resolved=False,
         source="egrul",
     )
+
+
+def _apply_profile_heuristics(ctx: CompanyContext) -> None:
+    """Эвристики модели бизнеса и стадии — из уже собранных данных.
+
+    Модель (product/outsourced/retail) и стадия (young/growth/mature/
+    shrinking) определяют ХАРАКТЕР риска: продукт живёт маржой и IP,
+    аутсорс — потоком заказов, розница — лояльностью. Задаются только
+    тогда, когда данных достаточно: None честнее догадки.
+    """
+    # ── модель бизнеса ──
+    okved = ctx.okved_code or ""
+    trademarks = bool(ctx.extras and ctx.extras.trademarks)
+    if okved.startswith("47.") or okved.startswith("56.") or okved.startswith("96."):
+        # розничная торговля, общепит, бытовые услуги — продажа населению
+        ctx.business_model = "retail"
+    elif trademarks and (okved.startswith("62.") or okved.startswith("63.")):
+        # свой товарный знак в ИТ — значит, есть продукт, а не только заказная разработка
+        ctx.business_model = "product"
+    elif okved in ("62.02", "62.03", "62.09"):
+        # разработка/ремонт по заказу клиентов без своих знаков — подряд
+        ctx.business_model = "outsourced"
+    # иначе None: данных не хватило — догадку не пишем
+
+    # ── стадия ──
+    age = None
+    if ctx.registered_at:
+        age = (date.today() - ctx.registered_at).days / 365.25
+    revenue = ctx.revenue_latest
+    history = ctx.fin_history or []
+    growing = False
+    if len(history) >= 2 and history[0].revenue and history[1].revenue:
+        growing = history[0].revenue > history[1].revenue * 1.1
+    hiring = ctx.hiring
+    hiring_now = bool(hiring and hiring.open_vacancies)
+    # Выросла из реестра МСП = переросла малый масштаб: признак роста,
+    # а не «shrinking». Сжатие отмечаем только по внешним признакам найма:
+    # численность без вакансий у компании младше 8 лет.
+    shrinking = (not hiring_now and age is not None and 3 <= age < 8
+                 and ctx.employees is not None and not growing)
+    if age is not None and age < 3:
+        ctx.business_stage = "young"
+    elif growing or (hiring_now and revenue):
+        ctx.business_stage = "growth"
+    elif shrinking:
+        ctx.business_stage = "shrinking"
+    elif age is not None and age >= 8:
+        ctx.business_stage = "mature"
 
 
 def _parse_event_date(value) -> "date | None":
@@ -150,6 +215,32 @@ async def build_company_context(
 
     ctx = base_ctx
 
+    # Ссылки на первоисточники собираются всегда — но в отчёты не идут:
+    # объём отчёта фиксирован, а проверяемость отдаётся дозапросом
+    # get_company_links. Карточка реестра есть у любой компании.
+    links: list[SourceLink] = []
+    if ctx.inn:
+        # Карточка Контура, а не checko.ru/company/{ИНН}: живая проверка
+        # (30.09.2026) показала, что ИНН-формат Checko отдаёт 404 — сайт
+        # отвечает только слагами вида /company/bpmsoft-{ОГРН}, которые
+        # без транслитерации имени не построишь. Контур по ОГРН открывается
+        # сразу (по ИНН — промежуточная страница, поэтому именно ОГРН).
+        what_card = "карточка организации в ЕГРЮЛ (Контур.Фокус)"
+        url_card = f"https://focus.kontur.ru/entity?query={ctx.ogrn or ctx.inn}"
+        links.append(SourceLink(what=what_card, url=url_card, source="kontur"))
+        # ИТ-компании: официального бесплатного API реестра нет (проверено
+        # 29.09.2026 — поиск Госуслуг закрыт pos-proxy с подписанными
+        # запросами), поэтому даём эвристику по ОКВЭД и ссылку на
+        # официальный реестр для точной проверки.
+        okved = ctx.okved_code or ""
+        if okved.startswith(("62.", "63.")):
+            links.append(SourceLink(
+                what=(f"деятельность по ОКВЭД {okved} — ИТ-отрасль; точный статус "
+                      "аккредитации Минцифры — поиск по ИНН в официальном реестре"),
+                url=f"https://www.gosuslugi.ru/itorgs?search={ctx.inn}",
+                source="mincifry_registry",
+            ))
+
     # Рыночное наименование — необязательное обогащение
     if not isinstance(brand, BaseException) and brand.resolved:
         ctx.brand_resolved = True
@@ -163,14 +254,6 @@ async def build_company_context(
         # Рыночное имя обязано попасть в варианты для поиска — иначе
         # публикации, где компанию называют только так, не найдутся
         ctx.name_variants = name_variants(*ctx.name_variants, brand.brand)
-
-    # Найм — сигнал направления: что компания ищет и куда растёт. Ищем
-    # по рыночному имени (под ним работодатель обычно и зарегистрирован
-    # на hh), при его отсутствии — по краткому юридическому. Источник
-    # бесплатен, исключений наружу не бросает: отказ приходит в reason.
-    search_name = ((ctx.brand or ctx.name_short) if ctx.brand_resolved
-                   else ctx.name_short) or ctx.name_legal
-    ctx.hiring = await HhSource().get_hiring(search_name)
 
     # Пробелы в сборе. Каждое необязательное обогащение может не состояться,
     # и тогда соответствующее поле останется пустым. Пустое поле неотличимо
@@ -207,6 +290,12 @@ async def build_company_context(
             # в динамике.
             ctx.fin_history = summary.years
             ctx.extras = summary.extras
+            # Ссылки на PDF отчётности ФНС собираются всегда; в отчёте их
+            # больше нет — только дозапросом
+            links.extend(SourceLink(
+                what=f"официальная отчётность ФНС за {fy.year} (PDF)",
+                url=fy.report_url, source="bo_nalog",
+            ) for fy in summary.years if fy.report_url)
             # Бесплатный тариф справочника капитал не отдаёт — берём его из
             # карточки второго источника
             if summary.capital is not None and ctx.capital is None:
@@ -225,6 +314,10 @@ async def build_company_context(
                 ctx.fin_history = bo_years
                 if bo_years[0].revenue is not None:
                     ctx.revenue_latest = bo_years[0].revenue
+                links.extend(SourceLink(
+                    what=f"официальная отчётность ФНС за {fy.year} (PDF)",
+                    url=fy.report_url, source="bo_nalog",
+                ) for fy in bo_years if fy.report_url)
                 # Масштаб остаётся unknown: без численности категории МСП
                 # по выручке одной мы не присваиваем — это делает скоринг
                 # по своему правилу, если решит иначе.
@@ -274,6 +367,18 @@ async def build_company_context(
             if rec.get("event")
         ]
 
+    # ФССП: автоматический поиск приблизителен (сопоставление по имени),
+    # а точная проверка идёт по ИНН только в официальном банке данных.
+    # Ссылка отдаёт пользователю способ проверить долги самому — польза
+    # та же, что от PDF отчётности: первоисточник вместо пересказа.
+    if ctx.inn and ctx.name_short:
+        links.append(SourceLink(
+            what=("банк данных исполнительных производств ФССП — точная "
+                  "проверка долгов по ИНН (автоматический поиск приблизителен)"),
+            url=f"https://fssp.gov.ru/iss/ip?inn={ctx.inn}",
+            source="fssp_manual",
+        ))
+
     # Реестр МСП: бесплатное независимое подтверждение масштаба. None
     # означает «не значится» — для крупного бизнеса это норма, для малого
     # странность, повод перепроверить. Отказ источника — пробел в сборе.
@@ -285,6 +390,13 @@ async def build_company_context(
         msp, msp_failure = msp_res
         if msp is not None:
             ctx.msp = msp
+            links.append(SourceLink(
+                what="запись в реестре субъектов МСП",
+                # search.html, не search: без .html роут отдаёт 404
+                # (поймано живой проверкой ссылок)
+                url=f"https://rmsp.nalog.ru/search.html?query={ctx.inn}",
+                source="rmsp",
+            ))
             if msp.category and ctx.size_category == "unknown":
                 # Категорию реестра можно брать только у действующего
                 # субъекта. Живой прогон поймал обратное: компания,
@@ -315,6 +427,111 @@ async def build_company_context(
     if ctx.okved_code and not ctx.okved_text and ctx.source == "dadata":
         ctx.okved_text = await dd.resolve_okved_text(ctx.okved_code)
 
+    # ─────── Рыночное наименование: восстановление при отказе платного метода ───────
+    # Метод бренда DaData платный и требует секретный ключ; без него пробел
+    # раньше оставался незакрытым, и веб-поиск шёл по юридическому имени.
+    # Три бесплатных эшелона восстанавливают имя и сайт: товарный знак из
+    # карточки → сайт из реестра → веб-поиск официального сайта.
+    registry_site = (ctx.extras.contacts.website
+                     if ctx.extras and ctx.extras.contacts else None)
+    if not ctx.brand_resolved:
+        # Эшелон 1: товарный знак — компания называет продукт своим именем
+        if ctx.extras and ctx.extras.trademarks:
+            ctx.brand = ctx.extras.trademarks[0]
+            ctx.brand_resolved = True
+            ctx.name_variants = name_variants(*ctx.name_variants, ctx.brand)
+            gaps.append(
+                f"Рыночное наименование взято из товарного знака «{ctx.brand}» "
+                "(платный метод бренда DaData недоступен: без секретного ключа). "
+                "Проверь совпадение: знак может не совпадать с брендом компании."
+            )
+        else:
+            # Эшелон 2: сайт из реестра, если он живой — домен и есть рыночное имя
+            candidate = None
+            if registry_site:
+                desc, fail = await site_self_description(registry_site)
+                if desc:
+                    parsed = urlparse(registry_site)
+                    candidate = f"{parsed.scheme}://{parsed.netloc}"
+            # Эшелон 3: веб-поиск официального сайта по имени компании
+            if candidate is None:
+                query = core_name(ctx.name_short or ctx.name_legal) or ctx.inn
+                # Маркеры своего сайта: токены всех вариантов имени. Кириллица
+                # «БПМСОФТ» не встречается в латинском bpmsoft.ru — сравнивать
+                # надо по всем вариантам, включая латиницу из реестра.
+                tokens = {query.lower()}
+                for variant in ctx.name_variants or ():
+                    for tok in re.split(r"[^0-9a-zа-яё]+", variant.lower()):
+                        if len(tok) >= 4:
+                            tokens.add(tok)
+                try:
+                    # retries=2: DDG троттлит серии и после 1-2 запросов
+                    # отдаёт пустую выдачу; одна пауза чаще всего спасает,
+                    # больше — фолбэк уже не должен висеть
+                    hits = await asyncio.to_thread(
+                        search_web, f"{query} официальный сайт", 5,
+                        retries=2)
+                except Exception:                            # noqa: BLE001
+                    hits = []
+                for hit in hits:
+                    url = hit.get("url") or ""
+                    host = urlparse(url).netloc.lower().removeprefix("www.")
+                    # Первый результат на свой домен (не соцсеть/агрегатор),
+                    # чей сайт открывается и отзывается своим именем
+                    if not host or host in _NOT_A_COMPANY_SITE:
+                        continue
+                    haystack = f"{host} {hit.get('title') or ''}".lower()
+                    if not any(tok in haystack for tok in tokens):
+                        continue
+                    desc, fail = await site_self_description(url)
+                    if desc:
+                        # Храним корень: возраст домена и самоназвание смотрят
+                        # на главную, а не на найденную глубинную страницу
+                        parsed = urlparse(url)
+                        candidate = f"{parsed.scheme}://{parsed.netloc}"
+                        break
+            if candidate:
+                ctx.brand_domain = candidate
+                ctx.brand_resolved = True
+                host = urlparse(candidate).netloc.lower().removeprefix("www.")
+                core = host.rsplit(".", 2)[0] if host.count(".") >= 2 else host.split(".")[0]
+                ctx.brand = core.upper() if core.isascii() else core
+                ctx.name_variants = name_variants(*ctx.name_variants, ctx.brand)
+                gaps.append(
+                    f"Рыночное наименование восстановлено по официальному сайту "
+                    f"({candidate}): бренд «{ctx.brand}». Платный метод бренда "
+                    "DaData недоступен (без секретного ключа) — проверь совпадение."
+                )
+
+    # Найм — сигнал направления: что компания ищет и куда растёт. Ищем
+    # по рыночному имени (под ним работодатель обычно и зарегистрирован
+    # на hh), при его отсутствии — по краткому юридическому. Источник
+    # бесплатен, исключений наружу не бросает: отказ приходит в reason.
+    search_name = ((ctx.brand or ctx.name_short) if ctx.brand_resolved
+                   else ctx.name_short) or ctx.name_legal
+    ctx.hiring = await HhSource().get_hiring(search_name)
+
+    # Сайт компании: возраст домена и самоназвание. Оба сигнала косвенные,
+    # оба бесплатны. Домен младше обещанного возраста бизнеса — признак
+    # перерегистрации; мёртвый DNS у «действующей» компании — тоже ответ.
+    # Блок стоит ПОСЛЕ карточки (в ctx.extras приходят сайт и знаки) и
+    # после восстановления бренда: выбранный сайт уже в brand_domain.
+    site_url = ctx.brand_domain or registry_site
+    if site_url:
+        domain_created, whois_failure = await domain_age(site_url)
+        self_description, site_failure = await site_self_description(site_url)
+        ctx.domain_created_at = domain_created
+        # Самоназвание не затираем найденным в фолбэке: если описания ещё
+        # нет — берём то, что сняли при проверке живости сайта
+        if self_description:
+            ctx.site_self_description = self_description
+        if whois_failure:
+            gaps.append(f"WHOIS по домену не проверен: {whois_failure}.")
+        if site_failure and not whois_failure:
+            gaps.append(f"Сайт не открыт: {site_failure}. "
+                        "Для «действующей» компании мёртвый сайт — сам по себе сигнал.")
+
+
     log.info("context_built", inn=ctx.inn, brand=ctx.brand,
              size=ctx.size_category, variants=len(ctx.name_variants))
 
@@ -322,6 +539,15 @@ async def build_company_context(
         gaps.append("Рыночное наименование не установлено. Веб-поиск будет вестись "
                     "только по юридическому наименованию, и отсутствие негативных "
                     "находок НИЧЕГО НЕ ДОКАЖЕТ — обязательно оговори это в выводах.")
+
+    # Ссылки на первоисточники — собранный актив, а не мусор: дозапрос
+    # get_company_links отдаёт их, когда пользователю нужно подтвердить цифры.
+    ctx.source_links = links
+
+    # Эвристики профиля: модель бизнеса и стадия. Считаются из уже собранного,
+    # новых запросов ноль. Это НЕ факты: вывод написан осторожно, а проверка
+    # остаётся за агентом и пользователем.
+    _apply_profile_heuristics(ctx)
 
     try:
         gaps.insert(0, _fallback_note)   # noqa: F821 — определена только при fallback

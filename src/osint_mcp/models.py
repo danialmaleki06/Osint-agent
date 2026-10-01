@@ -106,6 +106,20 @@ class ResolveResult(BaseModel):
     )
 
 
+class SourceLink(BaseModel):
+    """Проверяемая ссылка на первоисточник по одному направлению.
+
+    Собирается всегда при сборе контекста, но в отчёты не выводится:
+    объём отчёта фиксирован, а ссылки отдаются отдельным дозапросом
+    (get_company_links). Так отчёт остаётся коротким, но проверяемым:
+    любая цифра может быть вскрыта до первоисточника по требованию.
+    """
+
+    what: str = Field(description="Что можно проверить по этой ссылке")
+    url: str = Field(description="Ссылка на первоисточник")
+    source: str = Field(description="Какой источник дал ссылку")
+
+
 class FinancialYear(BaseModel):
     """Финансовые показатели за один год."""
 
@@ -129,6 +143,41 @@ class FinancialYear(BaseModel):
         description=(
             "Прямая ссылка на официальную отчётность ФНС (bo.nalog.gov.ru). "
             "Первичная проверяемая ссылка для любого финансового утверждения"
+        ),
+    )
+    loans: float | None = Field(
+        default=None,
+        description=(
+            "Долгосрочные заёмные средства (строка 1410), рублей. None — "
+            "строка в отчётности не заполнена либо источник не отдал"
+        ),
+    )
+    cash: float | None = Field(
+        default=None,
+        description=(
+            "Денежные средства (строка 1250), рублей. Вместе с дебиторкой — "
+            "ликвидные активы против краткосрочных долгов"
+        ),
+    )
+    short_debt: float | None = Field(
+        default=None,
+        description=(
+            "Краткосрочные обязательства (итог раздела V, строка 1500), рублей. "
+            "Вместе с loans — вся долговая нагрузка"
+        ),
+    )
+    receivables: float | None = Field(
+        default=None,
+        description=(
+            "Дебиторская задолженность (строка 1230), рублей. Подавляющая "
+            "доля к активам — деньги заморожены в чужих долгах"
+        ),
+    )
+    payables: float | None = Field(
+        default=None,
+        description=(
+            "Кредиторская задолженность (строка 1520), рублей. Рост выше "
+            "дебиторки — кассовый разрыв: деньги чужие и не свои"
         ),
     )
 
@@ -363,6 +412,22 @@ class CompanyContext(BaseModel):
     )
     brand_domain: str | None = Field(default=None, description="Официальный сайт")
     brand_summary: str | None = Field(default=None, description="Описание деятельности")
+    domain_created_at: date | None = Field(
+        default=None,
+        description=(
+            "Дата создания домена сайта (WHOIS). Домен моложе заявленного "
+            "возраста бизнеса — признак перерегистрации; None — домена нет "
+            "или WHOIS не ответил (см. что_не_собралось)"
+        ),
+    )
+    site_self_description: str | None = Field(
+        default=None,
+        description=(
+            "Как компания называет себя сама: заголовок H1 или meta description "
+            "главной страницы. Самопрезентация информативнее ОКВЭДов, но это "
+            "маркетинговый текст — не факт"
+        ),
+    )
 
     # масштаб — определяет применимость признаков риска
     size_category: Literal["micro", "small", "medium", "large", "unknown"] = Field(
@@ -435,6 +500,31 @@ class CompanyContext(BaseModel):
             "Найм по HeadHunter: открытые вакансии и названия. Список ролей "
             "читается как список текущих потребностей компании. None — "
             "источник не опрашивался либо не ответил (см. hiring.reason)"
+        ),
+    )
+    source_links: list[SourceLink] = Field(
+        default_factory=list,
+        description=(
+            "Проверяемые ссылки на первоисточники: карточки реестров, PDF "
+            "отчётности ФНС, кадровые дела. В отчёты НЕ выводятся — отдаются "
+            "дозапросом get_company_links, когда пользователь просит подтвердить"
+        ),
+    )
+    business_model: str | None = Field(
+        default=None,
+        description=(
+            "Модель бизнеса (эвристика, не факт): product — свой продукт "
+            "(товарные знаки, ИТ-аккредитация); outsourced — работы по заказу "
+            "клиентов; retail — розница/услуги населению. None — данных для "
+            "вывода не хватило. Эвристику проверяй по фактам, не выдавай за истину"
+        ),
+    )
+    business_stage: str | None = Field(
+        default=None,
+        description=(
+            "Стадия бизнеса (эвристика): young — до 3 лет; growth — растущая "
+            "выручка или найм; mature — старше 8 лет со стабильной численностью; "
+            "shrinking — численность падает при живой выручке. None — мало данных"
         ),
     )
 
@@ -585,6 +675,14 @@ class ArbitrationSummary(BaseModel):
     as_plaintiff: RoleCounts = Field(
         default_factory=RoleCounts,
         description="Компания ИСТЕЦ — она сама взыскивает. Обычно не является риском",
+    )
+    as_plaintiff_active: RoleCounts = Field(
+        default_factory=RoleCounts,
+        description=(
+            "Компания ИСТЕЦ в активной стадии дел. Систематические новые иски "
+            "о взыскании оплаты — косвенный признак того, что ей сами не "
+            "платят: кассовый разрыв у контрагента начинается с его дебиторов"
+        ),
     )
     as_both: RoleCounts = Field(
         default_factory=RoleCounts,

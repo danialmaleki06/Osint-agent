@@ -45,6 +45,18 @@ def _drop_leading(text: str, words: tuple[str, ...]) -> str:
     return text
 
 
+def core_name(*sources: str | None) -> str | None:
+    """Самое короткое «ядро» имени: то, под которым компанию знают.
+
+    Из 'ООО "ТД Вектор-2011"' получается 'Вектор-2011' — под этим ядром
+    компания в прессе, на hh и в выдаче поисковиков. None — имени нет.
+    """
+    variants = name_variants(*sources)
+    if not variants:
+        return None
+    return min(variants, key=lambda v: (len(v), variants.index(v)))
+
+
 def name_variants(*sources: str | None) -> list[str]:
     """Собрать варианты написания названия для поиска.
 

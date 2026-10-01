@@ -310,7 +310,8 @@ def _score_criterion(
             score=round(base_score, 1),
             raw_value=raw_value,
             fact_ids=[], source_urls=(
-                [f"https://checko.ru/company/{context.inn}"]
+                # Контур по ОГРН/ИНН: ИНН-формат карточек Checko отдаёт 404
+                [f"https://focus.kontur.ru/entity?query={context.ogrn or context.inn}"]
                 if context.inn else []
             ),
             reason=reason,

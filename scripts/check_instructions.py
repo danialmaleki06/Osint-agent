@@ -27,7 +27,7 @@ from mcp.client.stdio import stdio_client
 TOOL_NAMES = {"health_check", "validate_inn", "resolve_company",
               "get_company_context", "collect_risk_facts", "check_affiliations",
               "check_coverage", "get_verdict", "search_unverified",
-              "review_pending"}
+              "review_pending", "get_company_report", "get_company_links", "check_companies_batch"}
 
 # Общеупотребительные имена полей, которые пишутся без подчёркивания
 # и потому не ловятся по змеиному регистру.

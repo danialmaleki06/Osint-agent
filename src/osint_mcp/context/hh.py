@@ -12,6 +12,8 @@ dev.hh.ru); без него служба отвечает 403 — и это че
 об этом читателя отчёта.
 """
 
+import re
+
 import httpx
 import structlog
 
@@ -27,6 +29,27 @@ _HEADERS = {
     "HH-User-Agent": "osint-mcp (company research)",
     "Accept": "application/json",
 }
+
+
+# Правовая форма и кавычки в поисковом запросе только мешают: hh ищет
+# по подстроке имени работодателя, а работодатели зарегистрированы как
+# «БПМСОФТ», а не «ООО "БПМСОФТ"» — полный вид даёт пустой результат.
+_LEGAL_FORM = re.compile(
+    r"^(ООО|ОАО|ЗАО|ПАО|АО|НКО|АНО|ИП|ФГУП|ГУП|МУП)\s*", re.IGNORECASE)
+
+
+def _search_query(name: str) -> str:
+    """Имя для поиска: из «ООО "БПМСОФТ"» получается «БПМСОФТ».
+
+    Сначала пробуем содержимое кавычек — там рыночное имя; без кавычек
+    срезаем правовую форму. Внешние кавычки и ё/ё-регистрацию hh
+    приводит сам, их трогать не нужно.
+    """
+    cleaned = (name or "").strip()
+    m = re.search(r"[«\"](.+?)[»\"]", cleaned)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return _LEGAL_FORM.sub("", cleaned).replace('"', "").strip()
 
 
 class HhSource:
@@ -45,7 +68,7 @@ class HhSource:
         первый может означать и тишину найма, второй — ничего не значит.
         """
         service, method = self.name, "vacancies"
-        query = (name or "").strip()
+        query = _search_query(name)
         if not query:
             return HiringInfo(reason="имя компании не установлено, найм не искался")
 
@@ -67,10 +90,11 @@ class HhSource:
             if self._client is not None:
                 resp = await self._client.get(url, params=params, headers=headers)
             else:
-                async with httpx.AsyncClient(
-                    timeout=settings.request_timeout, headers=_HEADERS,
-                ) as client:
-                    resp = await client.get(url, params=params)
+                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+                    # headers, а не _HEADERS: здесь лежит и Authorization —
+                    # раньше токен терялся, и служба отвечала 403 даже
+                    # с настроенным HH_APP_TOKEN
+                    resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPStatusError as e:

@@ -138,16 +138,20 @@ def _brief(obj: dict, link: str, via: str | None = None) -> RelatedCompany:
     физического лица и в правопреемстве, поэтому разбор общий.
     """
     inn = obj.get("ИНН")
+    ogrn = obj.get("ОГРН")
     return RelatedCompany(
         inn=inn,
-        ogrn=obj.get("ОГРН"),
+        ogrn=ogrn,
         name=obj.get("НаимСокр") or obj.get("НаимПолн"),
         status=_text(obj.get("Статус")),
         registered_at=_parse_date(obj.get("ДатаРег")),
         okved_text=_text(obj.get("ОКВЭД")),
         link=link,
         via=via,
-        source_url=f"https://checko.ru/company/{inn}" if inn else None,
+        # Карточка Контура: ИНН/ОГРН-форматы Checko без слага отдают 404,
+        # Контур по ОГРН открывается всегда (проверено живьём 30.09.2026)
+        source_url=(f"https://focus.kontur.ru/entity?query={ogrn}" if ogrn
+                    else (f"https://focus.kontur.ru/entity?query={inn}" if inn else None)),
     )
 
 
@@ -308,6 +312,7 @@ class CheckoSource:
 
         defendant = RoleCounts()
         plaintiff = RoleCounts()
+        plaintiff_active = RoleCounts()
         both = RoleCounts()
         other = 0
         active = 0
@@ -335,6 +340,13 @@ class CheckoSource:
                 plaintiff.count += 1
                 plaintiff.total_amount += amount
                 role = "истец"
+                # Активный иск о взыскании — компания сама ждёт деньги.
+                # Единичный случай нормален, поток новых исков значит,
+                # что ей систематически не платят её заказчики: кассовый
+                # разрыв у контрагента начинается с его дебиторов
+                if rec.get("ПрАктив"):
+                    plaintiff_active.count += 1
+                    plaintiff_active.total_amount += amount
             else:
                 # ИНН не встретился ни в одной стороне: компания проходит
                 # третьим лицом либо участвует под другим идентификатором
@@ -399,6 +411,7 @@ class CheckoSource:
                 total_claim_amount=float(data.get("ОбщСуммИск") or 0.0),
                 as_defendant=defendant,
                 as_plaintiff=plaintiff,
+                as_plaintiff_active=plaintiff_active,
                 as_both=both,
                 other_participation=other,
                 roles_counted_from=len(records),
@@ -636,7 +649,7 @@ class CheckoSource:
             return failure
 
         now = datetime.now(timezone.utc)
-        card_url = f"https://checko.ru/company/{inn}"
+        card_url = f"https://focus.kontur.ru/entity?query={inn}"
         flags: dict[str, bool] = {}
         facts: list[Fact] = []
         n = 0
@@ -726,6 +739,14 @@ class CheckoSource:
                 assets=block.get(self._ASSETS),
                 balance=block.get("1700"),
                 equity=block.get("1300"),
+                # Долговая нагрузка и оборотный капитал: строки баланса.
+                # 0 в отчётности означает «не привлекали» — это данные,
+                # а не отсутствие сведений
+                loans=block.get("1410"),
+                short_debt=block.get("1500"),
+                receivables=block.get("1230"),
+                payables=block.get("1520"),
+                cash=block.get("1250"),
             ))
 
         # Ссылки на официальные отчётности ФНС: проверяемый первоисточник
@@ -1248,7 +1269,7 @@ class CheckoSource:
             rc.registered_at = rc.registered_at or _parse_date(data.get("ДатаРег"))
             rc.okved_text = rc.okved_text or _text(data.get("ОКВЭД"))
             if rc.inn and not rc.source_url:
-                rc.source_url = f"https://checko.ru/company/{rc.inn}"
+                rc.source_url = f"https://focus.kontur.ru/entity?query={rc.ogrn or rc.inn}"
 
             for field, description in RISK_FLAGS.items():
                 if data.get(field):
@@ -1375,7 +1396,7 @@ class CheckoSource:
                         fact_id=f"PERS-{n}", kind="registry_flag",
                         statement=f"{p.fio or p.inn} ({p.role_in_company}) {text}",
                         source_url=(f"https://checko.ru/person/{p.inn}" if p.inn
-                                    else f"https://checko.ru/company/{inn}"),
+                                    else f"https://focus.kontur.ru/entity?query={inn}"),
                         source_type="registry_api", retrieved_at=now,
                         payload={"person_inn": p.inn, "role": p.role_in_company},
                     ))
@@ -1390,7 +1411,7 @@ class CheckoSource:
                 fact_id=f"PERS-{n}", kind="registry_flag",
                 statement=(f"Связанная организация {rc.name or rc.inn or rc.ogrn} "
                            f"({rc.link}{', ' + rc.via if rc.via else ''}): {flags}{tail}"),
-                source_url=rc.source_url or f"https://checko.ru/company/{inn}",
+                source_url=rc.source_url or f"https://focus.kontur.ru/entity?query={inn}",
                 source_type="registry_api", retrieved_at=now,
                 payload={"inn": rc.inn, "link": rc.link, "flags": rc.flags},
             ))
