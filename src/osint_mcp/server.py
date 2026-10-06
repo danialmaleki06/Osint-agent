@@ -49,7 +49,11 @@ from osint_mcp.tools.web_search_source import search_pending as _search_pending
 from osint_mcp.context.source_catalog import (
     load_source_catalog as _load_source_catalog,
     execute_catalog_source as _execute_catalog_source,
+    execute_catalog_batch as _execute_catalog_batch,
+    save_source_to_catalog as _save_source_to_catalog,
+    SourceSpec as _SourceSpec,
 )
+
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
 _QUARANTINE_PATH = Path(__file__).parent / "config_data" / "quarantine.db"
@@ -77,7 +81,9 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "check_coverage", "get_company_report", "check_companies_batch",
          "get_company_links", "get_verdict", "search_unverified",
          "review_pending", "check_provider_limits",
-         "list_catalog_sources", "scan_catalog_source"]
+         "list_catalog_sources", "scan_catalog_source",
+         "register_custom_source", "scan_catalog_batch"]
+
 
 
 _source = DaDataSource()
@@ -1260,7 +1266,144 @@ async def scan_catalog_source(
     )
 
 
+@mcp.tool()
+def register_custom_source(
+    name: Annotated[
+        str,
+        Field(description="Уникальный идентификатор источника, например 'kz_customs_registry'", examples=["kz_customs_registry"]),
+    ],
+    topic: Annotated[
+        str,
+        Field(description="Категория темы, например 'sanctions', 'customs', 'licensing', 'company_culture'"),
+    ],
+    produces_kind: Annotated[
+        str,
+        Field(description="Вид порождаемого факта (ExtFact.kind), например 'kz_customs_violation'"),
+    ],
+    description: Annotated[
+        str,
+        Field(description="Человекочитаемое описание источника"),
+    ],
+    scope: Annotated[
+        str,
+        Field(
+            description=(
+                "'global' — единый реестр/база данных на все компании сразу; "
+                "'company_asset' — точечный аудит сайта/активов конкретной компании"
+            ),
+            examples=["global", "company_asset"],
+        ),
+    ] = "company_asset",
+    domains: Annotated[
+        list[str],
+        Field(description="Доверенные целевые домены для адресного поиска, например ['kgd.gov.kz']"),
+    ] = [],
+    keywords: Annotated[
+        list[str],
+        Field(description="Ключевые слова-сигналы для фильтрации"),
+    ] = [],
+    search_template: Annotated[
+        str,
+        Field(description="Шаблон запроса. Доступны {inn}, {name}, {domain}"),
+    ] = "",
+) -> dict:
+    """Зарегистрировать новый подключаемый источник в Каталоге источников на лету.
+
+    КОГДА ВЫЗЫВАТЬ:
+    Когда пользователю необходимо подключить новую специализированную проверку
+    (реестр лицензий, таможенные базы, специфические правила) без изменения исходного кода.
+    После регистрации источник сразу доступен для одиночных вызовов scan_catalog_source
+    и пакетных проверок scan_catalog_batch.
+    """
+    scope_norm = "global" if scope.strip().lower() == "global" else "company_asset"
+    spec = _SourceSpec(
+        scope=scope_norm,
+        topic=topic.strip(),
+        type="dataset_table" if scope_norm == "global" and not domains else "curated_domains",
+        trust="reference" if scope_norm == "global" else "mention",
+        description=description.strip(),
+        produces_kind=produces_kind.strip(),
+        domains=domains,
+        keywords=keywords,
+        search_template=search_template,
+    )
+    _save_source_to_catalog(name.strip(), spec)
+    log.info("tool_call", tool="register_custom_source", name=name, scope=scope_norm)
+    return {
+        "status": "ok",
+        "registered_source": name,
+        "scope": scope_norm,
+        "produces_kind": spec.produces_kind,
+        "note": f"Источник '{name}' успешно добавлен в каталог и готов к проверкам.",
+    }
+
+
+@mcp.tool()
+async def scan_catalog_batch(
+    source_name: Annotated[
+        str,
+        Field(description="Имя источника из Каталога источников", examples=["international_sanctions"]),
+    ],
+    inns: Annotated[
+        list[str],
+        Field(description="Список ИНН организаций для пакетной проверки (до 100 компаний)"),
+    ],
+) -> dict:
+    """Пакетная проверка списка компаний (до 100 ИНН) по единому источнику.
+
+    АРХИТЕКТУРНОЕ ПРЕИМУЩЕСТВО:
+    Для глобальных источников (scope='global') НЕ делает 100 отдельных веб-поисков!
+    Опрашивает центральную базу/реестр за один шаг.
+    Находки автоматически изолируются в карантин для каждого ИНН со ссылками на первоисточник.
+    """
+    clean_inns = [i.strip().replace(" ", "").replace("-", "") for i in inns if i.strip()]
+    if not clean_inns:
+        return {"error": "Список ИНН пуст"}
+    if len(clean_inns) > 100:
+        return {"error": "Максимальный размер пакета — 100 ИНН за один вызов"}
+
+    catalog = _load_source_catalog()
+    spec = catalog.sources.get(source_name)
+    if spec is None:
+        return {"error": f"Источник '{source_name}' не найден в каталоге"}
+
+    import asyncio
+    grouped_hits = await asyncio.to_thread(
+        _execute_catalog_batch,
+        source_name=source_name,
+        inns=clean_inns,
+        catalog=catalog,
+    )
+
+    total_added = 0
+    results_summary = {}
+    for inn, facts in grouped_hits.items():
+        if facts:
+            added = _quarantine.add(inn, facts)
+            total_added += added
+            results_summary[inn] = {
+                "hits_count": len(facts),
+                "added_to_quarantine": added,
+                "statements": [f.statement for f in facts],
+            }
+        else:
+            results_summary[inn] = {"hits_count": 0, "status": "clean_or_not_found"}
+
+    log.info("tool_call", tool="scan_catalog_batch", source=source_name,
+             companies=len(clean_inns), total_added=total_added)
+
+    return {
+        "source": source_name,
+        "scope": spec.scope,
+        "total_requested": len(clean_inns),
+        "total_hits_added": total_added,
+        "details": results_summary,
+        "note": "Пакетная проверка завершена без повторного веб-поиска по каждой компании.",
+    }
+
+
 def _serve_http() -> None:
+
 
     """Сетевой режим: тот же сервер, но доступный по адресу.
 

@@ -78,3 +78,46 @@ def test_dynamic_extra_criteria():
     assert any(m.criterion == "critical_audit_fail" for m in res.matched)
     assert res.verdict.label == "не рекомендуется"
     assert res.verdict.floored is True
+
+
+def test_global_dataset_batch_matching(tmp_path):
+    """Тест пакетного сопоставления 100 компаний по единому глобальному реестру без повторного веб-поиска."""
+    from osint_mcp.context.source_catalog import GlobalDatasetStore
+
+    store = GlobalDatasetStore(tmp_path / "test_global.db")
+    store.add_entries(
+        source_name="intl_sanctions",
+        entries=[
+            {
+                "inn": "7701000001",
+                "statement": "Субъект включён в санкционный список SDN",
+                "source_url": "https://sanctions.org/entry/1",
+            },
+            {
+                "inn": "7701000050",
+                "statement": "Субъект под блокирующими санкциями ЕС",
+                "source_url": "https://sanctions.org/entry/50",
+            },
+        ],
+    )
+
+    # Проверяем пачку из 100 ИНН
+    inns_batch = [f"7701{i:06d}" for i in range(1, 101)]
+    matches = store.match_inns(
+        source_name="intl_sanctions",
+        inns=inns_batch,
+        produces_kind="international_sanction",
+    )
+
+    # Должны мгновенно найтись совпадения по двум ИНН
+    assert len(matches["7701000001"]) == 1
+    assert matches["7701000001"][0].kind == "international_sanction"
+    assert "SDN" in matches["7701000001"][0].statement
+
+    assert len(matches["7701000050"]) == 1
+    assert "ЕС" in matches["7701000050"][0].statement
+
+    # По остальным 98 компаниям результат чистый
+    assert len(matches["7701000002"]) == 0
+    assert len(matches["7701000100"]) == 0
+

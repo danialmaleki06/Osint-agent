@@ -2,10 +2,16 @@
 
 Позволяет декларативно регистрировать внешние и подключаемые источники данных
 (санкции, проверки офиса/культуры, кадровые требования, отзывы).
-Вместо свободного поиска в поисковике запросы выполняются адресно и структурированно,
-генерируя стандартизированные ExtFact или PendingFact.
+
+Поддерживает два режима (scope):
+1. 'global' — централизованные датасеты/реестры.
+   При проверке 100 компаний такой источник не делает 100 запросов в интернет,
+   а выполняет 1 быстрый пакетный поиск по локальной базе или единому реестру.
+2. 'company_asset' — точечные проверки индивидуальных ресурсов компании
+   (официальный сайт, корпоративные правила, вакансии).
 """
 
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -19,13 +25,109 @@ from osint_mcp.scoring.models import PendingFact
 from osint_mcp.tools.web_search_source import search_web
 
 _SOURCES_CATALOG_PATH = Path(__file__).parent.parent / "config_data" / "sources.yaml"
+_GLOBAL_DATASET_DB = Path(__file__).parent.parent / "config_data" / "global_datasets.db"
+
+_DATASET_SCHEMA = """
+CREATE TABLE IF NOT EXISTS global_registry_entries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    subject_inn TEXT NOT NULL,
+    statement   TEXT NOT NULL,
+    source_url  TEXT NOT NULL,
+    payload_json TEXT,
+    created_at  TEXT NOT NULL,
+    UNIQUE(source_name, subject_inn, source_url)
+);
+CREATE INDEX IF NOT EXISTS idx_registry_lookup ON global_registry_entries(source_name, subject_inn);
+"""
+
+
+class GlobalDatasetStore:
+    """Хранилище снимков глобальных датасетов и реестров.
+
+    Позволяет мгновенно проверять пачки из 100+ ИНН по единой базе
+    за несколько миллисекунд без повторных веб-запросов.
+    """
+
+    def __init__(self, path: Path | str = _GLOBAL_DATASET_DB) -> None:
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_DATASET_SCHEMA)
+
+    def add_entries(
+        self,
+        source_name: str,
+        entries: list[dict],
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (
+                source_name,
+                e.get("inn", ""),
+                e.get("statement", ""),
+                e.get("source_url", ""),
+                e.get("payload_json", "{}"),
+                now,
+            )
+            for e in entries
+            if e.get("inn")
+        ]
+        cur = self._conn.executemany(
+            "INSERT OR IGNORE INTO global_registry_entries "
+            "(source_name, subject_inn, statement, source_url, payload_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def match_inns(
+        self,
+        source_name: str,
+        inns: list[str],
+        produces_kind: str,
+        trust: str = "reference",
+    ) -> dict[str, list[PendingFact]]:
+        """Пакетный поиск по единому глобальному реестру для списка ИНН."""
+        if not inns:
+            return {}
+        placeholders = ",".join("?" for _ in inns)
+        cur = self._conn.execute(
+            f"SELECT subject_inn, statement, source_url, created_at "
+            f"FROM global_registry_entries "
+            f"WHERE source_name=? AND subject_inn IN ({placeholders})",
+            [source_name, *inns],
+        )
+        grouped: dict[str, list[PendingFact]] = {inn: [] for inn in inns}
+        for r in cur.fetchall():
+            inn = r["subject_inn"]
+            fact_id = f"GLB-{produces_kind[:4].upper()}-{len(grouped[inn]) + 1}"
+            grouped[inn].append(
+                PendingFact(
+                    fact_id=fact_id,
+                    kind=produces_kind,
+                    statement=r["statement"],
+                    source_url=r["source_url"],
+                    found_by=f"global_dataset:{source_name}",
+                    trust=trust if trust in ("reference", "mention") else "mention",
+                    found_at=datetime.fromisoformat(r["created_at"]),
+                )
+            )
+        return grouped
+
+
+_dataset_store = GlobalDatasetStore()
 
 
 class SourceSpec(BaseModel):
     """Спецификация подключаемого источника в каталоге."""
 
+    scope: Literal["global", "company_asset"] = Field(
+        default="company_asset",
+        description="global — единый реестр на все компании; company_asset — сайт/активы конкретного юрлица",
+    )
     topic: str = Field(description="Тематическая категория (sanctions, company_culture, hr_stack, etc.)")
-    type: Literal["curated_domains", "site_inspection", "vacancy_api", "custom"] = Field(
+    type: Literal["dataset_table", "curated_domains", "site_inspection", "vacancy_api", "custom"] = Field(
         default="curated_domains",
         description="Тип адаптера источника",
     )
@@ -56,6 +158,54 @@ def load_source_catalog(path: Path | None = None) -> SourceCatalog:
     return SourceCatalog(**data)
 
 
+def save_source_to_catalog(
+    name: str,
+    spec: SourceSpec,
+    path: Path | None = None,
+) -> None:
+    """Сохранить новый источник в YAML каталога."""
+    p = path or _SOURCES_CATALOG_PATH
+    cat = load_source_catalog(p)
+    cat.sources[name] = spec
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cat.model_dump(), f, allow_unicode=True, sort_keys=False)
+
+
+def execute_catalog_batch(
+    source_name: str,
+    inns: list[str],
+    catalog: SourceCatalog | None = None,
+) -> dict[str, list[PendingFact]]:
+    """Пакетное выполнение для глобального источника на список ИНН.
+
+    Не делает 100 запросов в поисковик! Опрашивает центральную базу за 1 вызов.
+    """
+    cat = catalog or load_source_catalog()
+    spec = cat.sources.get(source_name)
+    if spec is None:
+        return {inn: [] for inn in inns}
+
+    if spec.scope == "global" and spec.type == "dataset_table":
+        # Мгновенный запрос к локальному срезу глобального реестра
+        return _dataset_store.match_inns(
+            source_name=source_name,
+            inns=inns,
+            produces_kind=spec.produces_kind,
+            trust=spec.trust,
+        )
+
+    # Если это внешний поиск по доменам, пакетные запросы объединяются в пачки
+    grouped: dict[str, list[PendingFact]] = {inn: [] for inn in inns}
+    for inn in inns:
+        grouped[inn] = execute_catalog_source(
+            source_name=source_name,
+            spec=spec,
+            inn=inn,
+        )
+    return grouped
+
+
 def execute_catalog_source(
     source_name: str,
     spec: SourceSpec,
@@ -64,13 +214,17 @@ def execute_catalog_source(
     brand_domain: str | None = None,
     limit: int = 5,
 ) -> list[PendingFact]:
-    """Выполнить целенаправленный сбор по источнику из каталога.
+    """Выполнить целенаправленный сбор по источнику из каталога."""
+    # Если источник глобальный и лежит в локальном снимке датасетов
+    if spec.scope == "global" and spec.type == "dataset_table":
+        matches = _dataset_store.match_inns(
+            source_name=source_name,
+            inns=[inn],
+            produces_kind=spec.produces_kind,
+            trust=spec.trust,
+        )
+        return matches.get(inn, [])
 
-    Вместо слепого поиска по всему интернету формирует точечный запрос:
-    - по целевым доверенным доменам (site:domain)
-    - либо по официальному сайту компании (если проверяется сайт/офис)
-    Возвращает стандартизированные находки (PendingFact) с указанием source_url и kind.
-    """
     company_name = name or inn
     queries = []
 
@@ -96,7 +250,6 @@ def execute_catalog_source(
     hits: list[PendingFact] = []
     seen_urls: set[str] = set()
 
-    # Запускаем целевые запросы
     for q in queries[:2]:
         raw_results = search_web(q, limit=limit, retries=1)
         for i, res in enumerate(raw_results):
@@ -108,7 +261,6 @@ def execute_catalog_source(
             snippet = res.get("snippet") or ""
             text = f"{title}. {snippet}".strip()
 
-            # Фильтрация по ключевым словам, если они заданы
             if spec.keywords:
                 matched_kw = [kw for kw in spec.keywords if kw.lower() in text.lower()]
                 if not matched_kw:
