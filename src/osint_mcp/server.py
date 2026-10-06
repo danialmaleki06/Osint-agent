@@ -46,6 +46,10 @@ from osint_mcp.scoring.models import (
 )
 from osint_mcp.tools.quarantine import QuarantineStore
 from osint_mcp.tools.web_search_source import search_pending as _search_pending
+from osint_mcp.context.source_catalog import (
+    load_source_catalog as _load_source_catalog,
+    execute_catalog_source as _execute_catalog_source,
+)
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
 _QUARANTINE_PATH = Path(__file__).parent / "config_data" / "quarantine.db"
@@ -72,7 +76,9 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_context", "collect_risk_facts", "check_affiliations",
          "check_coverage", "get_company_report", "check_companies_batch",
          "get_company_links", "get_verdict", "search_unverified",
-         "review_pending", "check_provider_limits"]
+         "review_pending", "check_provider_limits",
+         "list_catalog_sources", "scan_catalog_source"]
+
 
 _source = DaDataSource()
 _checko = CheckoSource()
@@ -1155,7 +1161,107 @@ async def check_provider_limits() -> ProvidersLimitsReport:
     return await _check_all_limits(_source)
 
 
+@mcp.tool()
+def list_catalog_sources() -> dict:
+    """Показать каталог доступных подключаемых источников и критериев (Библиотека сигналов).
+
+    КОГДА ВЫЗЫВАТЬ:
+    Когда требуется узнать, какие специализированные проверки доступны в системе
+    помимо базовых реестров (например: санкции, офис/животные/культура, стек вакансий, отзывы о ЗП).
+    """
+    catalog = _load_source_catalog()
+    return {
+        "catalog_sources": {
+            name: {
+                "topic": s.topic,
+                "type": s.type,
+                "trust": s.trust,
+                "description": s.description,
+                "produces_kind": s.produces_kind,
+                "domains": s.domains,
+                "keywords": s.keywords,
+            }
+            for name, s in catalog.sources.items()
+        },
+        "count": len(catalog.sources),
+        "note": "Любой из этих источников можно запустить точечно через scan_catalog_source",
+    }
+
+
+@mcp.tool()
+async def scan_catalog_source(
+    inn: Annotated[
+        str,
+        Field(description="ИНН проверяемой организации", examples=["7724744134"]),
+    ],
+    source_name: Annotated[
+        str,
+        Field(
+            description=(
+                "Имя источника из Каталога источников (см. list_catalog_sources). "
+                "Например: 'international_sanctions', 'office_environment', 'tech_stack_requirements', 'employee_reviews_salary'"
+            ),
+            examples=["office_environment", "international_sanctions"],
+        ),
+    ],
+) -> SearchUnverifiedResult:
+    """Точечно опросить подключённый источник из Библиотеки источников.
+
+    Вместо слепого поиска по всему интернету выполняет адресный поиск по доверенным
+    доменам или официальному сайту компании с фильтрацией по профильным ключевым словам.
+    Все находки изолируются в карантин с указанием вида факта (kind) и ссылки (source_url).
+    После подтверждения (review_pending) факт попадает в скоринг по правилам scoring.yaml.
+    """
+    ledger.set_subject(inn)
+    catalog = _load_source_catalog()
+    spec = catalog.sources.get(source_name)
+    if spec is None:
+        return SearchUnverifiedResult(
+            inn=inn,
+            query=source_name,
+            found=0,
+            added_to_quarantine=0,
+            hits=[],
+            note=f"Источник '{source_name}' не найден в каталоге. См. list_catalog_sources",
+        )
+
+    # Достаём название и сайт из контекста (если уже собраны)
+    context_res = await _build_context(inn, _source, _checko)
+    name = (
+        context_res.context.name_short or context_res.context.name_legal
+        if context_res.context
+        else None
+    )
+    domain = context_res.context.brand_domain if context_res.context else None
+
+    import asyncio
+    found = await asyncio.to_thread(
+        _execute_catalog_source,
+        source_name=source_name,
+        spec=spec,
+        inn=inn,
+        name=name,
+        brand_domain=domain,
+    )
+    added = _quarantine.add(inn, found)
+    log.info("tool_call", tool="scan_catalog_source", inn=inn,
+             source=source_name, found=len(found), added=added)
+
+    return SearchUnverifiedResult(
+        inn=inn,
+        query=f"catalog:{source_name}",
+        found=len(found),
+        added_to_quarantine=added,
+        hits=list(found),
+        note=(
+            f"Находки по источнику '{source_name}' помещены в карантин (kind='{spec.produces_kind}'). "
+            "Для учёта в скоринге подтвердите находку через review_pending(confirm)."
+        ),
+    )
+
+
 def _serve_http() -> None:
+
     """Сетевой режим: тот же сервер, но доступный по адресу.
 
     Отличие от локального запуска не только в транспорте. Локально

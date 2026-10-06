@@ -323,6 +323,45 @@ criteria:
       - { below: 365,  score: -8, label: "молодая компания, меньше года" }
     reason: "{label}"
 
+  # ── Подключаемые сигналы из Каталога Источников ───────────────────
+  # Сигналы из пополняемой библиотеки источников (sources.yaml).
+  # При обнаружении подтверждённого факта они влияют на скоринг
+  # по общим математическим правилам.
+
+  international_sanctions_hit:
+    group: registry_risk
+    description: "Включение в международные санкционные списки (OFAC / EU / SDN)"
+    match:
+      kind: international_sanction
+      op: exists
+    score: -90
+    warn_always: true
+    verdict_floor: "не рекомендуется"
+    reason: "Международные санкции: {statement}"
+
+  office_environment_risk:
+    group: registry_risk
+    description: "Нарушение корпоративных политик и правил офиса (стоп-фактор)"
+    match:
+      kind: office_environment_signal
+      op: exists
+    score: -100
+    warn_always: true
+    verdict_floor: "не рекомендуется"
+    reason: "Критический стоп-фактор офисной политики: {statement}"
+
+  salary_arrears_warning:
+    group: finance
+    description: "Сигналы задержки заработной платы и долгов по оплате труда"
+    match:
+      kind: employee_salary_signal
+      op: exists
+    score: -25
+    warn_always: true
+    verdict_floor: "рискованно"
+    reason: "Сигналы задержки заработной платы: {statement}"
+
+
 # ── Вердикты ────────────────────────────────────────────────────────
 # Проверяются сверху вниз: срабатывает первая строка, где total >= min
 # (или total <= max для отрицательных). require_reason — оценка ниже

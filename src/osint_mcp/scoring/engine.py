@@ -425,8 +425,14 @@ def score_company(
     context: CompanyContext | None = None,
     config_path: Path | None = None,
     pending: list[PendingFact] | None = None,
+    extra_criteria: dict[str, CriterionSpec] | None = None,
 ) -> ScoreResult:
     cfg = load_config(config_path)
+    if extra_criteria:
+        # Динамическое расширение критериев на лету без перезаписи исходного YAML
+        combined_criteria = dict(cfg.criteria)
+        combined_criteria.update(extra_criteria)
+        cfg = cfg.model_copy(update={"criteria": combined_criteria})
     today = date.today()
     now = datetime.now(timezone.utc)
 
@@ -438,6 +444,7 @@ def score_company(
     matched: list[MatchedCriterion] = []
     floors: list[tuple[str, str]] = []
     used_kinds: set[str] = set()
+
 
     for name, spec in cfg.criteria.items():
         # age_days опирается на context.registered_at, факты не матчит.

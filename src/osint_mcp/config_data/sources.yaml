@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────
+# Каталог подключаемых источников и сигналов (Source Catalog / Library)
+#
+# Разделение источников:
+# 1. Реестровые первичные источники (DaData, Checko, ЕГРЮЛ, ФССП, Федресурс,
+#    ФГИС Росаккредитация, Реестр ПО Минцифры) захардкожены в ядре и дают
+#    детерминированные факты высшего доверия (trust: registry).
+#
+# 2. Подключаемые источники из этого файла (Source Catalog) расширяют
+#    систему: санкционные списки, кадровые порталы, проверка сайта компании,
+#    внутренние политики/культура, специализированные реестры.
+#
+# Структура источника:
+#   topic:           Тема проверки (sanctions, company_culture, hr_stack, etc.)
+#   type:            Тип адаптера: curated_domains | site_inspection | vacancy_api
+#   trust:           Базовое доверие: reference | mention
+#   description:     Человекочитаемое описание источника
+#   produces_kind:   Вид факта (ExtFact.kind), который попадает в шину фактов
+#   domains:         Доверенные домены для тематического поиска
+#   search_template: Шаблон запроса при тематическом поиске
+#   keywords:        Ключевые слова и маркеры для поиска сигналов
+# ─────────────────────────────────────────────────────────────────────
+
+sources:
+  international_sanctions:
+    topic: sanctions
+    type: curated_domains
+    trust: reference
+    description: "Международные санкционные базы и вторичные списки (OpenSanctions, OFAC, EU)"
+    produces_kind: international_sanction
+    domains:
+      - "opensanctions.org"
+      - "sanctionssearch.ofac.treas.gov"
+      - "data.europa.eu"
+    search_template: 'site:{domain} ("{inn}" OR "{name}")'
+    keywords:
+      - "sanctions"
+      - "sdn list"
+      - "asset freeze"
+      - "санкционный список"
+
+  office_environment:
+    topic: company_culture
+    type: site_inspection
+    trust: mention
+    description: "Внутренний распорядок, правила офиса и корпоративная культура компании"
+    produces_kind: office_environment_signal
+    search_template: '"{name}" ("в офисе" OR "культура" OR "офисный" OR "животные" OR "собака")'
+    keywords:
+      - "собака в офисе"
+      - "dog friendly"
+      - "дог-френдли"
+      - "питомцы в офисе"
+      - "животные в офисе"
+      - "офисный пес"
+      - "офисный кот"
+
+  tech_stack_requirements:
+    topic: hr_stack
+    type: curated_domains
+    trust: reference
+    description: "Технологический стек, используемое ПО и требования в вакансиях (HH, Habr)"
+    produces_kind: tech_stack_signal
+    domains:
+      - "hh.ru"
+      - "career.habr.com"
+      - "superjob.ru"
+    search_template: 'site:{domain} "{name}" ("стек" OR "знание" OR "опыт работы")'
+    keywords:
+      - "1с"
+      - "bitrix"
+      - "postgresql"
+      - "python"
+      - "kubernetes"
+      - "linux"
+
+  employee_reviews_salary:
+    topic: hr_reviews
+    type: curated_domains
+    trust: mention
+    description: "Отзывы бывших и текущих сотрудников — сигналы задержек зарплаты и кассовых разрывов"
+    produces_kind: employee_salary_signal
+    domains:
+      - "dreamjob.ru"
+      - "pravda-sotrudnikov.ru"
+      - "neorabote.net"
+    search_template: 'site:{domain} "{name}" ("задержка зарплаты" OR "не платят" OR "серая зарплата")'
+    keywords:
+      - "задержка зарплаты"
+      - "не платят зарплату"
+      - "долги по зарплате"
+      - "задержки зп"
