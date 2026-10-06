@@ -116,3 +116,40 @@ sources:
       - "analytics"
       - "ym"
       - "ga"
+
+  customs_ved_trade:
+    scope: company_asset
+    topic: customs_ved
+    type: curated_domains
+    trust: reference
+    description: "Таможенные декларации и внешнеэкономическая деятельность (импорт/экспорт, цепочки поставок, санкционные риски)"
+    produces_kind: customs_trade_signal
+    domains:
+      - "customs.gov.ru"
+      - "stat.customs.gov.ru"
+      - "importgenius.com"
+      - "statimex.ru"
+    search_template: '"{inn}" ("декларация" OR "импорт" OR "экспорт" OR "ГТД" OR "ВЭД")'
+    keywords:
+      - "таможенная декларация"
+      - "импортные поставки"
+      - "экспорт"
+      - "ГТД"
+
+  geo_maps_reviews:
+    scope: company_asset
+    topic: geo_reality
+    type: curated_domains
+    trust: mention
+    description: "Картографический OSINT (Яндекс.Карты, 2ГИС): физическая реальность адреса и семантика свежих отзывов"
+    produces_kind: operational_issue_signal
+    domains:
+      - "yandex.ru"
+      - "2gis.ru"
+    search_template: '"{name}" ("отзывы" OR "карты" OR "панорамы")'
+    keywords:
+      - "отзывы"
+      - "яндекс карты"
+      - "2gis"
+      - "жалоба"
+      - "задержка"

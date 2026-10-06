@@ -371,6 +371,37 @@ criteria:
     warn_always: true
     reason: "Цифровая аффилированность / скрытый холдинг: {statement}"
 
+  customs_trade_activity:
+    group: finance
+    description: "Подтвержден реальный физический товарооборот ВЭД (импорт/экспорт)"
+    match:
+      kind: customs_trade_signal
+      op: exists
+    score: 10
+    warn_always: true
+    reason: "ВЭД и таможенные операции: {statement}"
+
+  suspicious_physical_address:
+    group: registry_risk
+    description: "Подозрительный физический адрес на картах/панорамах (гаражи, пустыри, барак)"
+    match:
+      kind: suspicious_address_signal
+      op: exists
+    score: -40
+    warn_always: true
+    verdict_floor: "рискованно"
+    reason: "Физическая реальность адреса: {statement}"
+
+  operational_customer_issues:
+    group: litigation
+    description: "Систематические операционные сбои по свежим отзывам клиентов на картах"
+    match:
+      kind: operational_issue_signal
+      op: exists
+    score: -15
+    warn_always: true
+    reason: "Операционные сбои (отзывы на картах): {statement}"
+
 
 # ── Вердикты ────────────────────────────────────────────────────────
 # Проверяются сверху вниз: срабатывает первая строка, где total >= min

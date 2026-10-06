@@ -57,6 +57,14 @@ from osint_mcp.context.web_analytics import (
     search_domains_sharing_tracker as _search_domains_sharing_tracker,
     build_analytics_affiliation_facts as _build_analytics_affiliation_facts,
 )
+from osint_mcp.context.customs import (
+    build_customs_facts as _build_customs_facts,
+    evaluate_customs_findings as _evaluate_customs_findings,
+)
+from osint_mcp.context.geo_reviews import (
+    build_geo_reviews_facts as _build_geo_reviews_facts,
+    evaluate_geo_findings as _evaluate_geo_findings,
+)
 
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
@@ -87,7 +95,8 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "review_pending", "check_provider_limits",
          "list_catalog_sources", "scan_catalog_source",
          "register_custom_source", "scan_catalog_batch",
-         "check_shared_analytics"]
+         "check_shared_analytics", "check_customs_ved",
+         "check_geo_reviews"]
 
 
 
@@ -1520,6 +1529,165 @@ async def check_shared_analytics(
             "Если обнаружены родственные домены (is_probable_holding=True), "
             "проанализируйте их: схожа ли тематика или бренд. "
             "Связанные домены указывают на общих бенефициаров, параллельные проекты или материнский холдинг."
+        ),
+    }
+
+
+@mcp.tool()
+async def check_customs_ved(
+    inn: Annotated[
+        str,
+        Field(
+            description="ИНН организации для таможенной проверки и анализа ВЭД (импорт/экспорт/санкционные риски)",
+            examples=["7724744134"],
+        ),
+    ],
+    company_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Опциональное наименование компании (если не передано, берется из реестрового контекста)",
+        ),
+    ] = None,
+) -> dict:
+    """Анализ таможенных данных и внешнеэкономической деятельности (ВЭД, импорт/экспорт).
+
+    КАК ЭТО РАБОТАЕТ В OSINT:
+    Проверяются таможенные декларации (ГТД), базы ФТС и агрегаторы поставок (ImportGenius, Statimex) по ИНН.
+
+    КАК АГЕНТУ ИНТЕРПРЕТИРОВАТЬ РЕЗУЛЬТАТЫ ДЛЯ ПОЛЬЗОВАТЕЛЯ:
+    1. САНКЦИОННЫЕ РИСКИ И ЗАВИСИМОСТЬ:
+       - Если компания импортирует сырье, микроэлектронику или запчасти из ЕС, США или недружественных стран —
+         у нее высокий риск срыва логистики, блокировки платежей через банки и угроза вторичных санкций.
+       - Триггер для предложения: параллельный импорт, альтернативные цепочки (Китай, Турция, СНГ) или защита ВЭД.
+    2. РЕАЛЬНЫЙ ТОВАРООБОРОТ VS "БУМАЖНЫЙ БАЛАНС":
+       - Баланс в ФНС можно искусственно завысить, но таможенную стоимость и ГТД подделать крайне сложно.
+       - Наличие таможенного оформления подтверждает реальную физическую деятельность компании.
+    3. СМЕНА ПОСТАВЩИКА / РАЗРЫВ ЦЕПОЧКИ:
+       - Если компания внезапно прекратила возить от постоянного китайского или европейского завода,
+         это сигнал кризиса отношений с поставщиком или проблем с расчетами.
+    """
+    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    target_name = company_name
+
+    if not target_name:
+        ctx_res = await _build_context(clean_inn, _source, _checko)
+        if ctx_res.context:
+            target_name = ctx_res.context.name_short or ctx_res.context.name_legal
+
+    import asyncio
+    facts = await asyncio.to_thread(
+        _build_customs_facts,
+        inn=clean_inn,
+        company_name=target_name,
+    )
+
+    added_to_quarantine = 0
+    if facts:
+        added_to_quarantine = _quarantine.add(clean_inn, facts)
+
+    profile = _evaluate_customs_findings(clean_inn, [])
+    # Если нашлись факты в веб-поиске, формируем профиль по первому факту
+    interpretation = facts[0].statement if facts else profile.interpretation
+
+    log.info("tool_call", tool="check_customs_ved", inn=clean_inn,
+             name=target_name, facts_count=len(facts), quarantined=added_to_quarantine)
+
+    return {
+        "inn": clean_inn,
+        "company_name": target_name,
+        "has_ved_activity": bool(facts),
+        "facts_found": len(facts),
+        "added_to_quarantine": added_to_quarantine,
+        "interpretation": interpretation,
+        "guidance_for_analyst": (
+            "Оцените страны происхождения: наличие импорта из ЕС/США несет валютные и логистические риски. "
+            "Используйте подтвержденные поставки как доказательство реального физического бизнеса."
+        ),
+    }
+
+
+@mcp.tool()
+async def check_geo_reviews(
+    inn: Annotated[
+        str,
+        Field(
+            description="ИНН организации для картографического OSINT и проверки отзывов",
+            examples=["7724744134"],
+        ),
+    ],
+    address: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Опциональный юридический или фактический адрес (если не передан, берется из ЕГРЮЛ)",
+        ),
+    ] = None,
+) -> dict:
+    """Картографический OSINT, панорамы и семантика отзывов клиентов (Яндекс.Карты, 2ГИС).
+
+    КАК ЭТО РАБОТАЕТ В OSINT:
+    Сопоставляется юридический адрес из ЕГРЮЛ с реальными гео-объектами на картах,
+    а также анализируется семантика свежих пользовательских отзывов.
+
+    КАК АГЕНТУ ИНТЕРПРЕТИРОВАТЬ РЕЗУЛЬТАТЫ ДЛЯ ПОЛЬЗОВАТЕЛЯ:
+    1. ФИЗИЧЕСКАЯ РЕАЛЬНОСТЬ (ОТЛИЧИЕ ОТ "БУМАЖНОГО" ЮРЛИЦА):
+       - Если компания заявляет выручку в миллиард рублей, но по адресу регистрации на картах
+         находится гаражный кооператив (ГСК), пустырь, трансформаторная будка или жилой барак —
+         это жесткий маркер "прачечной" / технической фирмы.
+       - Наличие реального офисного центра, склада или производственного цеха подтверждает состоятельность.
+    2. ОПЕРАЦИОННЫЕ И КАССОВЫЕ СБОИ:
+       - Не смотрите только на средний балл (4.3). Анализируйте свежие отзывы за последний месяц:
+         жалобы "хамят", "не берут трубку", "сорвали срок поставки на 3 недели", "грязно" —
+         прямой сигнал кассового разрыва, увольнения ключевого персонала или сбоя логистики.
+       - Триггер для предложения: внедрение CRM, контроль качества, автоматизация логистики, обучение персонала.
+    """
+    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    target_addr = address
+    target_name = None
+
+    if not target_addr or not target_name:
+        ctx_res = await _build_context(clean_inn, _source, _checko)
+        if ctx_res.context:
+            if not target_addr:
+                target_addr = ctx_res.context.address_full
+            target_name = ctx_res.context.name_short or ctx_res.context.name_legal
+
+    if not target_addr:
+        return {
+            "inn": clean_inn,
+            "status": "no_address",
+            "message": "Юридический адрес организации не найден.",
+        }
+
+    import asyncio
+    facts = await asyncio.to_thread(
+        _build_geo_reviews_facts,
+        inn=clean_inn,
+        company_name=target_name or clean_inn,
+        address=target_addr,
+    )
+
+    added_to_quarantine = 0
+    if facts:
+        added_to_quarantine = _quarantine.add(clean_inn, facts)
+
+    interpretation = facts[0].statement if facts else "Физическое присутствие подтверждено, критических сигналов не выявлено."
+
+    log.info("tool_call", tool="check_geo_reviews", inn=clean_inn,
+             address=target_addr, facts_count=len(facts), quarantined=added_to_quarantine)
+
+    return {
+        "inn": clean_inn,
+        "company_name": target_name,
+        "address": target_addr,
+        "facts_found": len(facts),
+        "added_to_quarantine": added_to_quarantine,
+        "interpretation": interpretation,
+        "guidance_for_analyst": (
+            "Если обнаружен сомнительный физический адрес (гараж/пустырь при миллиардных оборотах), "
+            "немедленно предупредите пользователя о риске фиктивной компании. "
+            "При операционных сбоях в отзывах используйте это как коммерческий триггер для аудита и автоматизации."
         ),
     }
 
