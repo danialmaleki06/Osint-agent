@@ -65,6 +65,7 @@ from osint_mcp.context.geo_reviews import (
     build_geo_reviews_facts as _build_geo_reviews_facts,
     evaluate_geo_findings as _evaluate_geo_findings,
 )
+from osint_mcp.context.site import inspect_site_content as _inspect_site_content
 
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
@@ -1477,7 +1478,7 @@ async def check_shared_analytics(
         }
 
     # Инспектируем сайт и извлекаем идентификаторы счетчиков
-    _, tech, err = await inspect_site_content(target_site)
+    _, tech, err = await _inspect_site_content(target_site)
     tracker_ids = tech.tracker_ids if tech else {}
 
     if not tracker_ids:
