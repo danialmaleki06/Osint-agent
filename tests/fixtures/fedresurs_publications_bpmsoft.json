@@ -1,0 +1,77 @@
+{
+  "pageData": [
+    {
+      "guid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "number": "4155321",
+      "datePublish": "2026-05-12T10:15:00.00",
+      "isAnnuled": false,
+      "isLocked": false,
+      "title": "Уведомление о возникновении залога движимого имущества. Залогодатель: ООО \"БПМСОФТ\". Вид и описание предмета залога: станки фрезерные с ЧПУ, 3 ед.",
+      "publisherName": "ООО \"БАНК РОСТА\"",
+      "type": "SfactMessage",
+      "publisherType": "Company",
+      "isRefuted": false
+    },
+    {
+      "guid": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "number": "4160007",
+      "datePublish": "2026-04-02T09:00:00.00",
+      "isAnnuled": false,
+      "isLocked": false,
+      "title": "Уведомление о заключении договора лизинга. Лизингодатель: АО \"ЛЕАЗИНГ\". Лизингополучатель: ООО \"БПМСОФТ\". Предмет лизинга: автотранспортное средство ГАЗель NEXT, 2 ед.",
+      "publisherName": "АО \"ЛЕАЗИНГ\"",
+      "type": "SfactMessage",
+      "publisherType": "Company",
+      "isRefuted": false
+    },
+    {
+      "guid": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "number": "4160450",
+      "datePublish": "2026-03-20T14:30:00.00",
+      "isAnnuled": false,
+      "isLocked": false,
+      "title": "Уведомление о факторинге. Клиент: ООО \"БПМСОФТ\". Финансовый агент: ООО \"ФАКТОР ПЛЮС\". Денежное требование: 5 400 000 руб.",
+      "publisherName": "ООО \"ФАКТОР ПЛЮС\"",
+      "type": "SfactMessage",
+      "publisherType": "Company",
+      "isRefuted": false
+    },
+    {
+      "guid": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+      "number": "3100225",
+      "datePublish": "2025-11-14T11:00:00.00",
+      "isAnnuled": false,
+      "isLocked": false,
+      "title": "Сообщение о членстве в саморегулируемой организации. ООО \"БПМСОФТ\" является членом СРО А \"СТРОИТЕЛИ-М\"",
+      "publisherName": "СРО А \"СТРОИТЕЛИ-М\"",
+      "type": "TradeOrgMessage",
+      "publisherType": "TradeOrganization",
+      "isRefuted": false
+    },
+    {
+      "guid": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+      "number": "4160999",
+      "datePublish": "2026-02-10T08:45:00.00",
+      "isAnnuled": false,
+      "isLocked": false,
+      "title": "Сообщение о существенных фактах хозяйственной деятельности: ООО \"БПМСОФТ\" заключило договор перевозки",
+      "publisherName": "ООО \"БПМСОФТ\"",
+      "type": "SfactMessage",
+      "publisherType": "Company",
+      "isRefuted": false
+    },
+    {
+      "guid": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+      "number": "9990001",
+      "datePublish": "2026-01-15T12:00:00.00",
+      "isAnnuled": true,
+      "isLocked": false,
+      "title": "Объявление о проведении торгов по продаже имущества должника",
+      "publisherName": "Арбитражный управляющий",
+      "type": "BankruptcyMessage",
+      "publisherType": "ArbitrManager",
+      "isRefuted": false
+    }
+  ],
+  "found": 6
+}

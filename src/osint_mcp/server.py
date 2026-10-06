@@ -27,6 +27,7 @@ from osint_mcp.models import (
     ContextResult,
     CoverageReport,
     InnCheck,
+    ProvidersLimitsReport,
     ResolveResult,
     RiskCollection,
     ServerHealth,
@@ -34,6 +35,7 @@ from osint_mcp.models import (
 from osint_mcp.tools.context_builder import build_company_context as _build_context
 from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
+from osint_mcp.tools.quota import check_all_limits as _check_all_limits
 from osint_mcp.tools.report import build_batch_entry as _build_batch_entry
 from osint_mcp.tools.report import build_report as _build_report
 from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
@@ -70,7 +72,7 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_context", "collect_risk_facts", "check_affiliations",
          "check_coverage", "get_company_report", "check_companies_batch",
          "get_company_links", "get_verdict", "search_unverified",
-         "review_pending"]
+         "review_pending", "check_provider_limits"]
 
 _source = DaDataSource()
 _checko = CheckoSource()
@@ -670,7 +672,7 @@ async def get_company_report(
     if context_result.context is None and risk.sources_ok == 0:
         return {
             "inn": inn,
-            "вердикт": "нельзя",
+            "вердикт": "не рекомендуется",
             "оценка_не_выставлена": (
                 "Реестровые источники недоступны"
                 + (f": {context_result.reason}" if context_result.reason else "")
@@ -809,7 +811,7 @@ async def check_companies_batch(
             log.warning("batch_item_failed", inn=inn, error=type(e).__name__)
             entries.append({
                 "inn": inn,
-                "вердикт": "нельзя",
+                "вердикт": "не рекомендуется",
                 "оценка_не_выставлена": (
                     f"Проверка не состоялась: внутренняя ошибка {type(e).__name__}. "
                     "Это НЕ оценка компании — повторите по отдельности."
@@ -950,7 +952,7 @@ async def get_verdict(
                     context_status=context_result.status)
         return ScoreResult(
             inn=inn,
-            verdict=Verdict(label="нельзя", total_score=0.0),
+            verdict=Verdict(label="не рекомендуется", total_score=0.0),
             groups=[],
             matched=[],
             reasons=["Оценка не производилась — " + reason],
@@ -1120,6 +1122,37 @@ def review_pending(
         return {"rejected": ok}
 
     return {"error": f"Неизвестное action: {action} (list/confirm/reject)"}
+
+
+@mcp.tool()
+async def check_provider_limits() -> ProvidersLimitsReport:
+    """Проверить остаток суточных квот, лимитов и состояние ключей всех провайдеров.
+
+    КОГДА ВЫЗЫВАТЬ:
+    ТОЛЬКО и ИСКЛЮЧИТЕЛЬНО тогда, когда пользователь ЯВНО и ПРЯМО спрашивает
+    о лимитах, квотах, балансе обращений или остатке запросов к сервисам
+    (например: «сколько запросов осталось?», «какие лимиты у провайдеров?»,
+    «проверь квоту DaData/Checko», «хватит ли лимитов на сегодня?»,
+    «какой остаток обращений?»).
+
+    КОГДА НЕ ВЫЗЫВАТЬ:
+    НИКОГДА не вызывай этот инструмент автоматически в ходе обычной проверки
+    организации, сборе рисков, построении досье или обычном диалоге о компании.
+    Для отчёта о расходе запросов по конкретной проверенной организации
+    используй check_coverage. Этот инструмент — сугубо для прямых
+    административных вопросов пользователя о лимитах и квотах API.
+
+    ЧТО ВОЗВРАЩАЕТ:
+    - dadata: точный остаток суточной квоты по методам (findById, suggest, brand)
+      и статус ключей в пуле;
+    - checko: статус ключей пула и суточный расход;
+    - apicloud: статус резервного агрегатора;
+    - hh: статус токена HeadHunter;
+    - open_registries: статус бесплатных открытых источников (ГИР БО, МСП, ЕГРЮЛ, Федресурс, Росаккредитация);
+    - alerts: критические предупреждения о скором исчерпании или неисправности ключей.
+    """
+    log.info("tool_call", tool="check_provider_limits")
+    return await _check_all_limits(_source)
 
 
 def _serve_http() -> None:

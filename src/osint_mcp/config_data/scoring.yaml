@@ -65,7 +65,7 @@ criteria:
       values: ["ликвид", "прекращ", "реорганиз"]
     score: -100
     warn_always: true
-    verdict_floor: "нельзя"
+    verdict_floor: "не рекомендуется"
     reason: "Организация не действует: {statement}"
 
   bankruptcy:
@@ -75,7 +75,7 @@ criteria:
       kind: bankruptcy
     score: -90
     warn_always: true
-    verdict_floor: "нельзя"
+    verdict_floor: "не рекомендуется"
     reason: "Процедура банкротства: {statement}"
 
   sanctioned:
@@ -88,7 +88,7 @@ criteria:
       values: ["Санкции", "СанкцУчр", "НелегалФин"]
     score: -85
     warn_always: true
-    verdict_floor: "нельзя"
+    verdict_floor: "не рекомендуется"
     reason: "Санкционные/финансовые отметки: {statement}"
 
   unfair_supplier:
@@ -101,7 +101,7 @@ criteria:
       values: ["НедобПост"]
     score: -50
     warn_always: true
-    verdict_floor: "не стоит"
+    verdict_floor: "рискованно"
     reason: "Компания в реестре недобросовестных поставщиков"
 
   mass_management:
@@ -114,7 +114,7 @@ criteria:
       values: ["МассРуковод", "МассУчред", "ДисквЛица"]
     score: -30
     warn_always: true
-    verdict_floor: "не стоит"
+    verdict_floor: "рискованно"
     reason: "Признаки ненадёжного руководства: {statement}"
 
   enforcement_debt:
@@ -183,6 +183,134 @@ criteria:
     warn_always: true
     reason: "{count} подозрительных связей в аффилированной сети"
 
+  # ── Коммерческие сигналы Федресурса ─────────────────────────────
+  # Лизинг и залоги говорят о реальной деятельности и активах:
+  # платёжеспособная компания с физическими активами надёжнее
+  # бумажной. Веса малы и положительны — это не гарантия, а
+  # подтверждение жизни бизнеса. Затухание по дате публикации:
+  # договор трёхлетней давности почти ничего не говорит о сегодня.
+
+  leasing_activity:
+    group: finance
+    description: "Договоры лизинга (Федресурс) — активы и платёжеспособность"
+    match:
+      kind: leasing
+    aggregate: count
+    thresholds:
+      - { above: 4, score: 4, label: "активный лизинг — парк техники растёт" }
+      - { above: 0, score: 2, label: "техника в лизинге" }
+    decay:
+      half_life_days: 1095
+    warn_always: false
+    reason: "{label} ({count} публикаций)"
+
+  pledge_activity:
+    group: finance
+    description: "Залоги движимого имущества (Федресурс) — кредит под активы"
+    match:
+      kind: pledge
+    aggregate: count
+    thresholds:
+      - { above: 2, score: 3, label: "несколько залогов — кредитная история с обеспечением" }
+      - { above: 0, score: 1, label: "залог оборудования" }
+    decay:
+      half_life_days: 1095
+    warn_always: false
+    reason: "{label} ({count} публикаций)"
+
+  # ── Негативные сигналы Федресурса ──────────────────────────────
+  # Факторинг — не риск сам по себе, но поток уступок дебиторки —
+  # признак кассовых разрывов: компания конвертирует будущую выручку
+  # в живые деньги. Вместе с долгами ФССП усиливает картину.
+  # Гарантии сами по себе нейтральны (тендерное обеспечение) и
+  # критерия не получают — иначе покупка гарантий поднимала бы вердикт.
+
+  factoring_usage:
+    group: finance
+    description: "Договоры факторинга (Федресурс) — финансирование дебиторки"
+    match:
+      kind: factoring
+    aggregate: count
+    thresholds:
+      - { above: 2, score: -4, label: "регулярный факторинг — кассовые разрывы" }
+      - { above: 0, score: -2, label: "факторинг — финансирование дебиторки" }
+    decay:
+      half_life_days: 730
+    warn_always: false
+    reason: "{label} ({count} публикаций)"
+
+  sro_membership:
+    group: finance
+    description: "Членство в СРО (Федресурс) — допуск к регулируемой деятельности"
+    match:
+      kind: sro_membership
+    aggregate: count
+    thresholds:
+      - { above: 0, score: 2, label: "член СРО" }
+    decay:
+      half_life_days: 1825
+    warn_always: false
+    reason: "{label} ({count} публикаций)"
+
+  # ── Сертификаты Росаккредитации ─────────────────────────────────
+  # Действующие декларации — компания реально возит товар. Истёкший
+  # документ без продления — товар снят с воза или работа «в серую»
+  # по этой позиции; знак выбирается ступенью по свежести endDate.
+
+  fsa_active_certificate:
+    group: finance
+    description: "Действующие сертификаты и декларации (Росаккредитация) — чем реально торгует"
+    match:
+      kind: fsa_certificate
+      field: end_date
+      op: exists
+    aggregate: count
+    thresholds:
+      - { above: 4, score: 3, label: "портфель подтверждённой продукции" }
+      - { above: 0, score: 1, label: "действующие документы соответствия" }
+    warn_always: false
+    reason: "{label} ({count})"
+
+  # ── Интеллектуальная собственность (Роспатент) ─────────────────
+  # Зарегистрированный товарный знак — подтверждение реального
+  # коммерческого оборота и защиты нематериальных активов. Пустышки
+  # знаков не регистрируют.
+
+  trademarks_registered:
+    group: finance
+    description: "Зарегистрированные товарные знаки (Роспатент / ФИПС) — защита бренда и активы"
+    match:
+      kind: trademark
+    aggregate: count
+    thresholds:
+      - { above: 2, score: 2, label: "портфель товарных знаков" }
+      - { above: 0, score: 1, label: "зарегистрирован товарный знак" }
+    warn_always: false
+    reason: "{label} ({count})"
+
+  russian_software_registered:
+    group: finance
+    description: "Продукты в едином реестре российского ПО Минцифры — IT-статус и преференции"
+    match:
+      kind: software_registry
+    aggregate: count
+    thresholds:
+      - { above: 1, score: 3, label: "несколько продуктов в реестре российского ПО" }
+      - { above: 0, score: 2, label: "продукт в реестре российского ПО Минцифры" }
+    warn_always: false
+    reason: "{label} ({count})"
+
+  planned_inspections:
+    group: registry_risk
+    description: "Назначенные плановые проверки в ЕРКНМ"
+    match:
+      kind: planned_inspection
+    aggregate: count
+    thresholds:
+      - { above: 0, score: 0, label: "плановая проверка надзорного органа" }
+    warn_always: false
+    reason: "{label} ({count})"
+
   company_age:
     group: finance
     description: "Возраст компании — сколько лет на рынке"
@@ -201,8 +329,8 @@ criteria:
 # этой строки обязана иметь хотя бы одну краткую причину.
 
 verdicts:
-  - { min: 75,  label: "надёжный" }
-  - { min: 50,  label: "можно работать" }
-  - { min: 0,   label: "с осторожностью", require_reason: false }
-  - { max: -1,  label: "не стоит", require_reason: true }
-  - { max: -60, label: "нельзя", require_reason: true }
+  - { min: 75,  label: "отлично" }
+  - { min: 50,  label: "хорошо" }
+  - { min: 0,   label: "удовлетворительно", require_reason: false }
+  - { max: -1,  label: "рискованно", require_reason: true }
+  - { max: -60, label: "не рекомендуется", require_reason: true }

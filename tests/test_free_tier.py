@@ -351,6 +351,33 @@ async def test_hh_vacancies_parsed():
     assert info.reason is None
 
 
+@respx.mock
+async def test_hh_leadership_and_tech_stack_extracted():
+    """Из сниппетов и названий извлекаются ключевые роли (РОП) и софт (1С, Bitrix24)."""
+    items = [
+        {
+            "name": "Руководитель отдела продаж (РОП)",
+            "snippet": {"requirement": "Опыт работы в Bitrix24 и 1С:УТ", "responsibility": "Управление"},
+        },
+        {
+            "name": "Senior Python Разработчик",
+            "snippet": {"requirement": "Знание Python, Docker, PostgreSQL", "responsibility": "Разработка"},
+        },
+    ]
+    respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={"found": 2, "items": items})
+    )
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("БПМСОФТ")
+
+    assert "Руководитель отдела продаж (РОП)" in info.leadership_roles
+    assert "1С" in info.tech_stack
+    assert "Битрикс24" in info.tech_stack
+    assert "Python" in info.tech_stack
+    assert "SQL / PostgreSQL" in info.tech_stack
+    assert info.it_investing is True
+
+
 def test_hh_search_query_strips_legal_form():
     """Полное юр. имя нормализуется до рыночного: hh ищет по подстроке.
 
@@ -441,3 +468,30 @@ def test_sales_block_in_full_report():
     assert any("товарные знаки" in line for line in sales)
     assert any("2" in line and "Java-разработчик" in line for line in sales)
     assert any("окно входа" in line for line in sales)
+
+
+def test_sales_block_renders_site_tech_and_ssl():
+    """Стек сайта, SSL и внутренний софт попадают в блок коммерческих сигналов."""
+    from osint_mcp.models import HiringInfo, SiteTechInfo, SslInfo
+    from osint_mcp.tools.report import _full_sections
+
+    ctx = CompanyContext(
+        inn="7724744134", country="RU", name_legal="ООО Т", name_short="Т",
+        registered_at=date(2010, 1, 1),
+        hiring=HiringInfo(
+            open_vacancies=1, roles=["РОП"], leadership_roles=["РОП"],
+            tech_stack=["1С", "Битрикс24"], it_investing=True,
+        ),
+        site_tech=SiteTechInfo(
+            cms=["1C-Битрикс"], crm_widgets=["Битрикс24"], analytics=["Яндекс.Метрика"]
+        ),
+        ssl_info=SslInfo(valid=True, issuer="Let's Encrypt", days_left=90),
+    )
+    sections = {s["название"]: s["пункты"] for s in _full_sections(ctx, None)}
+    sales = sections["коммерческие сигналы"]
+
+    assert any("окно входа для B2B" in line and "РОП" in line for line in sales)
+    assert any("внутренний софт" in line and "Битрикс24" in line for line in sales)
+    assert any("инвестиции в IT/R&D" in line for line in sales)
+    assert any("стек сайта" in line and "1C-Битрикс" in line for line in sales)
+    assert any("SSL-сертификат" in line and "Let's Encrypt" in line for line in sales)

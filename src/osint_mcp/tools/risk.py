@@ -15,6 +15,9 @@ import structlog
 
 from osint_mcp.context.apicloud import ApiCloudSource
 from osint_mcp.context.checko import CheckoSource
+from osint_mcp.context.fedresurs import FedresursSource
+from osint_mcp.context.fsa import FsaSource
+from osint_mcp.context.software_registry import SoftwareRegistrySource
 from osint_mcp.models import Fact, RiskCollection, SourceResult
 from osint_mcp.tools.country import detect_country
 from osint_mcp.tools.inn import validate_inn
@@ -56,6 +59,14 @@ async def collect_risk_facts(
     src = source or CheckoSource()
     normalized = check.inn
 
+    # Бесплатные официальные источники опрашиваются всегда: они не тратят
+    # квоту платных справочников, а их отказ в проверку рисков не входит.
+    # Федресурс — коммерческие сведения (лизинг, залоги, факторинг);
+    # Росаккредитация — чем компания реально торгует.
+    fedresurs = FedresursSource()
+    fsa = FsaSource()
+    software_reg = SoftwareRegistrySource()
+
     # return_exceptions=True принципиально: отказ одного источника
     # не должен обрывать сбор из остальных
     gathered = await asyncio.gather(
@@ -64,11 +75,15 @@ async def collect_risk_facts(
         src.check_enforcement(normalized),
         src.check_inspections(normalized),
         src.check_procurement(normalized),
+        fedresurs.check_commercial_facts(normalized),
+        fsa.check_certificates(normalized, name),
+        software_reg.check_software_registry(normalized),
         return_exceptions=True,
     )
 
     names = ["checko.registry_flags", "checko.arbitration", "checko.enforcement",
-             "checko.inspections", "checko.procurement"]
+             "checko.inspections", "checko.procurement",
+             "fedresurs.commercial", "fsa.certificates", "software_registry"]
     results: list[SourceResult] = []
     for src_name, item in zip(names, gathered):
         if isinstance(item, BaseException):
@@ -120,12 +135,20 @@ async def collect_risk_facts(
         b.source.split(".", 1)[1] for b in results
         if b.source.startswith("apicloud.") and b.status in ("ok", "partial")
     } & {"enforcement", "arbitration"}
+    # Недоступный бесплатный источник — не «чистая проверка», но и не
+    # провал платного канала: считается отдельно, в failure-логику
+    # резервного эшелона не попадает.
+    free_failed = sum(
+        1 for r in results
+        if r.status not in ("ok", "partial")
+        and (r.source.startswith("fedresurs.") or r.source.startswith("fsa.") or r.source == "software_registry")
+    )
     failed = sum(
         1 for r in results
         if r.status not in ("ok", "partial")
         and r.source.startswith("checko.")
         and r.source.split(".", 1)[1] not in restored_dirs
-    )
+    ) + free_failed
 
     # Частичная выгрузка — не отказ, но и не полнота: у крупных организаций
     # записей десятки тысяч, разбивка строится по выборке

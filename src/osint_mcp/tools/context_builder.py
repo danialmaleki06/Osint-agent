@@ -21,8 +21,14 @@ from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.dadata import DaDataSource
 from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
 from osint_mcp.context.hh import HhSource
-from osint_mcp.context.site import domain_age, site_self_description
+from osint_mcp.context.site import (
+    domain_age,
+    inspect_site_content,
+    site_self_description,
+    ssl_info,
+)
 from osint_mcp.context.rmsp import RmspSource
+from osint_mcp.context.software_registry import SoftwareRegistrySource
 from osint_mcp.models import CompanyContext, ContextResult, SourceLink, TimelineEvent
 from osint_mcp.tools.web_search_source import search_web
 
@@ -150,7 +156,7 @@ async def build_company_context(
     if guess.country == "unknown":
         return ContextResult(status="skipped", reason=guess.note)
 
-    base_res, brand, finances, history, msp_res = await asyncio.gather(
+    base_res, brand, finances, history, msp_res, sw_res = await asyncio.gather(
         dd.get_context(inn),
         dd.get_brand(inn),
         ck.get_finances(inn),
@@ -158,6 +164,8 @@ async def build_company_context(
         # Реестр МСП — бесплатный источник ФНС: квот платных справочников
         # не расходует, опрашивается всегда
         RmspSource().get_msp(inn),
+        # Реестр отечественного ПО Минцифры — бесплатный открытый реестр
+        SoftwareRegistrySource().get_software_products(inn),
         return_exceptions=True,
     )
 
@@ -240,6 +248,18 @@ async def build_company_context(
                 url=f"https://www.gosuslugi.ru/itorgs?search={ctx.inn}",
                 source="mincifry_registry",
             ))
+
+        if not isinstance(sw_res, BaseException):
+            sw_products, _, sw_failure = sw_res
+            if sw_products:
+                ctx.software_products = sw_products
+                links.append(SourceLink(
+                    what=f"единый реестр российского ПО Минцифры ({len(sw_products)} продуктов)",
+                    url=sw_products[0].url or "https://reestr.digital.gov.ru/",
+                    source="mincifry_software_registry",
+                ))
+            elif sw_failure:
+                gaps.append(f"Реестр ПО Минцифры: {sw_failure}.")
 
     # Рыночное наименование — необязательное обогащение
     if not isinstance(brand, BaseException) and brand.resolved:
@@ -519,17 +539,24 @@ async def build_company_context(
     site_url = ctx.brand_domain or registry_site
     if site_url:
         domain_created, whois_failure = await domain_age(site_url)
-        self_description, site_failure = await site_self_description(site_url)
+        self_description, tech, site_failure = await inspect_site_content(site_url)
+        ssl_res, ssl_failure = await ssl_info(site_url)
+
         ctx.domain_created_at = domain_created
-        # Самоназвание не затираем найденным в фолбэке: если описания ещё
-        # нет — берём то, что сняли при проверке живости сайта
         if self_description:
             ctx.site_self_description = self_description
+        if tech:
+            ctx.site_tech = tech
+        if ssl_res:
+            ctx.ssl_info = ssl_res
+
         if whois_failure:
             gaps.append(f"WHOIS по домену не проверен: {whois_failure}.")
         if site_failure and not whois_failure:
             gaps.append(f"Сайт не открыт: {site_failure}. "
                         "Для «действующей» компании мёртвый сайт — сам по себе сигнал.")
+        if ssl_failure:
+            gaps.append(f"SSL-сертификат сайта не проверен: {ssl_failure}.")
 
 
     log.info("context_built", inn=ctx.inn, brand=ctx.brand,

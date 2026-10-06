@@ -1,22 +1,19 @@
-"""Обогащение по собственному сайту компании: возраст домена и самоназвание.
+"""Обогащение по собственному сайту компании: возраст домена, технологии, SSL и самоназвание.
 
-Два бесплатных приёма, оба — косвенные сигналы, а не факты:
+Приёмы цифрового следа (бесплатные косвенные сигналы):
+  * дата создания домена (WHOIS через порт 43 — протокол без ключей и квот);
+  * проверка SSL-сертификата (срок действия, эмитент, валидность);
+  * стек технологий и маркетинга (аналитика, рекламные пиксели, CRM-виджеты, CMS);
+  * H1 и meta description главной страницы — как компания называет себя сама.
 
-  * дата создания домена (WHOIS через порт 43 — протокол без ключей и
-    квот). Домен младше обещанного возраста бизнеса значит перерегистрацию:
-    под новое юрлицо переписали живой бизнес, вместе с репутацией или
-    от долгов. Мёртвый DNS у «действующей» компании — тоже ответ;
-  * H1 и meta description главной страницы — как компания называет
-    себя сама. Одна строка самопрезентации полезнее десятка строк
-    ОКВЭДов: «AI-driven low-code платформа» информативнее «разработка ПО».
-
-Источник опционален во всех смыслах: любой отказ — пустой результат с
-reason, никогда не падение проверки.
+Источник опционален: любой отказ — пустой результат с reason, никогда не сбой проверки.
 """
 
 import asyncio
+from datetime import date, datetime, timezone
+import re
 import socket
-from datetime import date, datetime
+import ssl
 
 import httpx
 import structlog
@@ -24,12 +21,11 @@ from selectolax.parser import HTMLParser
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.models import SiteTechInfo, SslInfo
 
 log = structlog.get_logger()
 
-# WHOIS-серверы по зонам: .ru и .рф обслуживает tcinet. Для прочих зон
-# asking whois.iana.org — усложнение, а выгода мала: домены прочих
-# зон и так редки у российских контрагентов.
+# WHOIS-серверы по зонам: .ru и .рф обслуживает tcinet.
 _WHOIS_SERVERS = {
     "ru": "whois.tcinet.ru",
     "рф": "whois.tcinet.ru",
@@ -47,15 +43,14 @@ def _domain_of(url: str | None) -> str | None:
     host = host.removeprefix("www.")
     if not host or "." not in host:
         return None
+    # отрезаем порт, если указан
+    if ":" in host:
+        host = host.split(":", 1)[0]
     return host
 
 
 def _query_whois(domain: str, server: str) -> str:
-    """Синхронный WHOIS-запрос через порт 43.
-
-    Вынос наружу отдельной функцией: тесты подменяют её через
-    monkeypatch, не поднимая настоящий сокет.
-    """
+    """Синхронный WHOIS-запрос через порт 43."""
     with socket.create_connection((server, 43), timeout=settings.request_timeout) as s:
         s.sendall((domain + "\r\n").encode())
         chunks = []
@@ -68,11 +63,7 @@ def _query_whois(domain: str, server: str) -> str:
 
 
 async def domain_age(url: str | None) -> tuple[date | None, str | None]:
-    """Дата создания домена сайта. (None, None) — домена просто нет.
-
-    Отказ сети — (None, reason): молчание источника не путается с
-    «домен молодой».
-    """
+    """Дата создания домена сайта. (None, None) — домена просто нет."""
     domain = _domain_of(url)
     if not domain:
         return None, None
@@ -84,8 +75,6 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
     service, method = "whois", "domain_age"
     ledger.record(service, method, "started")
 
-    # Запрос выполняется в отдельном потоке: событийный цикл не должен
-    # ждать порт 43.
     try:
         text = await asyncio.to_thread(_query_whois, domain, server)
     except OSError as e:
@@ -104,24 +93,137 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
         except ValueError:
             continue
     if created is None:
-        # Ответ есть, даты нет: свободный домен или приватный формат —
-        # это не отказ, домена у компании действительно нет
         ledger.record(service, method, "empty")
         return None, None
     ledger.record(service, method, "ok")
     return created, None
 
 
-async def site_self_description(url: str | None) -> tuple[str | None, str | None]:
-    """Как компания называет себя: H1 или meta description главной.
+def _check_ssl_sync(hostname: str) -> SslInfo:
+    """Синхронная проверка SSL-сертификата хоста на 443 порту."""
+    ctx = ssl.create_default_context()
+    with socket.create_connection((hostname, 443), timeout=settings.request_timeout) as sock:
+        with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+            cert = ssock.getpeercert()
+            issuer_name = None
+            for rdn in cert.get("issuer", ()):
+                for k, v in rdn:
+                    if k in ("organizationName", "commonName") and v:
+                        issuer_name = v
+                        break
+                if issuer_name:
+                    break
 
-    Один запрос, никакой обходной логики: главная, редиректы — ок,
-    отказ — reason. Текст режется до пары сотен символов: это
-    самоназвание, а не копия сайта.
-    """
-    if not url:
+            not_after = cert.get("notAfter")
+            if not_after:
+                exp_ts = ssl.cert_time_to_seconds(not_after)
+                exp_date = datetime.fromtimestamp(exp_ts, tz=timezone.utc).date()
+                days_left = (exp_date - date.today()).days
+            else:
+                exp_date = None
+                days_left = None
+
+            return SslInfo(
+                valid=True,
+                issuer=issuer_name,
+                expires_at=exp_date,
+                days_left=days_left,
+            )
+
+
+async def ssl_info(url: str | None) -> tuple[SslInfo | None, str | None]:
+    """Проверка SSL-сертификата сайта (срок действия, эмитент, валидность)."""
+    domain = _domain_of(url)
+    if not domain:
         return None, None
-    service, method = "site", "self_description"
+
+    service, method = "ssl", "check"
+    try:
+        info = await asyncio.to_thread(_check_ssl_sync, domain)
+        ledger.record(service, method, "ok")
+        return info, None
+    except ssl.SSLCertVerificationError as e:
+        ledger.record(service, method, "failed", "недействительный сертификат")
+        return SslInfo(valid=False, error=f"Сертификат не прошёл проверку: {e}"), None
+    except OSError as e:
+        ledger.record(service, method, "failed", f"сеть: {type(e).__name__}")
+        return None, f"SSL-порт недоступен: {type(e).__name__}"
+
+
+# Сигнатуры для детекции технологий на веб-странице
+_ANALYTICS_RULES: tuple[tuple[str, str], ...] = (
+    ("mc.yandex.ru", "Яндекс.Метрика"),
+    ("yandex.metrika", "Яндекс.Метрика"),
+    ("googletagmanager.com", "Google Tag Manager"),
+    ("google-analytics.com", "Google Analytics"),
+    ("top-fwz1.mail.ru", "VK/Mail.ru счетчик"),
+    ("vk-pixel", "VK Рекламный пиксель"),
+    ("vk.com/rtrg", "VK Рекламный пиксель"),
+    ("roistat", "Roistat (сквозная аналитика)"),
+)
+
+_CRM_RULES: tuple[tuple[str, str], ...] = (
+    ("bitrix24", "Битрикс24 (CRM-виджет)"),
+    ("b24-", "Битрикс24 (CRM-виджет)"),
+    ("b24.ru", "Битрикс24 (CRM-виджет)"),
+    ("jivosite", "Jivo (онлайн-консультант)"),
+    ("code.jivo.ru", "Jivo (онлайн-консультант)"),
+    ("carrotquest", "Carrot quest"),
+    ("calltouch", "Calltouch (коллтрекинг)"),
+    ("envybox", "Envybox (виджет)"),
+    ("mango-office", "Mango Office"),
+    ("amocrm", "amoCRM (виджет)"),
+)
+
+_CMS_RULES: tuple[tuple[str, str], ...] = (
+    ("bitrix/templates", "1C-Битрикс"),
+    ("bitrix/js", "1C-Битрикс"),
+    ("wp-content", "WordPress"),
+    ("wp-includes", "WordPress"),
+    ("tilda.ws", "Tilda"),
+    ("tilda-blocks", "Tilda"),
+    ("opencart", "OpenCart"),
+    ("shopify", "Shopify"),
+    ("webflow", "Webflow"),
+)
+
+
+def detect_site_tech(html: str) -> SiteTechInfo:
+    """Анализ HTML-страницы на наличие технологий, CMS, CRM и маркетинговых пикселей."""
+    lowered = (html or "").lower()
+    analytics: list[str] = []
+    crm: list[str] = []
+    cms: list[str] = []
+
+    for needle, label in _ANALYTICS_RULES:
+        if needle in lowered and label not in analytics:
+            analytics.append(label)
+
+    for needle, label in _CRM_RULES:
+        if needle in lowered and label not in crm:
+            crm.append(label)
+
+    for needle, label in _CMS_RULES:
+        if needle in lowered and label not in cms:
+            cms.append(label)
+
+    marketing_active = bool(len(analytics) >= 2 or any("roistat" in a.lower() for a in analytics))
+
+    return SiteTechInfo(
+        analytics=analytics,
+        crm_widgets=crm,
+        cms=cms,
+        marketing_active=marketing_active,
+    )
+
+
+async def inspect_site_content(
+    url: str | None,
+) -> tuple[str | None, SiteTechInfo | None, str | None]:
+    """Загрузить главную страницу, определить самоназвание и технологический стек."""
+    if not url:
+        return None, None, None
+    service, method = "site", "inspect"
     try:
         async with httpx.AsyncClient(
             timeout=settings.request_timeout, headers={"User-Agent": _UA},
@@ -131,7 +233,7 @@ async def site_self_description(url: str | None) -> tuple[str | None, str | None
         resp.raise_for_status()
     except (httpx.HTTPError, ValueError) as e:
         ledger.record(service, method, "failed", f"{type(e).__name__}")
-        return None, f"сайт недоступен: {type(e).__name__}"
+        return None, None, f"сайт недоступен: {type(e).__name__}"
 
     tree = HTMLParser(resp.text)
     h1 = tree.css_first("h1")
@@ -141,8 +243,13 @@ async def site_self_description(url: str | None) -> tuple[str | None, str | None
         text = h1.text(strip=True)
     elif meta and meta.attributes.get("content"):
         text = meta.attributes["content"].strip()
-    if not text:
-        ledger.record(service, method, "empty")
-        return None, None
+
+    tech = detect_site_tech(resp.text)
     ledger.record(service, method, "ok")
-    return text[:200], None
+    return (text[:200] if text else None), tech, None
+
+
+async def site_self_description(url: str | None) -> tuple[str | None, str | None]:
+    """Как компания называет себя: H1 или meta description главной (обратная совместимость)."""
+    text, _, err = await inspect_site_content(url)
+    return text, err

@@ -50,7 +50,7 @@ def make_context(inn="7724744134", **overrides) -> CompanyContext:
     return CompanyContext(**base)
 
 
-def make_score(inn="7724744134", label="можно работать", total=55.0, **overrides) -> ScoreResult:
+def make_score(inn="7724744134", label="хорошо", total=55.0, **overrides) -> ScoreResult:
     base = dict(
         inn=inn,
         verdict=Verdict(label=label, total_score=total),
@@ -67,14 +67,16 @@ def make_score(inn="7724744134", label="можно работать", total=55.0
     return ScoreResult(**base)
 
 
-def make_risk() -> RiskCollection:
-    return RiskCollection(
+def make_risk(**overrides) -> RiskCollection:
+    base = dict(
         inn="7724744134",
         results=[SourceResult(source="checko.arbitration", status="ok")],
         facts=[],
         sources_ok=1,
         sources_failed=0,
     )
+    base.update(overrides)
+    return RiskCollection(**base)
 
 
 def make_context_result(ctx=None, reason=None) -> ContextResult:
@@ -90,7 +92,7 @@ def test_brief_has_verdict_and_card():
         make_risk(),
         make_score(),
     )
-    assert report["вердикт"] == "можно работать"
+    assert report["вердикт"] == "хорошо"
     assert report["score"] == 55.0
     assert report["карточка"]["наименование"] == 'ООО "БПМСОФТ"'
     assert report["карточка"]["численность"] == 386
@@ -133,9 +135,9 @@ def test_brief_without_context():
         "brief",
         make_context_result(None, reason="DaData недоступна"),
         None,
-        make_score(label="нельзя", total=0.0),
+        make_score(label="не рекомендуется", total=0.0),
     )
-    assert report["вердикт"] == "нельзя"
+    assert report["вердикт"] == "не рекомендуется"
     assert report["карточка"] == {}
 
 
@@ -468,7 +470,7 @@ def test_batch_entry_is_compact():
     ctx = make_context()
     entry = build_batch_entry(make_context_result(ctx), make_risk(), make_score())
     assert entry["наименование"] == 'ООО "БПМСОФТ"'
-    assert entry["вердикт"] == "можно работать"
+    assert entry["вердикт"] == "хорошо"
     assert "разбор" not in entry
     assert "источники" not in entry
 
@@ -486,5 +488,66 @@ def test_batch_entry_keeps_warnings_and_reason():
 
 def test_batch_entry_without_anything():
     entry = build_batch_entry(make_context_result(None), None,
-                              make_score(label="нельзя", total=0.0))
-    assert entry["вердикт"] == "нельзя"
+                              make_score(label="не рекомендуется", total=0.0))
+    assert entry["вердикт"] == "не рекомендуется"
+
+
+def test_full_commercial_extended_signals():
+    """Проверка вывода ПО Минцифры, зарубежных фабрик и плановых проверок в отчёт."""
+    from osint_mcp.models import Fact, InspectionSummary, PlannedInspection, SoftwareProduct
+    ctx = make_context(
+        software_products=[
+            SoftwareProduct(name="BPMSoft", reg_number="17372", status="В реестре"),
+        ],
+    )
+    risk = make_risk(
+        results=[
+            SourceResult(
+                source="checko.inspections",
+                status="ok",
+                inspections=InspectionSummary(
+                    total=1,
+                    planned_inspections=[
+                        PlannedInspection(
+                            authority="МЧС России",
+                            date_start=date(2026, 11, 15),
+                            inspection_type="Плановый надзор",
+                        ),
+                    ],
+                ),
+            ),
+        ],
+        facts=[
+            Fact(
+                fact_id="FSA-1",
+                kind="fsa_certificate",
+                statement="Декларация: светильники; изготовитель ZHEJIANG CO (импорт: Китай)",
+                source_url="https://pub.fsa.gov.ru/x",
+                source_type="registry_api",
+                retrieved_at=NOW,
+                payload={"manufacturer": "ZHEJIANG CO, LTD", "is_foreign": True, "origin_country": "Китай"},
+            ),
+            Fact(
+                fact_id="SW-1",
+                kind="software_registry",
+                statement="BPMSoft в реестре ПО",
+                source_url="https://reestr.digital.gov.ru/x",
+                source_type="registry_api",
+                retrieved_at=NOW,
+            ),
+        ],
+    )
+    report = build_report("full", make_context_result(ctx), risk, make_score())
+    sales = next(s for s in report["разбор"] if s["название"] == "коммерческие сигналы")
+    sales_text = "\n".join(sales["пункты"])
+    assert "реестр отечественного ПО" in sales_text
+    assert "BPMSoft" in sales_text
+    assert "МЧС России" in sales_text
+    assert "окно для предложения услуг аудита" in sales_text
+
+    commercial = next(s for s in report["разбор"] if s["название"] == "коммерческая активность")
+    comm_text = "\n".join(commercial["пункты"])
+    assert "зарубежные заводы и цепочки поставок" in comm_text
+    assert "ZHEJIANG CO, LTD (Китай)" in comm_text
+    assert "реестр отечественного ПО: 1" in comm_text
+

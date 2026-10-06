@@ -13,6 +13,8 @@ import respx
 
 from osint_mcp.config import settings
 from osint_mcp.context.checko import CheckoSource
+from osint_mcp.context.fedresurs import FedresursSource
+from osint_mcp.context.fsa import FsaSource
 from osint_mcp.tools.risk import collect_risk_facts
 
 pytestmark = pytest.mark.anyio
@@ -35,7 +37,28 @@ def _fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-SOURCES = 5   # registry_flags, arbitration, enforcement, inspections, procurement
+SOURCES = 8   # 5 у Checko + fedresurs.commercial + fsa.certificates + software_registry
+
+
+def _mock_free_sources(fedresurs_status=200, fsa_status=200, sw_status=200):
+    """Подменить бесплатные официальные источники (Федресурс, ФСА, Реестр ПО).
+
+    По умолчанию «не значатся»: валидная пустота, счётчики
+    источников не меняются. Тесты новых источников живут отдельно.
+    """
+    respx.get(f"{settings.fedresurs_base_url}/backend/companies").mock(
+        return_value=httpx.Response(
+            fedresurs_status, json={"pageData": [], "found": 0})
+    )
+    respx.post("https://pub.fsa.gov.ru/api/v1/rds/common/declarations/get").mock(
+        return_value=httpx.Response(fsa_status, json={"items": [], "total": 0})
+    )
+    respx.post("https://pub.fsa.gov.ru/api/v1/rss/common/certificates/get").mock(
+        return_value=httpx.Response(fsa_status, json={"items": [], "total": 0})
+    )
+    respx.get(url__regex=r"https://proreestr\.ru/reestr-po/\?q=.*").mock(
+        return_value=httpx.Response(sw_status, text="<html></html>")
+    )
 
 
 def _mock_all():
@@ -51,6 +74,7 @@ def _mock_all():
         respx.get(f"{settings.checko_base_url}/{ep}").mock(
             return_value=httpx.Response(200, json=_fixture(name))
         )
+    _mock_free_sources()
 
 
 # ───────────────────────────  арбитраж  ───────────────────────────
@@ -143,6 +167,21 @@ async def test_one_failed_source_does_not_stop_others():
 
 
 @respx.mock
+async def test_free_sources_counted_separately():
+    """Отказ бесплатного источника честно считается неудачей,
+    но резервный эшелон за ним не гонится: дублировать Федресурс
+    платным агрегатором — тратить квоту без причины."""
+    _mock_all()
+    _mock_free_sources(fsa_status=503)
+    r = await collect_risk_facts(BPMSOFT)
+
+    assert r.sources_failed == 1
+    assert any(r_.source == "fsa.certificates" and r_.status == "unavailable"
+               for r_ in r.results)
+    assert "fsa.certificates" in r.coverage_note
+
+
+@respx.mock
 async def test_unavailable_is_not_silence():
     """Недоступность источника обязана быть видна, а не выглядеть как «чисто»."""
     for ep in ("company", "legal-cases", "enforcements", "inspections", "contracts"):
@@ -206,3 +245,36 @@ async def test_customer_contracts_are_not_won_tenders():
     assert p.as_supplier.count == 0
     assert p.as_supplier.total_amount == 0.0
     assert "заказчик" in res.facts[0].statement
+
+
+@respx.mock
+async def test_planned_inspections_detected():
+    """Предстоящие и плановые проверки распознаются и формируют planned_inspection факты."""
+    body = {"meta": {"status": "ok"}, "data": {
+        "ЗапВсего": 1, "СтрВсего": 1,
+        "Записи": [{
+            "Номер": "772600012345",
+            "Статус": "В процессе проведения",
+            "Заверш": False,
+            "Наруш": None,
+            "ТипПров": "Плановая выездная проверка",
+            "ДатаНач": "2026-11-20",
+            "Цель": "Проверка соблюдения требований пожарной безопасности",
+            "ОргКонтр": {"Наим": "Главное управление МЧС России по г. Москве"},
+        }]
+    }}
+    respx.get(f"{settings.checko_base_url}/inspections").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+
+    res = await CheckoSource().check_inspections(BPMSOFT)
+    assert res.status == "ok"
+    assert res.inspections.planned_inspections
+    pi = res.inspections.planned_inspections[0]
+    assert "МЧС" in pi.authority
+    assert pi.inspection_type == "Плановая выездная проверка"
+    assert any(f.kind == "planned_inspection" for f in res.facts)
+    p_fact = next(f for f in res.facts if f.kind == "planned_inspection")
+    assert "МЧС" in p_fact.statement
+    assert "пожарной безопасности" in p_fact.statement
+

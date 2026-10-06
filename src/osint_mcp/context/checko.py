@@ -44,6 +44,7 @@ from osint_mcp.models import (
     InspectionSummary,
     LicenseInfo,
     PersonProfile,
+    PlannedInspection,
     ProcurementSummary,
     RelatedCompany,
     RoleCounts,
@@ -452,8 +453,59 @@ class CheckoSource:
                          "violations": True},
             ))
 
+        # Предстоящие и плановые проверки (ЕРКНМ) — B2B-триггеры для аудита и безопасности
+        planned_inspections: list[PlannedInspection] = []
+        today_date = now.date()
+        for rec in records:
+            is_finished = rec.get("Заверш")
+            date_start = _parse_date(rec.get("ДатаНач"))
+            status_text = (rec.get("Статус") or "").lower()
+            insp_type = rec.get("ТипПров") or rec.get("ТипРасп") or ""
+
+            is_upcoming = (
+                is_finished is False
+                or (date_start is not None and date_start >= today_date)
+                or any(w in status_text for w in ("план", "назнач", "процесс", "запланирован"))
+            )
+            if is_upcoming:
+                org = rec.get("ОргКонтр") or {}
+                authority = org.get("Наим") if isinstance(org, dict) else str(org)
+                authority = authority or "Надзорный орган"
+                num = rec.get("Номер")
+                pi = PlannedInspection(
+                    number=num,
+                    authority=authority,
+                    date_start=date_start,
+                    inspection_type=insp_type or None,
+                    purpose=rec.get("Цель"),
+                )
+                planned_inspections.append(pi)
+                facts.append(Fact(
+                    fact_id=f"INSP-P-{len(planned_inspections)}",
+                    kind="planned_inspection",
+                    statement=(
+                        f"Плановая/предстоящая проверка {authority} "
+                        f"(начало: {rec.get('ДатаНач') or 'уточняется'}"
+                        + (f", тип: {insp_type}" if insp_type else "")
+                        + f"): {str(rec.get('Цель') or 'плановый надзор ЕРКНМ')[:120]}"
+                    ),
+                    source_url="https://proverki.gov.ru/",
+                    source_type="registry_api",
+                    retrieved_at=now,
+                    event_date=date_start,
+                    payload={
+                        "number": num,
+                        "authority": authority,
+                        "date_start": date_start.isoformat() if date_start else None,
+                        "type": insp_type,
+                        "status": rec.get("Статус"),
+                        "purpose": rec.get("Цель"),
+                    },
+                ))
+
         log.info("checko.inspections", inn=inn, total=total,
-                 seen=len(records), violations=len(violations))
+                 seen=len(records), violations=len(violations),
+                 planned=len(planned_inspections))
 
         return SourceResult(
             source="checko.inspections",
@@ -463,6 +515,7 @@ class CheckoSource:
             facts=facts,
             inspections=InspectionSummary(
                 total=total, with_violations=len(violations),
+                planned_inspections=planned_inspections,
                 counted_from=len(records), complete=complete,
             ),
         )
@@ -689,6 +742,16 @@ class CheckoSource:
                 statement=f"Статус организации: {status}",
                 source_url=card_url, source_type="registry_api",
                 retrieved_at=now, payload={"status": status},
+            ))
+
+        # Товарные знаки (Роспатент / ФИПС) — нематериальные активы и реальный оборот
+        for tm in self._trademarks(data):
+            n += 1
+            facts.append(Fact(
+                fact_id=f"TM-{n}", kind="trademark",
+                statement=f"Зарегистрирован товарный знак: {tm}",
+                source_url=card_url, source_type="registry_api",
+                retrieved_at=now, payload={"name": tm},
             ))
 
         log.info("checko.registry_flags", inn=inn,

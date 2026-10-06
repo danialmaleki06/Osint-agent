@@ -107,3 +107,53 @@ async def test_self_description_dead_site_is_reason_not_crash():
 
     assert desc is None
     assert reason and "недоступен" in reason
+
+
+def test_detect_site_tech_analytics_crm_cms():
+    """Детектор технологий находит CMS, CRM, аналитику и пиксели."""
+    from osint_mcp.context.site import detect_site_tech
+
+    html = """
+    <html>
+      <head>
+        <link rel="stylesheet" href="/bitrix/templates/main/styles.css">
+        <script src="https://mc.yandex.ru/metrika/tag.js"></script>
+        <script src="https://cloud.roistat.com/api/site.js"></script>
+      </head>
+      <body>
+        <script src="//code.jivo.ru/widget/12345"></script>
+        <div class="b24-widget-button"></div>
+      </body>
+    </html>
+    """
+    tech = detect_site_tech(html)
+
+    assert "1C-Битрикс" in tech.cms
+    assert "Яндекс.Метрика" in tech.analytics
+    assert "Roistat (сквозная аналитика)" in tech.analytics
+    assert "Jivo (онлайн-консультант)" in tech.crm_widgets
+    assert "Битрикс24 (CRM-виджет)" in tech.crm_widgets
+    assert tech.marketing_active is True
+
+
+async def test_ssl_info_mocked(monkeypatch):
+    """Проверка SSL возвращает срок действия и эмитента."""
+    from datetime import date
+    from osint_mcp.context.site import ssl_info
+    from osint_mcp.models import SslInfo
+
+    fake = SslInfo(
+        valid=True,
+        issuer="Let's Encrypt",
+        expires_at=date(2027, 1, 1),
+        days_left=85,
+    )
+    monkeypatch.setattr("osint_mcp.context.site._check_ssl_sync", lambda host: fake)
+
+    info, err = await ssl_info("https://bpmsoft.ru")
+    assert err is None
+    assert info is not None
+    assert info.valid is True
+    assert info.issuer == "Let's Encrypt"
+    assert info.days_left == 85
+

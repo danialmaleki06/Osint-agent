@@ -345,7 +345,7 @@ def _rename_line(ctx: CompanyContext) -> str | None:
     )
 
 
-def _sales_lines(ctx: CompanyContext) -> list[str]:
+def _sales_lines(ctx: CompanyContext, risk: RiskCollection | None = None) -> list[str]:
     """Коммерческие сигналы: чем жива компания и когда с ней говорить.
 
     Это не риски, а окна возможностей для продаж и анализа направления:
@@ -361,6 +361,9 @@ def _sales_lines(ctx: CompanyContext) -> list[str]:
                      + "; ".join(extras.okved_extra[:5]))
     if extras and extras.trademarks:
         lines.append("товарные знаки: " + ", ".join(extras.trademarks[:5]))
+    if ctx.software_products:
+        prods = "; ".join(f"«{p.name}» (№{p.reg_number or 'б/н'})" for p in ctx.software_products[:4])
+        lines.append(f"реестр отечественного ПО Минцифры: {prods} — льгота по НДС и приоритет в госзакупках")
     hiring = ctx.hiring
     if hiring is not None:
         if hiring.open_vacancies:
@@ -369,10 +372,41 @@ def _sales_lines(ctx: CompanyContext) -> list[str]:
                     if hiring.open_vacancies > len(hiring.roles[:5]) else "")
             caveat = " (совпадение по имени — уточнить принадлежность)" if hiring.found_by_name else ""
             lines.append(f"открытые вакансии: {hiring.open_vacancies}{caveat}: {roles}{more}")
+            if hiring.leadership_roles:
+                lines.append("окно входа для B2B (найм руководства): " + "; ".join(hiring.leadership_roles[:3]))
+            if hiring.tech_stack:
+                lines.append("внутренний софт и стек (из вакансий): " + ", ".join(hiring.tech_stack))
+            if hiring.it_investing:
+                lines.append("инвестиции в IT/R&D: компания активно нанимает инженерные и продуктовые кадры")
         elif hiring.reason:
             lines.append(f"найм не проверен: {hiring.reason}")
         else:
             lines.append("открытых вакансий не найдено")
+    if ctx.site_tech:
+        tech_items = []
+        if ctx.site_tech.cms:
+            tech_items.append("CMS: " + ", ".join(ctx.site_tech.cms))
+        if ctx.site_tech.crm_widgets:
+            tech_items.append("CRM/виджеты: " + ", ".join(ctx.site_tech.crm_widgets))
+        if ctx.site_tech.analytics:
+            tech_items.append("аналитика: " + ", ".join(ctx.site_tech.analytics))
+        if tech_items:
+            lines.append("стек сайта: " + "; ".join(tech_items))
+    if ctx.ssl_info:
+        if ctx.ssl_info.days_left is not None and ctx.ssl_info.days_left <= 14:
+            lines.append(f"внимание к сайту: SSL-сертификат истекает через {ctx.ssl_info.days_left} дн. (риск сбоя)")
+        elif ctx.ssl_info.valid:
+            lines.append(f"SSL-сертификат: валиден (эмитент: {ctx.ssl_info.issuer or 'доверенный ЦС'})")
+    if risk is not None:
+        for res in risk.results:
+            if res.inspections and res.inspections.planned_inspections:
+                for pi in res.inspections.planned_inspections[:3]:
+                    d = pi.date_start.isoformat() if pi.date_start else "дата уточняется"
+                    lines.append(
+                        f"предстоящая проверка ЕРКНМ: {pi.authority} (с {d})"
+                        + (f", тип: {pi.inspection_type}" if pi.inspection_type else "")
+                        + " — окно для предложения услуг аудита, охраны труда и безопасности"
+                    )
     if ctx.events:
         fresh = [ev for ev in ctx.events
                  if ev.event_date and ev.event_date >= date.today() - timedelta(days=365)]
@@ -404,7 +438,7 @@ def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None) -> l
         events = (events or []) + [turnover]
     if events:
         sections.append({"название": "существенные события истории", "пункты": events})
-    sales = _sales_lines(ctx)
+    sales = _sales_lines(ctx, risk)
     gov = _gov_share_line(risk, ctx)
     if gov:
         sales = (sales or []) + [gov]
@@ -413,6 +447,9 @@ def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None) -> l
     creditor = _plaintiff_lines(risk)
     if creditor:
         sections.append({"название": "платёжный климат", "пункты": creditor})
+    commercial = _commercial_lines(risk)
+    if commercial:
+        sections.append({"название": "коммерческая активность", "пункты": commercial})
     return sections
 
 
@@ -535,7 +572,7 @@ def _summary_lines(risk: RiskCollection | None, score: ScoreResult) -> list[str]
     if risk.coverage_note:
         lines.append(f"охват: {risk.coverage_note}")
     flags = [
-        f["statement"] for res in risk.results for f in res.facts
+        f.statement for res in risk.results for f in res.facts
         if f.kind == "registry_flag" and f.payload.get("flag")
     ]
     if flags:
@@ -553,6 +590,60 @@ def _summary_lines(risk: RiskCollection | None, score: ScoreResult) -> list[str]
             )
         if res.inspections and res.inspections.with_violations:
             lines.append(f"проверок с нарушениями: {res.inspections.with_violations}")
+        if res.inspections and res.inspections.planned_inspections:
+            lines.append(f"предстоящих/плановых проверок ЕРКНМ: {len(res.inspections.planned_inspections)}")
+    return lines
+
+
+_KIND_LABELS = {
+    "leasing": "лизинг",
+    "pledge": "залог имущества",
+    "factoring": "факторинг",
+    "guarantee": "независимая гарантия",
+    "sro_membership": "членство в СРО",
+    "fsa_certificate": "сертификат/декларация соответствия",
+    "trademark": "товарный знак",
+    "software_registry": "реестр отечественного ПО",
+}
+
+
+def _commercial_lines(risk: RiskCollection | None) -> list[str]:
+    """Коммерческие сигналы из Федресурса, Росаккредитации и Роспатента.
+
+    Это не риски: лизинг показывает активы, залог — кредит под развитие,
+    факторинг — работу с отсрочками, сертификаты — чем реально торгуют,
+    товарные знаки — нематериальные активы и реальный оборот.
+    В краткий отчёт не входит: ради этого просят «подробно».
+    """
+    if risk is None:
+        return []
+    lines: list[str] = []
+    counts: dict[str, int] = {}
+    for f in risk.facts:
+        if f.kind in _KIND_LABELS:
+            counts[f.kind] = counts.get(f.kind, 0) + 1
+    for kind, label in _KIND_LABELS.items():
+        if counts.get(kind):
+            if kind == "trademark":
+                lines.append(f"{label}: {counts[kind]} в реестре Роспатента (ФИПС)")
+            elif kind == "fsa_certificate":
+                lines.append(f"{label}: {counts[kind]} в реестре Росаккредитации")
+            elif kind == "software_registry":
+                lines.append(f"{label}: {counts[kind]} в реестре Минцифры")
+            else:
+                lines.append(f"{label}: {counts[kind]} публ. в Федресурсе")
+
+    foreign_mfgs = []
+    for f in risk.facts:
+        if f.kind == "fsa_certificate" and f.payload.get("is_foreign"):
+            mfg = f.payload.get("manufacturer")
+            origin = f.payload.get("origin_country") or "Импорт"
+            if mfg:
+                foreign_mfgs.append(f"{mfg} ({origin})")
+    if foreign_mfgs:
+        unique_mfgs = list(dict.fromkeys(foreign_mfgs))
+        lines.append("зарубежные заводы и цепочки поставок (Росаккредитация): " + "; ".join(unique_mfgs[:5]))
+
     return lines
 
 

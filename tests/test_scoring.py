@@ -41,8 +41,8 @@ def test_config_loads_and_validates():
     assert cfg.criteria
     assert cfg.verdicts
     labels = {v.label for v in cfg.verdicts}
-    assert labels == {"надёжный", "можно работать", "с осторожностью",
-                      "не стоит", "нельзя"}
+    assert labels == {"отлично", "хорошо", "удовлетворительно",
+                      "рискованно", "не рекомендуется"}
 
 
 def test_config_rejects_bad_group(tmp_path):
@@ -87,8 +87,8 @@ def test_clean_company_gets_baseline():
     """Компания без фактов получает baseline и вердикт по порогам."""
     r = score_company([])
     assert r.verdict.total_score == 60
-    # 60 >= 50 → «можно работать»
-    assert r.verdict.label == "можно работать"
+    # 60 >= 50 → «хорошо»
+    assert r.verdict.label == "хорошо"
     assert not r.verdict.floored
     assert r.reasons == []  # пустой компании не в чем обвинить
 
@@ -115,7 +115,7 @@ def test_decay_weakens_old_debts():
 
 
 def test_bankruptcy_floors_verdict():
-    """Жёсткий пол: банкротство не даёт подняться выше «нельзя»."""
+    """Жёсткий пол: банкротство не даёт подняться выше «не рекомендуется»."""
     good_age = CompanyContext(
         inn="7724744134", name_legal="X", country="RU",
         registered_at=date.today() - timedelta(days=5000),
@@ -123,7 +123,7 @@ def test_bankruptcy_floors_verdict():
     bankrupt = fact("FLAG-1", "bankruptcy", {"Тип": "наблюдение"},
                     event=date.today())
     r = score_company([bankrupt], context=good_age)
-    assert r.verdict.label == "нельзя"
+    assert r.verdict.label == "не рекомендуется"
     assert r.verdict.floored
     assert r.verdict.floor_criterion == "bankruptcy"
     # 15 лет рынка дают плюс, но пол режет вердикт независимо от балла
@@ -133,7 +133,7 @@ def test_bankruptcy_floors_verdict():
 def test_liquidated_is_fatal():
     f = fact("FLAG-1", "registry_flag", {"status": "Ликвидация"})
     r = score_company([f])
-    assert r.verdict.label == "нельзя"
+    assert r.verdict.label == "не рекомендуется"
     assert any("не действует" in x for x in r.reasons)
 
 
@@ -142,7 +142,7 @@ def test_status_word_forms_match():
     for status in ("Ликвидирована", "Прекращение деятельности ЮЛ"):
         f = fact("FLAG-1", "registry_flag", {"status": status})
         r = score_company([f])
-        assert r.verdict.label == "нельзя", status
+        assert r.verdict.label == "не рекомендуется", status
 
 
 def test_defendant_vs_plaintiff():
@@ -179,11 +179,18 @@ def test_company_age_positive():
 # ── Реестр видов фактов: ядро + пополняемые источники ───────────────
 
 def test_core_kinds_frozen():
-    """Ядро — контракт с парсерами, состав фиксирован."""
+    """Ядро — контракт с парсерами, состав фиксирован.
+
+    Расширен Федеральресурсом (лизинг, залог, факторинг, гарантии,
+    СРО, прочие публикации) и Росаккредитацией (сертификаты).
+    """
     from osint_mcp.models import CORE_FACT_KINDS
     assert CORE_FACT_KINDS == frozenset({
         "registry", "arbitration", "bankruptcy", "enforcement",
         "procurement", "registry_flag", "news",
+        "leasing", "pledge", "factoring", "guarantee",
+        "sro_membership", "fedresurs_publication", "fsa_certificate",
+        "trademark", "software_registry", "planned_inspection",
     })
 
 
@@ -250,7 +257,7 @@ def test_ext_fact_scores_when_criterion_added(tmp_path):
         "group": "registry_risk",
         "match": {"kind": "banned_list"},
         "score": -100,
-        "verdict_floor": "нельзя",
+        "verdict_floor": "не рекомендуется",
         "warn_always": True,
         "reason": "Организация в списке запрещённых",
     }
@@ -264,7 +271,7 @@ def test_ext_fact_scores_when_criterion_added(tmp_path):
         source_type="registry_api", retrieved_at=NOW,
     )
     r = score_company([f], config_path=p)
-    assert r.verdict.label == "нельзя"
+    assert r.verdict.label == "не рекомендуется"
     assert r.verdict.floored
     assert r.warnings
 
@@ -282,7 +289,7 @@ def test_pending_does_not_affect_verdict():
     )
     r = score_company([], pending=[p])
     assert r.verdict.total_score == 60
-    assert r.verdict.label == "можно работать"
+    assert r.verdict.label == "хорошо"
     assert len(r.pending) == 1
     assert r.pending[0].source_url == "https://example.org/x"
 
@@ -365,14 +372,14 @@ def test_deterministic():
 def test_warning_fires_despite_good_verdict():
     """16 млн долгов ФССП (-35 ступень), но 20 лет рынка (+15) и 25 лет.
 
-    Итог: 60 - 35 + 15 = 40 → «с осторожностью» — а без age-критерия
-    и вовсе «можно работать». Но долг ФССП обязан попасть в warnings,
+    Итог: 60 - 35 + 15 = 40 → «удовлетворительно» — а без age-критерия
+    и вовсе «хорошо». Но долг ФССП обязан попасть в warnings,
     чтобы пользователь узнал о нём независимо от оценки.
     """
     debt = fact("ENF-1", "enforcement", {"amount": 16_000_000},
                 event=date.today())
     r = score_company([debt])
-    assert r.verdict.label in ("можно работать", "с осторожностью")
+    assert r.verdict.label in ("хорошо", "удовлетворительно")
     assert r.warnings, "долг 16 млн обязан быть в warnings"
     assert any("ФССП" in w for w in r.warnings)
 

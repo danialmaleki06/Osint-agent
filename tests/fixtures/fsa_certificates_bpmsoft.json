@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "id": 2790610,
+      "number": "RU С-RU.НБ02.В.00123/26",
+      "idStatus": 2,
+      "date": "2026-02-10",
+      "endDate": "2029-02-09",
+      "certObjectType": "Серийный выпуск",
+      "manufacterName": "OOO \"BPM SOFT\"",
+      "fullName": "Средства защиты конфиденциальной информации"
+    }
+  ],
+  "total": 1
+}

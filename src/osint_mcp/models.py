@@ -313,6 +313,18 @@ class HiringInfo(BaseModel):
         default=None,
         description="Почему не удалось, если open_vacancies=0 и reason заполнен",
     )
+    leadership_roles: list[str] = Field(
+        default_factory=list,
+        description="Руководящие позиции (триггеры продаж / окно входа для B2B)",
+    )
+    tech_stack: list[str] = Field(
+        default_factory=list,
+        description="Стек софта и технологий, упомянутый в вакансиях (1С, CRM, языки)",
+    )
+    it_investing: bool = Field(
+        default=False,
+        description="Признаки активного найма в IT/R&D (разработчики, инженеры, аналитики)",
+    )
 
 
 class MspInfo(BaseModel):
@@ -338,6 +350,48 @@ class MspInfo(BaseModel):
         default=True,
         description="Действующий субъект реестра. False — исключён: данные могли устареть",
     )
+
+
+class SslInfo(BaseModel):
+    """Сведения о SSL-сертификате официального сайта."""
+
+    valid: bool = Field(default=False, description="Валиден ли SSL-сертификат")
+    issuer: str | None = Field(default=None, description="Кем выдан сертификат (Let's Encrypt, DigiCert и т.д.)")
+    expires_at: date | None = Field(default=None, description="Дата окончания действия сертификата")
+    days_left: int | None = Field(default=None, description="Сколько дней осталось до истечения сертификата")
+    error: str | None = Field(default=None, description="Ошибка при проверке сертификата")
+
+
+class SiteTechInfo(BaseModel):
+    """Технологический и маркетинговый стек, обнаруженный на сайте компании."""
+
+    analytics: list[str] = Field(
+        default_factory=list,
+        description="Системы аналитики и пиксели (Яндекс.Метрика, Google Analytics, VK Pixel, Roistat)",
+    )
+    crm_widgets: list[str] = Field(
+        default_factory=list,
+        description="CRM-виджеты и онлайн-чаты (Bitrix24, JivoSite, Carrot quest, Calltouch)",
+    )
+    cms: list[str] = Field(
+        default_factory=list,
+        description="CMS и платформы (1C-Битрикс, WordPress, Tilda, OpenCart и т.д.)",
+    )
+    marketing_active: bool = Field(
+        default=False,
+        description="Признаки активного маркетинга (рекламные пиксели и сквозная аналитика)",
+    )
+
+
+class SoftwareProduct(BaseModel):
+    """Программный продукт из единого реестра российского ПО (Минцифры)."""
+
+    name: str = Field(description="Наименование программного обеспечения")
+    reg_number: str | None = Field(default=None, description="Реестровый номер записи")
+    reg_date: str | None = Field(default=None, description="Дата включения в реестр")
+    status: str = Field(default="В реестре", description="Статус в реестре")
+    software_class: str | None = Field(default=None, description="Класс программного обеспечения")
+    url: str | None = Field(default=None, description="Ссылка на запись в реестре Минцифры")
 
 
 class CompanyContext(BaseModel):
@@ -427,6 +481,18 @@ class CompanyContext(BaseModel):
             "главной страницы. Самопрезентация информативнее ОКВЭДов, но это "
             "маркетинговый текст — не факт"
         ),
+    )
+    ssl_info: SslInfo | None = Field(
+        default=None,
+        description="Сведения о SSL-сертификате официального сайта",
+    )
+    site_tech: SiteTechInfo | None = Field(
+        default=None,
+        description="Стек технологий и маркетинга, найденный на сайте компании",
+    )
+    software_products: list["SoftwareProduct"] = Field(
+        default_factory=list,
+        description="Программные продукты компании в едином реестре российского ПО (Минцифры)",
     )
 
     # масштаб — определяет применимость признаков риска
@@ -541,11 +607,29 @@ class CompanyContext(BaseModel):
 CORE_FACT_KINDS = frozenset({
     "registry", "arbitration", "bankruptcy", "enforcement",
     "procurement", "registry_flag", "news",
+    # Федресурс: коммерческие сведения (лизинг, залоги, факторинг,
+    # гарантии, СРО) и неопознанные существенные факты
+    "leasing", "pledge", "factoring", "guarantee", "sro_membership",
+    "fedresurs_publication",
+    # ФГИС Росаккредитация: сертификаты и декларации соответствия
+    "fsa_certificate",
+    # Роспатент / ФИПС: товарные знаки
+    "trademark",
+    # Единый реестр российского ПО (Минцифры)
+    "software_registry",
+    # ЕРКНМ: предстоящие и плановые проверки
+    "planned_inspection",
 })
 
 FactKind = Literal[
     "registry", "arbitration", "bankruptcy", "enforcement",
     "procurement", "registry_flag", "news",
+    "leasing", "pledge", "factoring", "guarantee", "sro_membership",
+    "fedresurs_publication",
+    "fsa_certificate",
+    "trademark",
+    "software_registry",
+    "planned_inspection",
 ]
 
 # Формат вида факта для пополняемых источников (адаптеры, плагины).
@@ -722,12 +806,25 @@ class EnforcementSummary(BaseModel):
     outstanding: float = Field(default=0.0, description="Непогашенный остаток, рублей")
 
 
+class PlannedInspection(BaseModel):
+    """Предстоящая или текущая проверка надзорного органа (ЕРКНМ)."""
+
+    number: str | None = Field(default=None, description="Номер проверки в ЕРКНМ")
+    authority: str = Field(description="Контролирующий орган (МЧС, Роструд, Роспотребнадзор и др.)")
+    date_start: date | None = Field(default=None, description="Планируемая дата начала")
+    inspection_type: str | None = Field(default=None, description="Тип проверки (плановая, внеплановая, визит)")
+    purpose: str | None = Field(default=None, description="Цель проверки")
+
+
 class InspectionSummary(BaseModel):
     """Проверки надзорных органов."""
 
     total: int = Field(default=0, description="Всего проверок в базе источника")
     with_violations: int = Field(
         default=0, description="Из просмотренных — сколько выявили нарушения"
+    )
+    planned_inspections: list[PlannedInspection] = Field(
+        default_factory=list, description="Предстоящие и плановые проверки (ЕРКНМ)"
     )
     counted_from: int = Field(default=0, description="По скольким проверкам посчитано")
     complete: bool = Field(default=True, description="Охвачены ли все проверки")
@@ -1145,3 +1242,53 @@ class CoverageReport(BaseModel):
         default_factory=dict,
         description="Обращений с момента запуска сервера, по службам — по всем организациям",
     )
+
+
+class KeyStatus(BaseModel):
+    """Статус отдельного ключа из пула."""
+
+    key: str = Field(description="Маскированный хвост ключа (например, …1234)")
+    state: Literal["ok", "exhausted"] = Field(description="Состояние: ok или exhausted")
+
+
+class ServiceQuota(BaseModel):
+    """Суточный расход и остаток запросов конкретного метода сервиса."""
+
+    used: int = Field(default=0, description="Израсходовано запросов за сутки")
+    remaining: int = Field(default=0, description="Осталось запросов в суточной квоте")
+
+
+class ProviderLimit(BaseModel):
+    """Сведения о лимитах и состоянии ключей конкретного провайдера."""
+
+    provider: str = Field(description="Кодовое имя (dadata, checko, apicloud, hh, open_registries)")
+    name: str = Field(description="Понятное название сервиса")
+    status: Literal["ok", "warning", "exhausted", "not_configured", "unlimited"] = Field(
+        description="Статус доступности сервиса: ok, warning, exhausted, not_configured, unlimited"
+    )
+    keys_total: int = Field(default=0, description="Всего ключей в пуле")
+    keys_active: int = Field(default=0, description="Число активных неизрасходованных ключей")
+    keys: list[KeyStatus] = Field(default_factory=list, description="Статус каждого ключа пула")
+    methods: dict[str, ServiceQuota] = Field(
+        default_factory=dict, description="Расход и остаток по отдельным методам API"
+    )
+    daily_spent: int | None = Field(
+        default=None, description="Израсходовано за сутки по данным службы (если применимо)"
+    )
+    notes: str | None = Field(default=None, description="Пояснения к тарифу или ограничениям")
+    error: str | None = Field(default=None, description="Текст ошибки при запросе статистики, если была")
+
+
+class ProvidersLimitsReport(BaseModel):
+    """Сводный отчёт по лимитам, суточным квотам и ключам всех провайдеров."""
+
+    providers: list[ProviderLimit] = Field(
+        default_factory=list, description="Состояние лимитов по каждому провайдеру"
+    )
+    alerts: list[str] = Field(
+        default_factory=list, description="Предупреждения о низком остатке квоты или проблемах с ключами"
+    )
+    checked_at: datetime = Field(
+        description="Время выполнения проверки (UTC)"
+    )
+

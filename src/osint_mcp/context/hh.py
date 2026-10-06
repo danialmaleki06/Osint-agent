@@ -52,6 +52,31 @@ def _search_query(name: str) -> str:
     return _LEGAL_FORM.sub("", cleaned).replace('"', "").strip()
 
 
+_LEADERSHIP_PATTERNS = (
+    r"руководител", r"директор", r"начальник", r"head of", r"\blead\b",
+    r"тимлид", r"\bроп\b", r"управляющ",
+)
+
+_TECH_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("1с", "1c", "1с:ут", "1с:erp", "1c:erp", "1с:бухгалтер", "1с:зуп"), "1С"),
+    (("bitrix24", "битрикс24"), "Битрикс24"),
+    (("amocrm", "амосрм"), "amoCRM"),
+    (("sap", "oracle erp", "navision", "axapta"), "ERP (SAP/Oracle)"),
+    (("python", "django", "fastapi"), "Python"),
+    (("java", "spring"), "Java"),
+    (("c#", ".net"), "C# / .NET"),
+    (("golang", "go"), "Go"),
+    (("react", "vue", "angular"), "Frontend (React/Vue/Angular)"),
+    (("docker", "kubernetes", "k8s"), "DevOps (Docker/K8s)"),
+    (("postgresql", "postgres", "sql"), "SQL / PostgreSQL"),
+)
+
+_IT_ROLE_KEYWORDS = (
+    "разработчик", "developer", "программист", "инженер", "devops",
+    "qa", "тестировщик", "архитектор", "data scientist", "data engineer",
+)
+
+
 class HhSource:
     """Открытый поиск вакансий HeadHunter по имени работодателя."""
 
@@ -61,12 +86,7 @@ class HhSource:
         self._client = client
 
     async def get_hiring(self, name: str) -> HiringInfo:
-        """Вакансии по тексту имени компании.
-
-        Не бросает исключений наружу: любой отказ — HiringInfo с reason.
-        «Ноль вакансий» и «источник не ответил» различаются полем reason:
-        первый может означать и тишину найма, второй — ничего не значит.
-        """
+        """Вакансии по тексту имени компании."""
         service, method = self.name, "vacancies"
         query = _search_query(name)
         if not query:
@@ -75,15 +95,10 @@ class HhSource:
         url = f"{settings.hh_base_url}/vacancies"
         params = {
             "text": query,
-            # Поиск строго по имени работодателя: по любому тексту нашлись
-            # бы вакансии, где название компании лишь упомянуто
             "search_field": "company_name",
             "per_page": 20,
         }
         headers = dict(_HEADERS)
-        # Токен приложения необязателен для анонимного доступа, но hh
-        # отдаёт его только зарегистрированным приложениям — с токеном
-        # запрос проходит гарантированно, без — по настроению антибота.
         if settings.hh_app_token:
             headers["Authorization"] = f"Bearer {settings.hh_app_token}"
         try:
@@ -91,9 +106,6 @@ class HhSource:
                 resp = await self._client.get(url, params=params, headers=headers)
             else:
                 async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-                    # headers, а не _HEADERS: здесь лежит и Authorization —
-                    # раньше токен терялся, и служба отвечала 403 даже
-                    # с настроенным HH_APP_TOKEN
                     resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
             data = resp.json()
@@ -112,11 +124,42 @@ class HhSource:
             return HiringInfo(reason="сервис вернул не JSON")
 
         items = data.get("items") or []
-        roles = [str(v.get("name")) for v in items if v.get("name")]
+        roles: list[str] = []
+        leadership_roles: list[str] = []
+        tech_stack: list[str] = []
+        it_count = 0
+
+        for v in items:
+            name_val = str(v.get("name") or "").strip()
+            if not name_val:
+                continue
+            roles.append(name_val)
+            name_lower = name_val.lower()
+
+            if any(re.search(pat, name_lower) for pat in _LEADERSHIP_PATTERNS):
+                if name_val not in leadership_roles:
+                    leadership_roles.append(name_val)
+
+            if any(k in name_lower for k in _IT_ROLE_KEYWORDS):
+                it_count += 1
+
+            snippet = v.get("snippet") or {}
+            full_text = f"{name_lower} {str(snippet.get('requirement') or '')} {str(snippet.get('responsibility') or '')}".lower()
+            for needles, label in _TECH_KEYWORDS:
+                if any(re.search(r"\b" + re.escape(n) + r"\b" if len(n) <= 3 else re.escape(n), full_text) for n in needles):
+                    if label not in tech_stack:
+                        tech_stack.append(label)
+
+        it_investing = (it_count >= 2) or (it_count >= 1 and len(items) <= 3)
         ledger.record(service, method, "ok" if items else "empty")
-        log.info("hh.vacancies", name=query, found=len(items))
+        log.info("hh.vacancies", name=query, found=len(items),
+                 leadership=len(leadership_roles), tech_count=len(tech_stack))
+
         return HiringInfo(
             open_vacancies=data.get("found", len(items)),
             roles=roles,
+            leadership_roles=leadership_roles,
+            tech_stack=tech_stack,
+            it_investing=it_investing,
             found_by_name=True,
         )

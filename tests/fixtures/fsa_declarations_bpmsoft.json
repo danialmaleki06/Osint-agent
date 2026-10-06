@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "id": 18725645,
+      "number": "RU Д-RU.НБ05.В.01234/26",
+      "idStatus": 2,
+      "declDate": "2026-01-20",
+      "declEndDate": "2028-01-19",
+      "declObjectType": "Серийный выпуск",
+      "manufacterName": "ZHEJIANG INDUSTRIAL CO., LTD",
+      "fullName": "Светильники светодиодные для общего освещения"
+    },
+    {
+      "id": 20123770,
+      "number": "RU Д-RU.НБ05.В.01235/26",
+      "idStatus": 2,
+      "declDate": "2025-09-01",
+      "declEndDate": "2026-08-31",
+      "declObjectType": "Серийный выпуск",
+      "manufacterName": "ООО \"ПРИБОР-ЛАБ\"",
+      "fullName": "Приборы бытовые электрические"
+    }
+  ],
+  "total": 2
+}
