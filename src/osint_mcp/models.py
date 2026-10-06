@@ -381,6 +381,10 @@ class SiteTechInfo(BaseModel):
         default=False,
         description="Признаки активного маркетинга (рекламные пиксели и сквозная аналитика)",
     )
+    tracker_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Идентификаторы систем веб-аналитики (Yandex Metrika: ym:XXXX, Google Analytics: G-XXXX/UA-XXXX, VK/Mail.ru: tmr:XXXX)",
+    )
 
 
 class SoftwareProduct(BaseModel):

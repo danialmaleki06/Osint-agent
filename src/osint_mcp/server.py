@@ -53,6 +53,10 @@ from osint_mcp.context.source_catalog import (
     save_source_to_catalog as _save_source_to_catalog,
     SourceSpec as _SourceSpec,
 )
+from osint_mcp.context.web_analytics import (
+    search_domains_sharing_tracker as _search_domains_sharing_tracker,
+    build_analytics_affiliation_facts as _build_analytics_affiliation_facts,
+)
 
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
@@ -82,7 +86,8 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_links", "get_verdict", "search_unverified",
          "review_pending", "check_provider_limits",
          "list_catalog_sources", "scan_catalog_source",
-         "register_custom_source", "scan_catalog_batch"]
+         "register_custom_source", "scan_catalog_batch",
+         "check_shared_analytics"]
 
 
 
@@ -1399,6 +1404,123 @@ async def scan_catalog_batch(
         "total_hits_added": total_added,
         "details": results_summary,
         "note": "Пакетная проверка завершена без повторного веб-поиска по каждой компании.",
+    }
+
+
+@mcp.tool()
+async def check_shared_analytics(
+    inn: Annotated[
+        str,
+        Field(
+            description="ИНН организации для поиска связанных доменов и скрытого холдинга по кодам веб-аналитики",
+            examples=["7724744134"],
+        ),
+    ],
+    site_url: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Опциональный URL сайта компании (если не передан, берётся автоматически из контекста компании)",
+            examples=["https://bpmsoft.ru"],
+        ),
+    ] = None,
+) -> dict:
+    """Анализ цифровой инфраструктуры и связей через веб-аналитику (Яндекс.Метрика, Google Analytics, VK/Mail.ru).
+
+    КАК ЭТО РАБОТАЕТ В OSINT:
+    На сайте компании извлекаются уникальные идентификаторы счетчиков (например, ym:98765432, G-ABC12345).
+    Затем производится обратный поиск страниц и доменов в сети, на которых установлены точно такие же идентификаторы.
+
+    КАК АГЕНТУ ИНТЕРПРЕТИРОВАТЬ РЕЗУЛЬТАТЫ ДЛЯ ПОЛЬЗОВАТЕЛЯ:
+    1. СКРЫТЫЙ ХОЛДИНГ / СИСТЕР-КОМПАНИИ (1-10 связанных сайтов):
+       - Если малое/новое ООО (например, с выручкой 0 руб. или недавно созданное) делит счетчик Метрики
+         с известным крупным брендом, порталом застройщика или федеральным интернет-магазином —
+         ЭТО ПРИЗНАК СКРЫТОГО ХОЛДИНГА / ДОЧЕРНЕЙ СТРУКТУРЫ.
+       - Вывод для B2B/рисков: компания не "пустышка", за ней стоят реальные активы, бюджеты и разработчики материнской группы.
+    2. ВЕБ-СТУДИЯ / ЛОЖНОЕ СРАБАТЫВАНИЕ (более 15 связанных сайтов):
+       - Если один и тот же счетчик висит на 20+ совершенно разных не связанных по смыслу сайтах (стоматология, шиномонтаж, доставка пиццы),
+         это НЕ холдинг, а общая служебная метрика ленивой веб-студии или разработчика темы/шаблона.
+       - Агент обязан указать: "Признаков холдинга нет, это общий идентификатор веб-студии".
+    3. АВТОМАТИЧЕСКИЙ КАРАНТИН:
+       - Достоверные связанные домены помещаются в карантин (quarantine) как PendingFact вида 'affiliate_domain_signal',
+         позволяя учесть цифровую сеть в итоговом скоринге после подтверждения.
+    """
+    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    target_site = site_url
+
+    # Если сайт не передан, получаем его из контекста
+    if not target_site:
+        ctx_res = await _build_context(clean_inn, _source, _checko)
+        if ctx_res.context:
+            target_site = ctx_res.context.brand_domain or (
+                ctx_res.context.extras.contacts.website
+                if ctx_res.context.extras and ctx_res.context.extras.contacts
+                else None
+            )
+
+    if not target_site:
+        return {
+            "inn": clean_inn,
+            "status": "no_site",
+            "message": "У организации не найден официальный сайт для извлечения кодов аналитики.",
+            "tracker_ids": {},
+            "shared_networks": [],
+        }
+
+    # Инспектируем сайт и извлекаем идентификаторы счетчиков
+    _, tech, err = await inspect_site_content(target_site)
+    tracker_ids = tech.tracker_ids if tech else {}
+
+    if not tracker_ids:
+        return {
+            "inn": clean_inn,
+            "site": target_site,
+            "status": "no_trackers",
+            "message": f"На сайте {target_site} не обнаружено кодов Яндекс.Метрики или Google Analytics (или сайт недоступен: {err}).",
+            "tracker_ids": {},
+            "shared_networks": [],
+        }
+
+    import asyncio
+    facts = await asyncio.to_thread(
+        _build_analytics_affiliation_facts,
+        domain=target_site,
+        tracker_ids=tracker_ids,
+        subject_inn=clean_inn,
+    )
+
+    added_to_quarantine = 0
+    if facts:
+        added_to_quarantine = _quarantine.add(clean_inn, facts)
+
+    networks_summary = []
+    for f in facts:
+        networks_summary.append({
+            "tracker_type": f.payload.get("tracker_type"),
+            "tracker_id": f.payload.get("tracker_id"),
+            "shared_domains": f.payload.get("shared_domains"),
+            "is_probable_holding": f.payload.get("is_probable_holding"),
+            "interpretation": f.payload.get("interpretation"),
+            "statement": f.statement,
+        })
+
+    log.info("tool_call", tool="check_shared_analytics", inn=clean_inn,
+             site=target_site, trackers=list(tracker_ids.keys()),
+             networks=len(networks_summary), quarantined=added_to_quarantine)
+
+    return {
+        "inn": clean_inn,
+        "site": target_site,
+        "status": "ok",
+        "tracker_ids": tracker_ids,
+        "networks_found": len(networks_summary),
+        "shared_networks": networks_summary,
+        "added_to_quarantine": added_to_quarantine,
+        "guidance_for_analyst": (
+            "Если обнаружены родственные домены (is_probable_holding=True), "
+            "проанализируйте их: схожа ли тематика или бренд. "
+            "Связанные домены указывают на общих бенефициаров, параллельные проекты или материнский холдинг."
+        ),
     }
 
 

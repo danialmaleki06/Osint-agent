@@ -361,6 +361,16 @@ criteria:
     verdict_floor: "рискованно"
     reason: "Сигналы задержки заработной платы: {statement}"
 
+  affiliate_network_detected:
+    group: person
+    description: "Обнаружена цифровая сеть сайтов / скрытый холдинг по общим кодам аналитики"
+    match:
+      kind: affiliate_domain_signal
+      op: exists
+    score: 5
+    warn_always: true
+    reason: "Цифровая аффилированность / скрытый холдинг: {statement}"
+
 
 # ── Вердикты ────────────────────────────────────────────────────────
 # Проверяются сверху вниз: срабатывает первая строка, где total >= min

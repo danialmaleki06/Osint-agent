@@ -136,6 +136,49 @@ def test_detect_site_tech_analytics_crm_cms():
     assert tech.marketing_active is True
 
 
+def test_extract_tracker_ids_yandex_google_mailru():
+    """Проверка извлечения реальных ID Метрики, Google Analytics и VK/Mail.ru."""
+    from osint_mcp.context.site import extract_tracker_ids, detect_site_tech
+
+    html = """
+    <html>
+      <head>
+        <script>
+          (function(m,e,t,r,i,k,a){m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+          ym(91234567, "init", {clickmap:true, trackLinks:true, accurateTrackBounce:true});
+          })(window, document, "script", "https://mc.yandex.ru/metrika/tag.js", "ym");
+        </script>
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-ABC1234567"></script>
+        <script>
+          window.dataLayer = window.dataLayer || [];
+          function gtag(){dataLayer.push(arguments);}
+          gtag('js', new Date());
+          gtag('config', 'G-ABC1234567');
+          gtag('config', 'UA-987654-1');
+        </script>
+        <script type="text/javascript">
+          var _tmr = window._tmr || (window._tmr = []);
+          _tmr.push({id: "3123456", type: "pageView", start: (new Date()).getTime()});
+        </script>
+      </head>
+      <body>
+        <noscript><div><img src="https://mc.yandex.ru/watch/91234567" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
+      </body>
+    </html>
+    """
+    trackers = extract_tracker_ids(html)
+    assert trackers["yandex_metrika"] == ["91234567"]
+    assert "G-ABC1234567" in trackers["google_analytics"]
+    assert "UA-987654-1" in trackers["google_analytics"]
+    assert trackers["mailru_top"] == ["3123456"]
+
+    tech = detect_site_tech(html)
+    assert tech.tracker_ids == trackers
+    assert "Яндекс.Метрика" in tech.analytics
+    assert "Google Analytics" in tech.analytics
+    assert "VK/Mail.ru счетчик" in tech.analytics
+
+
 async def test_ssl_info_mocked(monkeypatch):
     """Проверка SSL возвращает срок действия и эмитента."""
     from datetime import date

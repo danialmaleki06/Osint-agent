@@ -102,3 +102,17 @@ sources:
       - "не платят зарплату"
       - "долги по зарплате"
       - "задержки зп"
+
+  shared_web_analytics:
+    scope: company_asset
+    topic: digital_footprint
+    type: site_inspection
+    trust: reference
+    description: "Обратный поиск по счетчикам веб-аналитики (Яндекс.Метрика, Google Analytics) для выявления скрытых холдингов и сетей сайтов"
+    produces_kind: affiliate_domain_signal
+    search_template: '"{tracker_id}" ("metrika" OR "google-analytics") -site:{domain}'
+    keywords:
+      - "metrika"
+      - "analytics"
+      - "ym"
+      - "ga"

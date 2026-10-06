@@ -188,6 +188,54 @@ _CMS_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
+def extract_tracker_ids(html: str) -> dict[str, list[str]]:
+    """Извлечение идентификаторов счетчиков аналитики (Яндекс.Метрика, Google Analytics, VK/Mail.ru)."""
+    trackers: dict[str, list[str]] = {}
+    if not html:
+        return trackers
+
+    # 1. Яндекс.Метрика (mc.yandex.ru/watch/XXXX, ym(XXXX, "init"), w.yaCounterXXXX)
+    ym_patterns = [
+        r"ym\(\s*(\d{6,10})\s*,",
+        r"yaCounter(\d{6,10})",
+        r"mc\.yandex\.ru/watch/(\d{6,10})",
+        r"mc\.yandex\.ru/metrika/tag\.js\?id=(\d{6,10})",
+    ]
+    ym_ids: set[str] = set()
+    for pat in ym_patterns:
+        for match in re.finditer(pat, html, flags=re.IGNORECASE):
+            ym_ids.add(match.group(1))
+    if ym_ids:
+        trackers["yandex_metrika"] = sorted(ym_ids)
+
+    # 2. Google Analytics (UA-XXXXX-Y, G-XXXXXXX, GT-XXXXXXX)
+    ga_patterns = [
+        r"\b(UA-\d+-\d+)\b",
+        r"\b(G-[A-Z0-9]{6,12})\b",
+        r"\b(GT-[A-Z0-9]{6,12})\b",
+    ]
+    ga_ids: set[str] = set()
+    for pat in ga_patterns:
+        for match in re.finditer(pat, html, flags=re.IGNORECASE):
+            ga_ids.add(match.group(1).upper())
+    if ga_ids:
+        trackers["google_analytics"] = sorted(ga_ids)
+
+    # 3. VK / Mail.ru Top counter (_tmr.push({id: "XXXX"}), top-fwz1.mail.ru/js/code.js?id=XXXX)
+    tmr_patterns = [
+        r"_tmr\.push\(\s*\{\s*id:\s*['\"](\d{5,10})['\"]",
+        r"top-fwz1\.mail\.ru/(?:counter|js/code\.js)\?id=(\d{5,10})",
+    ]
+    tmr_ids: set[str] = set()
+    for pat in tmr_patterns:
+        for match in re.finditer(pat, html, flags=re.IGNORECASE):
+            tmr_ids.add(match.group(1))
+    if tmr_ids:
+        trackers["mailru_top"] = sorted(tmr_ids)
+
+    return trackers
+
+
 def detect_site_tech(html: str) -> SiteTechInfo:
     """Анализ HTML-страницы на наличие технологий, CMS, CRM и маркетинговых пикселей."""
     lowered = (html or "").lower()
@@ -207,13 +255,24 @@ def detect_site_tech(html: str) -> SiteTechInfo:
         if needle in lowered and label not in cms:
             cms.append(label)
 
-    marketing_active = bool(len(analytics) >= 2 or any("roistat" in a.lower() for a in analytics))
+    trackers = extract_tracker_ids(html)
+    if trackers.get("yandex_metrika") and "Яндекс.Метрика" not in analytics:
+        analytics.append("Яндекс.Метрика")
+    if trackers.get("google_analytics") and "Google Analytics" not in analytics:
+        analytics.append("Google Analytics")
+    if trackers.get("mailru_top") and "VK/Mail.ru счетчик" not in analytics:
+        analytics.append("VK/Mail.ru счетчик")
+
+    marketing_active = bool(
+        len(analytics) >= 2 or any("roistat" in a.lower() for a in analytics) or bool(trackers)
+    )
 
     return SiteTechInfo(
         analytics=analytics,
         crm_widgets=crm,
         cms=cms,
         marketing_active=marketing_active,
+        tracker_ids=trackers,
     )
 
 
