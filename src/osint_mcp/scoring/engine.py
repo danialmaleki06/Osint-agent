@@ -162,9 +162,21 @@ def _record_config_snapshot(path: Path, version: str, normalized: str) -> None:
         pass
 
 
-@lru_cache(maxsize=1)
+_LAST_LOADED_MTIME: float = 0.0
+_CACHED_CONFIG: ScoringConfig | None = None
+
+
 def load_config(path: Path | None = None) -> ScoringConfig:
+    global _LAST_LOADED_MTIME, _CACHED_CONFIG
     p = path or _TABLE_PATH
+    try:
+        current_mtime = p.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+
+    if _CACHED_CONFIG is not None and current_mtime == _LAST_LOADED_MTIME and p == _TABLE_PATH:
+        return _CACHED_CONFIG
+
     with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     try:
@@ -179,12 +191,16 @@ def load_config(path: Path | None = None) -> ScoringConfig:
         normalized.encode("utf-8")
     ).hexdigest()[:16]
     _record_config_snapshot(p, cfg.criteria_version, normalized)
+    _LAST_LOADED_MTIME = current_mtime
+    _CACHED_CONFIG = cfg
     return cfg
 
 
 def reload_config(path: Path | None = None) -> ScoringConfig:
-    """Перечитать YAML (после правки файла без перезапуска)."""
-    load_config.cache_clear()
+    """Перечитать YAML (принудительный сброс кэша)."""
+    global _LAST_LOADED_MTIME, _CACHED_CONFIG
+    _LAST_LOADED_MTIME = 0.0
+    _CACHED_CONFIG = None
     return load_config(path)
 
 
