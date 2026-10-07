@@ -5,8 +5,6 @@
       "type": "local",
       "command": ["uv", "run", "python", "-m", "osint_mcp.server"],
       "environment": {
-        "DADATA_API_KEY": "<подставь свой ключ>",
-        "CHECKO_API_KEYS": "<ключ1>,<ключ2>",
         "PYTHONUTF8": "1"
       },
       "enabled": true
