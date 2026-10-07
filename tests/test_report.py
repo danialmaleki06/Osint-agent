@@ -93,6 +93,9 @@ def test_brief_has_verdict_and_card():
         make_score(),
     )
     assert report["вердикт"] == "хорошо"
+    assert report["светофор"] == "🟢 Низкий риск"
+    assert "🟢" in report["уровень_риска"] or "Низкий риск" in report["уровень_риска"]
+    assert "рекомендация_по_сделке" in report
     assert report["score"] == 55.0
     assert report["карточка"]["наименование"] == 'ООО "БПМСОФТ"'
     assert report["карточка"]["численность"] == 386
@@ -471,6 +474,8 @@ def test_batch_entry_is_compact():
     entry = build_batch_entry(make_context_result(ctx), make_risk(), make_score())
     assert entry["наименование"] == 'ООО "БПМСОФТ"'
     assert entry["вердикт"] == "хорошо"
+    assert entry["светофор"] == "🟢 Низкий риск"
+    assert "рекомендация_по_сделке" in entry
     assert "разбор" not in entry
     assert "источники" not in entry
 
