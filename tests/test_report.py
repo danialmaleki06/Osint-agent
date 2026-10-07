@@ -495,6 +495,7 @@ def test_batch_entry_without_anything():
     entry = build_batch_entry(make_context_result(None), None,
                               make_score(label="не рекомендуется", total=0.0))
     assert entry["вердикт"] == "не рекомендуется"
+    assert entry["светофор"] == "⛔ Критический риск"
 
 
 def test_full_commercial_extended_signals():
