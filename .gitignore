@@ -254,3 +254,7 @@ instructions.log
 opencode_probe.log
 opencode_agent*.log
 opencode_*.log
+
+# Папка с шпаргалками и планом презентации
+presentation/
+
