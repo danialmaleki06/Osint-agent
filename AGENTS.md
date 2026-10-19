@@ -17,6 +17,8 @@ When the user asks to check a company, inspect a counterparty, verify risks, or 
    - Traffic light risk indicators (🟢 Низкий / 🟡 Умеренный / 🟠 Высокий / ⛔ Критический).
    - Objective factual evaluation (`суть_оценки`) without paternalistic managerial commands.
    - Verified clickable proof-links to official registries (FNS GIR BO PDF, Kontur.Focus, Kad.Arbitr, Gosuslugi).
+5. **No empty boilerplate rule:**
+   - Если по какому-либо источнику, платформе или разделу ничего не найдено — **НЕ пиши** в отчёте «было проверено на платформах X, Y, Z, но ничего не найдено». Просто **полностью опусти** этот раздел. В отчёт включаются только реально найденные события, инциденты и факты.
 
 ---
 

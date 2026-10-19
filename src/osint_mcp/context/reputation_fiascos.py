@@ -52,13 +52,15 @@ PAYMENT_MARKERS = [
 VENDOR_DISPUTE_MARKERS = [
     "приёмная", "претензия", "сорвали срок", "сорван проект", "разрыв контракта",
     "обман подрядчика", "суд с подрядчиком", "скандал", "не выполнили обязательства",
-    "срыв поставки", "односторонний отказ", "штрафные санкции",
+    "срыв поставки", "односторонний отказ", "штрафные санкции", "штраф фас", "предписание",
+    "антимонопольное дело", "нарушение антимонопольного",
 ]
 
 TECH_INCIDENT_MARKERS = [
     "постмортем", "post-mortem", "авария", "сбой", "упал прод", "упал сервер",
     "лежал несколько дней", "потеря данных", "инцидент", "утечка базы",
-    "утечка персональных данных", "баг биллинга", "ддос", "сломали продакшн",
+    "утечка персональных данных", "утечка исходного кода", "утечка", "баг биллинга", "ддос",
+    "сломали продакшн", "разбор аварии", "сбой в работе", "массовый сбой", "неполадки",
 ]
 
 BLACKLIST_MARKERS = [
@@ -102,42 +104,51 @@ def build_fiasco_queries(
     brand: str | None = None,
     domain: str | None = None,
 ) -> dict[FiascoPlatform, list[str]]:
-    """Формирует адресные поисковые запросы по 5 специализированным контурам."""
+    """Формирует адресные поисковые запросы по 5 специализированным контурам.
+    
+    Использует естественные поисковые паттерны, которые безотказно обрабатываются
+    поисковиками без сбоев на сложной булевой логике со скобками.
+    """
     clean_name = re.sub(r'^(ооо|зао|ао|пао|нко|ип)\s+', '', company_name, flags=re.I).strip('"«» ')
-    brand_term = brand or clean_name
+    if brand and len(brand.strip()) > 2:
+        brand_term = brand.strip()
+    elif clean_name and len(clean_name.strip()) > 2:
+        brand_term = clean_name.strip()
+    else:
+        brand_term = (brand or clean_name).strip()
     domain_term = domain.strip().lower() if domain else ""
 
     queries: dict[FiascoPlatform, list[str]] = {}
 
     # 1. VC.ru (Приёмная и коммерческие претензии)
     queries[FiascoPlatform.VC_RU] = [
-        f'site:vc.ru "{clean_name}" ("приёмная" OR "претензия" OR "не заплатили" OR "обман")',
-        f'site:vc.ru "{brand_term}" ("приёмная" OR "сорвали" OR "не подписывают акты")',
+        f'site:vc.ru "{brand_term}" приёмная',
+        f'"{brand_term}" vc.ru претензия не заплатили',
     ]
 
-    # 2. Хабр (Инженерные постмортемы и аварии)
+    # 2. Хабр (Инженерные постмортемы, сбои и аварии)
     queries[FiascoPlatform.HABR] = [
-        f'site:habr.com "{brand_term}" ("постмортем" OR "сбой" OR "авария" OR "инцидент" OR "упал")',
-        f'site:habr.com "{clean_name}" ("утечка" OR "баг" OR "проблема")',
+        f'"{brand_term}" сбой авария habr',
+        f'"{brand_term}" утечка инцидент habr',
     ]
 
     # 3. Пикабу (Потребительские и партнёрские скандалы)
     queries[FiascoPlatform.PIKABU] = [
-        f'site:pikabu.ru "{clean_name}" ("обман" OR "мошенники" OR "не связывайтесь" OR "претензия")',
-        f'site:pikabu.ru "{brand_term}" ("не платят" OR "кинули")',
+        f'"{brand_term}" pikabu обман претензия',
+        f'"{brand_term}" pikabu не связывайтесь',
     ]
 
     # 4. Чёрные списки заказчиков и работодателей (Antijob, Правда Сотрудников, DreamJob)
     queries[FiascoPlatform.BLACKLISTS] = [
-        f'(site:antijob.top OR site:pravda-sotrudnikov.ru OR site:dreamjob.ru) "{clean_name}" ("кидалово" OR "не платят" OR "черный список")',
-        f'(site:antijob.top OR site:pravda-sotrudnikov.ru) "{brand_term}" ("акты" OR "задержка")',
+        f'"{brand_term}" antijob черный список',
+        f'"{brand_term}" правда сотрудников отзывы не платят',
     ]
 
     # 5. Разработческие сообщества (GitHub, GitLab)
     dev_term = domain_term if domain_term else brand_term
     queries[FiascoPlatform.DEV_COMMUNITY] = [
-        f'(site:github.com OR site:gitlab.com) "{dev_term}" ("vulnerability" OR "leak" OR "broken" OR "security")',
-        f'site:github.com "{clean_name}" ("issue" OR "fiasco" OR "bug")',
+        f'"{dev_term}" github vulnerability leak',
+        f'"{brand_term}" gitlab critical bug issue',
     ]
 
     return queries

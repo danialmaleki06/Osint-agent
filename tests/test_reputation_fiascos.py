@@ -28,23 +28,23 @@ def test_build_fiasco_queries():
     assert FiascoPlatform.BLACKLISTS in queries
     assert FiascoPlatform.DEV_COMMUNITY in queries
 
-    # Проверяем наличие доменов целевых ресурсов
+    # Проверяем наличие ключевых маркеров целевых ресурсов
     vc_q = " ".join(queries[FiascoPlatform.VC_RU])
-    assert "site:vc.ru" in vc_q
+    assert "vc.ru" in vc_q
     assert "приёмная" in vc_q
 
     habr_q = " ".join(queries[FiascoPlatform.HABR])
-    assert "site:habr.com" in habr_q
-    assert "постмортем" in habr_q
+    assert "habr" in habr_q
+    assert "сбой" in habr_q or "утечка" in habr_q
 
     pika_q = " ".join(queries[FiascoPlatform.PIKABU])
-    assert "site:pikabu.ru" in pika_q
+    assert "pikabu" in pika_q
 
     bl_q = " ".join(queries[FiascoPlatform.BLACKLISTS])
-    assert "antijob" in bl_q or "pravda-sotrudnikov" in bl_q
+    assert "antijob" in bl_q or "правда сотрудников" in bl_q
 
     dev_q = " ".join(queries[FiascoPlatform.DEV_COMMUNITY])
-    assert "github.com" in dev_q or "gitlab.com" in dev_q
+    assert "github" in dev_q or "gitlab" in dev_q
 
 
 def test_classify_fiasco_payment_default():

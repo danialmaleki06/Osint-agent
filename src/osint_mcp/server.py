@@ -1774,23 +1774,35 @@ async def check_reputation_fiascos(
     clean_inn = inn.strip().replace(" ", "").replace("-", "")
     target_name = company_name
     target_domain = domain
+    brand_candidate = None
 
     if not target_name or not target_domain:
         ctx_res = await _build_context(clean_inn, _source, _checko)
         if ctx_res.context:
+            ctx = ctx_res.context
             if not target_name:
-                target_name = ctx_res.context.brand or ctx_res.context.name_short or ctx_res.context.name_legal
+                b = (ctx.brand or "").strip()
+                if b and len(b) > 2:
+                    target_name = b
+                else:
+                    target_name = ctx.name_short or ctx.name_legal or b
             if not target_domain:
-                target_domain = ctx_res.context.brand_domain or (
-                    ctx_res.context.extras.contacts.website if ctx_res.context.extras and ctx_res.context.extras.contacts else None
+                target_domain = ctx.brand_domain or (
+                    ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None
                 )
+
+    from osint_mcp.tools.names import core_name
+    if target_name:
+        clean_core = core_name(target_name)
+        if clean_core and len(clean_core) > 2:
+            brand_candidate = clean_core
 
     import asyncio
     facts = await asyncio.to_thread(
         _build_reputation_fiasco_facts,
         inn=clean_inn,
         company_name=target_name or clean_inn,
-        brand=target_name,
+        brand=brand_candidate or target_name,
         domain=target_domain,
         platforms=platforms,
     )
@@ -1820,9 +1832,9 @@ async def check_reputation_fiascos(
         "added_to_quarantine": added_to_quarantine,
         "incidents": incidents_summary,
         "guidance_for_sales_and_analyst": (
-            "Используйте эти факты для выстраивания жестких коммерческих условий: "
-            "при сигналах неплатежей требуйте аванс 100% или безотзывный аккредитив; "
-            "при спорах с подрядчиками детализируйте критерии приёмки этапов в договоре."
+            "ПРАВИЛО ФОРМИРОВАНИЯ ОТЧЁТА ДЛЯ АГЕНТА: Если facts_found == 0 (инцидентов не обнаружено), "
+            "ПОЛНОСТЬЮ ОПУСТИТЕ этот раздел из отчёта. Не пишите фраз в стиле 'проверено на 5 платформах, но ничего не найдено'. "
+            "Если факты найдены (facts_found > 0) — выведите раздел с конкретными реальными инцидентами, цитатами и ссылками."
         ),
     }
 
