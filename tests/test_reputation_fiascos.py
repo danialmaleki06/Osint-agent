@@ -10,8 +10,54 @@ from osint_mcp.context.reputation_fiascos import (
     classify_fiasco_text,
     evaluate_fiascos_findings,
     build_reputation_fiasco_facts,
+    extract_incident_date,
 )
 from osint_mcp.scoring.models import PendingFact
+
+
+def test_extract_incident_date():
+    """Тест извлечения дат публикаций и инцидентов из URL и текста."""
+    # Извлечение из URL (РБК: /DD/MM/YYYY/)
+    assert extract_incident_date(
+        "https://www.rbc.ru/technology_and_media/08/10/2026/6ac729745ecb179a64305301",
+        "Пожар в Сасово",
+        "Атака БПЛА",
+    ) == "08.10.2026"
+
+    # Извлечение из URL (Ведомости: /YYYY/MM/DD/)
+    assert extract_incident_date(
+        "https://www.vedomosti.ru/technology/articles/2026/10/08/1235289-chto-izvestno",
+        "Атака БПЛА",
+        "ЦОД остановлен",
+    ) == "08.10.2026"
+
+    # Извлечение из текста с русским месяцем
+    assert extract_incident_date(
+        "https://dzen.ru/a/asezNYwtABJA3Be0",
+        "Атака на ЦОД",
+        "В ночь на 8 октября 2026 года произошел инцидент",
+    ) == "08.10.2026"
+
+    # Извлечение из текста (утечка)
+    assert extract_incident_date(
+        "https://habr.com/ru/news/654039/",
+        "Утечка базы",
+        "1 марта служба безопасности рассказала о сливе... 2022 год",
+    ) == "01.03.2022"
+
+    # Извлечение формы предложного падежа месяца и года: "в марте 2022 года"
+    assert extract_incident_date(
+        "https://example.com/leak",
+        "Утечка данных",
+        "В марте 2022 года была зафиксирована компрометация базы",
+    ) == "03.2022"
+
+    # Извлечение при наличии даты и месяца и года в разных частях сниппета
+    assert extract_incident_date(
+        "https://example.com/incident",
+        "Инцидент 2023",
+        "26 января хакеры слили исходники",
+    ) == "26.01.2023"
 
 
 def test_build_fiasco_queries():

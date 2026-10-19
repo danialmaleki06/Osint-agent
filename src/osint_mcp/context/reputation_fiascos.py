@@ -103,6 +103,133 @@ DEV_COMMUNITY_MARKERS = [
 ]
 
 
+RU_MONTHS = {
+    # Январь
+    "январь": "01", "января": "01", "январе": "01", "янв": "01",
+    # Февраль
+    "февраль": "02", "февраля": "02", "феврале": "02", "фев": "02",
+    # Март
+    "март": "03", "марта": "03", "марте": "03", "мар": "03",
+    # Апрель
+    "апрель": "04", "апреля": "04", "апреле": "04", "апр": "04",
+    # Май
+    "май": "05", "мая": "05", "мае": "05",
+    # Июнь
+    "июнь": "06", "июня": "06", "июне": "06", "июн": "06",
+    # Июль
+    "июль": "07", "июля": "07", "июле": "07", "июл": "07",
+    # Август
+    "август": "08", "августа": "08", "августе": "08", "авг": "08",
+    # Сентябрь
+    "сентябрь": "09", "сентября": "09", "сентябре": "09", "сен": "09",
+    # Октябрь
+    "октябрь": "10", "октября": "10", "октябре": "10", "окт": "10",
+    # Ноябрь
+    "ноябрь": "11", "ноября": "11", "ноябре": "11", "ноя": "11",
+    # Декабрь
+    "декабрь": "12", "декабря": "12", "декабре": "12", "дек": "12",
+}
+
+
+def fetch_page_metadata_date(url: str, timeout: float = 2.0) -> str | None:
+    """Извлекает дату публикации из meta/time тегов HTML страницы (fallback)."""
+    try:
+        import httpx
+        with httpx.Client(timeout=timeout, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return None
+            html = resp.text[:65536]
+            # 1. article:published_time или datePublished или pubdate
+            m = re.search(r'(?:article:published_time|datePublished|pubdate|publish_date)["\']\s+content=["\']([0-9T:Z+.-]+)["\']', html, re.I)
+            if not m:
+                m = re.search(r'content=["\']([0-9T:Z+.-]+)["\']\s+itemprop=["\']datePublished["\']', html, re.I)
+            if not m:
+                m = re.search(r'<time[^>]*datetime=["\']([0-9T:Z+.-]+)["\']', html, re.I)
+            if m:
+                raw_dt = m.group(1)
+                m_iso = re.search(r'(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])', raw_dt)
+                if m_iso:
+                    return f"{m_iso.group(3)}.{m_iso.group(2)}.{m_iso.group(1)}"
+                m_yr = re.search(r'(20\d{2})', raw_dt)
+                if m_yr:
+                    return m_yr.group(1)
+            # Поиск дат на странице в стиле "23 марта 2022"
+            m_page_ru = re.search(r'\b([0-3]?\d)\s+([а-яё]+)\s+(20\d{2})\b', html, re.I)
+            if m_page_ru:
+                d = int(m_page_ru.group(1))
+                mw = m_page_ru.group(2).lower()
+                yr = m_page_ru.group(3)
+                if mw in RU_MONTHS and 1 <= d <= 31:
+                    return f"{d:02d}.{RU_MONTHS[mw]}.{yr}"
+    except Exception:
+        pass
+    return None
+
+
+def extract_incident_date(url: str, title: str, snippet: str, fetch_fallback: bool = False) -> str | None:
+    """Извлекает дату публикации или происшествия из URL, заголовка и сниппета."""
+    # 1. Поиск в URL: /YYYY/MM/DD/ или /DD/MM/YYYY/ или YYYY-MM-DD
+    m_url_ymd = re.search(r'/(20\d{2})/(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])(?:/|$|_)', url)
+    if m_url_ymd:
+        return f"{m_url_ymd.group(3)}.{m_url_ymd.group(2)}.{m_url_ymd.group(1)}"
+    m_url_dmy = re.search(r'/(0[1-9]|[12]\d|3[01])/(0[1-9]|1[0-2])/(20\d{2})(?:/|$|_)', url)
+    if m_url_dmy:
+        return f"{m_url_dmy.group(1)}.{m_url_dmy.group(2)}.{m_url_dmy.group(3)}"
+    m_url_dash = re.search(r'[-_/](20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])', url)
+    if m_url_dash:
+        return f"{m_url_dash.group(3)}.{m_url_dash.group(2)}.{m_url_dash.group(1)}"
+
+    combined = f"{title} {snippet}"
+
+    # 2. Поиск в тексте: число + месяц + год ("8 октября 2026", "1 марта 2022")
+    m_ru = re.search(r'\b([0-3]?\d)\s+([а-яё]+)(?:\s+(20\d{2}))?\b', combined, re.I)
+    if m_ru:
+        day = int(m_ru.group(1))
+        month_word = m_ru.group(2).lower()
+        if month_word in RU_MONTHS and 1 <= day <= 31:
+            month_num = RU_MONTHS[month_word]
+            year = m_ru.group(3)
+            if not year:
+                m_year = re.search(r'\b(201\d|202\d)\b', combined)
+                if m_year:
+                    year = m_year.group(1)
+            if year:
+                return f"{day:02d}.{month_num}.{year}"
+
+    # 3. Месяц и год без числа: "март 2022", "в январе 2023 года"
+    m_my = re.search(r'\b([а-яё]+)\s+(20\d{2})\b', combined, re.I)
+    if m_my:
+        month_word = m_my.group(1).lower()
+        if month_word in RU_MONTHS:
+            return f"{RU_MONTHS[month_word]}.{m_my.group(2)}"
+
+    # 4. Числовой формат в тексте: DD.MM.YYYY
+    m_num = re.search(r'\b([0-3]?\d)\.(0[1-9]|1[0-2])\.(20\d{2})\b', combined)
+    if m_num:
+        return f"{int(m_num.group(1)):02d}.{m_num.group(2)}.{m_num.group(3)}"
+
+    # 5. Год в контексте или URL
+    m_yr = re.search(r'\b(201\d|202\d)\b', combined) or re.search(r'/(201\d|202\d)/', url)
+    if m_yr:
+        return m_yr.group(1)
+
+    # 6. Fallback: быстрый запрос мета-тегов со страницы
+    if fetch_fallback and url.startswith("http"):
+        meta_d = fetch_page_metadata_date(url)
+        if meta_d:
+            return meta_d
+
+    # 7. Если было число и месяц без года: вернуть "DD.MM"
+    if m_ru:
+        day = int(m_ru.group(1))
+        month_word = m_ru.group(2).lower()
+        if month_word in RU_MONTHS and 1 <= day <= 31:
+            return f"{day:02d}.{RU_MONTHS[month_word]}"
+
+    return None
+
+
 @dataclass
 class FiascoIncident:
     platform: FiascoPlatform
@@ -113,6 +240,7 @@ class FiascoIncident:
     detected_markers: list[str]
     severity: str  # "critical", "high", "moderate"
     vendor_risk_advice: str
+    incident_date: str | None = None
 
 
 @dataclass
@@ -354,6 +482,7 @@ def evaluate_fiascos_findings(
             elif cat == FiascoCategory.CYBER_DATA_BREACH:
                 plat = FiascoPlatform.CYBER_LEAKS
 
+            inc_date = extract_incident_date(url, title, snippet, fetch_fallback=True)
             platforms_seen.add(plat.value)
             incidents.append(
                 FiascoIncident(
@@ -365,6 +494,7 @@ def evaluate_fiascos_findings(
                     detected_markers=markers,
                     severity=severity,
                     vendor_risk_advice=advice,
+                    incident_date=inc_date,
                 )
             )
 
@@ -459,11 +589,12 @@ def build_reputation_fiasco_facts(
     profile = evaluate_fiascos_findings(inn, company_name, raw_hits, brand=brand)
 
     for i, inc in enumerate(profile.incidents, 1):
+        date_str = f"[{inc.incident_date}] " if inc.incident_date else ""
         facts.append(
             PendingFact(
                 fact_id=f"FIASCO-{inc.platform.value.upper()}-{i}-{inn}",
                 kind=f"fiasco_{inc.category.value}",
-                statement=f"[{inc.platform.value.upper()}] {inc.title}: {inc.snippet} | Вывод: {inc.vendor_risk_advice}",
+                statement=f"[{inc.platform.value.upper()}] {date_str}{inc.title}: {inc.snippet} | Вывод: {inc.vendor_risk_advice}",
                 source_url=inc.url,
                 found_by="reputation_fiascos_engine",
                 found_at=now,

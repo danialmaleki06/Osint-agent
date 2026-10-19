@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1816,9 +1817,12 @@ async def check_reputation_fiascos(
 
     incidents_summary = []
     for f in facts:
+        m_date = re.search(r"\[([0-3]?\d\.[0-1]?\d\.\d{4}|\d{4})\]", f.statement)
+        event_date = m_date.group(1) if m_date else None
         incidents_summary.append({
             "fact_id": f.fact_id,
             "kind": f.kind,
+            "date": event_date,
             "statement": f.statement,
             "source_url": f.source_url,
         })
@@ -1827,14 +1831,17 @@ async def check_reputation_fiascos(
         "inn": clean_inn,
         "company_name": target_name,
         "domain": target_domain,
-        "platforms_checked": platforms or ["vc_ru", "habr", "pikabu", "blacklists", "dev_community"],
+        "platforms_checked": platforms or ["disasters", "cyber_leaks", "federal_media", "vc_ru", "habr", "blacklists"],
         "facts_found": len(facts),
         "added_to_quarantine": added_to_quarantine,
         "incidents": incidents_summary,
         "guidance_for_sales_and_analyst": (
-            "ПРАВИЛО ФОРМИРОВАНИЯ ОТЧЁТА ДЛЯ АГЕНТА: Если facts_found == 0 (инцидентов не обнаружено), "
-            "ПОЛНОСТЬЮ ОПУСТИТЕ этот раздел из отчёта. Не пишите фраз в стиле 'проверено на 5 платформах, но ничего не найдено'. "
-            "Если факты найдены (facts_found > 0) — выведите раздел с конкретными реальными инцидентами, цитатами и ссылками."
+            "ПРАВИЛО ФОРМИРОВАНИЯ ОТЧЁТА ДЛЯ АГЕНТА: "
+            "1. Если facts_found == 0 (инцидентов не обнаружено), ПОЛНОСТЬЮ ОПУСТИТЕ этот раздел из отчёта. "
+            "Не пишите фраз в стиле 'проверено на платформах, но ничего не найдено'. "
+            "2. Если факты найдены (facts_found > 0) — выведите раздел с конкретными реальными инцидентами. "
+            "3. ОБЯЗАТЕЛЬНО указывайте дату каждого события/публикации (поле 'date' или дата из цитаты, например, '08.10.2026' или 'март 2022'). "
+            "Срок давности событий критически важен для пользователя."
         ),
     }
 
