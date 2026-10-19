@@ -413,6 +413,48 @@ criteria:
     warn_always: true
     reason: "Коммерческий риск неплатежей/споров с подрядчиками: {statement}"
 
+  reputation_fiasco_disaster_incident:
+    group: litigation
+    description: "Физические катастрофы, пожары, аварии ЦОД, атаки БПЛА на ключевую инфраструктуру"
+    match:
+      kind: fiasco_disaster_incident
+      op: exists
+    score: -40
+    verdict_floor: "рискованно"
+    warn_always: true
+    reason: "Критический физический инцидент / ЧП инфраструктуры: {statement}"
+
+  reputation_fiasco_criminal_investigation:
+    group: litigation
+    description: "Уголовные дела, обыски, следственные действия, аресты руководства"
+    match:
+      kind: fiasco_criminal_investigation
+      op: exists
+    score: -45
+    verdict_floor: "не рекомендуется"
+    warn_always: true
+    reason: "Уголовные и следственные риски: {statement}"
+
+  reputation_fiasco_cyber_data_breach:
+    group: litigation
+    description: "Крупные утечки персональных данных, сливы баз данных или исходных кодов"
+    match:
+      kind: fiasco_cyber_data_breach
+      op: exists
+    score: -25
+    warn_always: true
+    reason: "Инцидент ИБ / компрометация данных: {statement}"
+
+  reputation_fiasco_vendor_dispute:
+    group: litigation
+    description: "Публичные досудебные претензии, споры с подрядчиками, срывы приёмки"
+    match:
+      kind: fiasco_vendor_dispute
+      op: exists
+    score: -20
+    warn_always: true
+    reason: "Споры с подрядчиками / претензии к приёмке: {statement}"
+
   reputation_fiasco_tech_incident:
     group: litigation
     description: "Публичные свидетельства критических аварий продакшна или потери данных на Хабре/в сообществах"

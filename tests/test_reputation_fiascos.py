@@ -47,6 +47,27 @@ def test_build_fiasco_queries():
     assert "github" in dev_q or "gitlab" in dev_q
 
 
+def test_classify_fiasco_disaster_incident():
+    """Тест классификации физической катастрофы / аварии ЦОД / атаки БПЛА."""
+    text = "«Яндекс» сообщил о пожаре в дата-центре в городе Сасово в результате атаки БПЛА, работа ЦОД остановлена."
+    cat, markers, severity, advice = classify_fiasco_text(FiascoPlatform.DISASTERS, text)
+
+    assert cat == FiascoCategory.DISASTER_INCIDENT
+    assert "пожар" in markers or "атака" in markers or "бпла" in markers
+    assert severity == "critical"
+    assert "инфраструктурный инцидент" in advice
+
+
+def test_classify_fiasco_cyber_data_breach():
+    """Тест классификации утечки баз данных и слива исходных кодов."""
+    text = "Хакеры выложили в сеть архив базы данных клиентов и утечку исходного кода сервиса."
+    cat, markers, severity, advice = classify_fiasco_text(FiascoPlatform.CYBER_LEAKS, text)
+
+    assert cat == FiascoCategory.CYBER_DATA_BREACH
+    assert "утечка" in markers[0] or "слив" in markers[0] or "исходного кода" in markers
+    assert severity == "high"
+
+
 def test_classify_fiasco_payment_default():
     """Тест классификации риска неплатежей и затягивания актов."""
     text = "Компания ООО Ромашка не заплатили за этап разработки и не подписывают акты уже 4 месяца."
@@ -117,7 +138,7 @@ def test_build_reputation_fiasco_facts(mock_search):
     mock_search.return_value = [
         {
             "url": "https://vc.ru/claim/777",
-            "title": "Сорван проект интеграции CRM",
+            "title": "BPMSoft: Сорван проект интеграции CRM",
             "snippet": "Заказчик отказался подписывать акты, немотивированный отказ.",
         }
     ]
