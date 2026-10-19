@@ -204,10 +204,13 @@ def extract_incident_date(url: str, title: str, snippet: str, fetch_fallback: bo
         if month_word in RU_MONTHS:
             return f"{RU_MONTHS[month_word]}.{m_my.group(2)}"
 
-    # 4. Числовой формат в тексте: DD.MM.YYYY
-    m_num = re.search(r'\b([0-3]?\d)\.(0[1-9]|1[0-2])\.(20\d{2})\b', combined)
+    # 4. Числовой формат в тексте: DD.MM.YYYY или DD.MM.YY
+    m_num = re.search(r'\b([0-3]?\d)\.(0[1-9]|1[0-2])\.(20\d{2}|\d{2})\b', combined)
     if m_num:
-        return f"{int(m_num.group(1)):02d}.{m_num.group(2)}.{m_num.group(3)}"
+        yr = m_num.group(3)
+        if len(yr) == 2:
+            yr = f"20{yr}"
+        return f"{int(m_num.group(1)):02d}.{m_num.group(2)}.{yr}"
 
     # 5. Год в контексте или URL
     m_yr = re.search(r'\b(201\d|202\d)\b', combined) or re.search(r'/(201\d|202\d)/', url)

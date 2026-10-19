@@ -1817,7 +1817,7 @@ async def check_reputation_fiascos(
 
     incidents_summary = []
     for f in facts:
-        m_date = re.search(r"\[([0-3]?\d\.[0-1]?\d\.\d{4}|\d{4})\]", f.statement)
+        m_date = re.search(r"\[([0-3]?\d\.[0-1]?\d(?:\.(?:20)?\d{2})?|\d{4})\]", f.statement)
         event_date = m_date.group(1) if m_date else None
         incidents_summary.append({
             "fact_id": f.fact_id,
