@@ -65,6 +65,10 @@ from osint_mcp.context.geo_reviews import (
     build_geo_reviews_facts as _build_geo_reviews_facts,
     evaluate_geo_findings as _evaluate_geo_findings,
 )
+from osint_mcp.context.reputation_fiascos import (
+    build_reputation_fiasco_facts as _build_reputation_fiasco_facts,
+    evaluate_fiascos_findings as _evaluate_fiascos_findings,
+)
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
 
 
@@ -97,7 +101,7 @@ TOOLS = ["health_check", "validate_inn", "resolve_company",
          "list_catalog_sources", "scan_catalog_source",
          "register_custom_source", "scan_catalog_batch",
          "check_shared_analytics", "check_customs_ved",
-         "check_geo_reviews"]
+         "check_geo_reviews", "check_reputation_fiascos"]
 
 
 
@@ -1716,6 +1720,109 @@ async def check_geo_reviews(
             "Если обнаружен сомнительный физический адрес (гараж/пустырь при миллиардных оборотах), "
             "немедленно предупредите пользователя о риске фиктивной компании. "
             "При операционных сбоях в отзывах используйте это как коммерческий триггер для аудита и автоматизации."
+        ),
+    }
+
+
+@mcp.tool()
+async def check_reputation_fiascos(
+    inn: Annotated[
+        str,
+        Field(
+            description="ИНН организации для поиска операционных сбоев, факапов и коммерческих рисков",
+            examples=["7724744134"],
+        ),
+    ],
+    company_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Опциональное наименование компании или бренд (если не передано, берется из ЕГРЮЛ)",
+        ),
+    ] = None,
+    domain: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Опциональный домен корпоративного сайта для точного таргетинга (например, 'bpmsoft.ru')",
+        ),
+    ] = None,
+    platforms: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description="Список целевых платформ: ['vc_ru', 'habr', 'pikabu', 'blacklists', 'dev_community']. Если не указано, проверяются все 5.",
+        ),
+    ] = None,
+) -> dict:
+    """Глубокий поиск забытых факапов, неплатежей, споров с подрядчиками и аварий.
+
+    КОНТУРЫ ПОИСКА (5 платформ):
+    1. VC.ru (Приёмная): досудебные претензии, невозврат денег, удержание оплат подрядчикам.
+    2. Хабр (Habr): инженерные постмортемы, падения продакшна, критика в комментариях инженеров.
+    3. Пикабу (Pikabu): публичные разоблачения, потребительские и партнёрские конфликты.
+    4. Чёрные списки работодателей/заказчиков (Antijob, Правда Сотрудников, DreamJob): невыплаты расчётов, затягивание актов, токсичный менеджмент.
+    5. Разработческие сообщества (GitHub, GitLab): заброшенные репозитории, критические баги, утечки токенов/ключей.
+
+    ПРИКЛАДНАЯ ЦЕННОСТЬ ДЛЯ СЕЙЛА / ПОСТАВЩИКА / ПАРТНЁРА:
+    Позволяет узнать поведенческую культуру контрагента ДО подписания договора:
+    - Затягивают ли они оплаты и подписание актов сдачи-приёмки?
+    - Были ли крупные технологические аварии и простои сервисов?
+    - Не увольняется ли команда посреди проекта?
+    Все находки помещаются в SQLite-карантин (quarantine.db) со статусом 'pending' и категорией риска.
+    """
+    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    target_name = company_name
+    target_domain = domain
+
+    if not target_name or not target_domain:
+        ctx_res = await _build_context(clean_inn, _source, _checko)
+        if ctx_res.context:
+            if not target_name:
+                target_name = ctx_res.context.brand or ctx_res.context.name_short or ctx_res.context.name_legal
+            if not target_domain:
+                target_domain = ctx_res.context.brand_domain or (
+                    ctx_res.context.extras.contacts.website if ctx_res.context.extras and ctx_res.context.extras.contacts else None
+                )
+
+    import asyncio
+    facts = await asyncio.to_thread(
+        _build_reputation_fiasco_facts,
+        inn=clean_inn,
+        company_name=target_name or clean_inn,
+        brand=target_name,
+        domain=target_domain,
+        platforms=platforms,
+    )
+
+    added_to_quarantine = 0
+    if facts:
+        added_to_quarantine = _quarantine.add(clean_inn, facts)
+
+    log.info("tool_call", tool="check_reputation_fiascos", inn=clean_inn,
+             company=target_name, facts_count=len(facts), quarantined=added_to_quarantine)
+
+    incidents_summary = []
+    for f in facts:
+        incidents_summary.append({
+            "fact_id": f.fact_id,
+            "kind": f.kind,
+            "statement": f.statement,
+            "source_url": f.source_url,
+        })
+
+    return {
+        "inn": clean_inn,
+        "company_name": target_name,
+        "domain": target_domain,
+        "platforms_checked": platforms or ["vc_ru", "habr", "pikabu", "blacklists", "dev_community"],
+        "facts_found": len(facts),
+        "added_to_quarantine": added_to_quarantine,
+        "incidents": incidents_summary,
+        "guidance_for_sales_and_analyst": (
+            "Используйте эти факты для выстраивания жестких коммерческих условий: "
+            "при сигналах неплатежей требуйте аванс 100% или безотзывный аккредитив; "
+            "при спорах с подрядчиками детализируйте критерии приёмки этапов в договоре."
         ),
     }
 
