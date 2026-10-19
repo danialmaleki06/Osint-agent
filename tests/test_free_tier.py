@@ -440,6 +440,49 @@ async def test_hh_without_token_reports_honestly():
     assert info.reason and "токен" in info.reason
 
 
+@respx.mock
+async def test_hh_resolves_exact_employer_id():
+    """Разрешение профиля работодателя исключает сбор вакансий чужих компаний."""
+    respx.get(f"{settings.hh_base_url}/employers").mock(
+        return_value=httpx.Response(200, json={
+            "found": 1,
+            "items": [{"id": "9251203", "name": "БПМСОФТ", "open_vacancies": 16}]
+        })
+    )
+    vac_route = respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={
+            "found": 16,
+            "items": [
+                {"name": "Менеджер по продажам ИТ продуктов"},
+                {"name": "Инженер технической поддержки"}
+            ]
+        })
+    )
+
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("БПМСОФТ")
+
+    assert info.employer_id == "9251203"
+    assert info.employer_name == "БПМСОФТ"
+    assert info.found_by_name is False
+    assert info.open_vacancies == 16
+    assert vac_route.calls.last.request.url.params["employer_id"] == "9251203"
+    assert vac_route.calls.last.request.url.params["order_by"] == "publication_time"
+
+
+@respx.mock
+async def test_hh_orders_by_publication_time_on_fallback():
+    """Даже при текстовом fallback вакансии сортируются по времени публикации."""
+    vac_route = respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={"found": 0, "items": []})
+    )
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("РедкаяКомпания123")
+
+    assert info.found_by_name is True
+    assert vac_route.calls.last.request.url.params["order_by"] == "publication_time"
+
+
 def test_sales_block_in_full_report():
     """Блок «коммерческие сигналы» собирается в полном отчёте.
 

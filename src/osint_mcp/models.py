@@ -325,6 +325,14 @@ class HiringInfo(BaseModel):
         default=False,
         description="Признаки активного найма в IT/R&D (разработчики, инженеры, аналитики)",
     )
+    employer_id: str | None = Field(
+        default=None,
+        description="ID работодателя на HeadHunter при точном сопоставлении",
+    )
+    employer_name: str | None = Field(
+        default=None,
+        description="Наименование верифицированного работодателя на HeadHunter",
+    )
 
 
 class MspInfo(BaseModel):

@@ -77,6 +77,40 @@ _IT_ROLE_KEYWORDS = (
 )
 
 
+def _find_best_employer(query: str, items: list[dict]) -> dict | None:
+    """Выбирает наиболее точный профиль работодателя из выдачи /employers."""
+    if not items:
+        return None
+    q_clean = query.strip().lower()
+
+    # 1. Полное совпадение наименования
+    for it in items:
+        name = (it.get("name") or "").strip().lower()
+        if name == q_clean:
+            return it
+
+    # 2. Имя работодателя содержит точное слово запроса как отдельное слово
+    exact_word_matches = []
+    for it in items:
+        name = (it.get("name") or "").strip().lower()
+        if re.search(r'\b' + re.escape(q_clean) + r'\b', name):
+            exact_word_matches.append(it)
+    if exact_word_matches:
+        # Приоритет профилю с открытыми вакансиями и наиболее близкой длиной имени
+        return max(
+            exact_word_matches,
+            key=lambda x: (x.get("open_vacancies") or 0, -len(x.get("name") or "")),
+        )
+
+    # 3. Если кандидат ровно один и в нем содержится подстрока запроса
+    if len(items) == 1:
+        name = (items[0].get("name") or "").strip().lower()
+        if q_clean in name or name in q_clean:
+            return items[0]
+
+    return None
+
+
 class HhSource:
     """Открытый поиск вакансий HeadHunter по имени работодателя."""
 
@@ -86,21 +120,60 @@ class HhSource:
         self._client = client
 
     async def get_hiring(self, name: str) -> HiringInfo:
-        """Вакансии по тексту имени компании."""
+        """Вакансии по тексту имени компании.
+        
+        Сначала пытается однозначно определить работодателя через /employers,
+        чтобы не собирать вакансии чужих организаций с похожими названиями.
+        Вакансии сортируются строго по времени публикации (order_by=publication_time).
+        """
         service, method = self.name, "vacancies"
         query = _search_query(name)
         if not query:
             return HiringInfo(reason="имя компании не установлено, найм не искался")
 
-        url = f"{settings.hh_base_url}/vacancies"
-        params = {
-            "text": query,
-            "search_field": "company_name",
-            "per_page": 20,
-        }
         headers = dict(_HEADERS)
         if settings.hh_app_token:
             headers["Authorization"] = f"Bearer {settings.hh_app_token}"
+
+        matched_employer = None
+        # Шаг 1: попытка однозначного разрешения профиля работодателя через /employers
+        try:
+            emp_url = f"{settings.hh_base_url}/employers"
+            emp_params = {"text": query, "per_page": 10}
+            if self._client is not None:
+                emp_resp = await self._client.get(emp_url, params=emp_params, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+                    emp_resp = await client.get(emp_url, params=emp_params, headers=headers)
+            if emp_resp.status_code == 200:
+                emp_data = emp_resp.json()
+                matched_employer = _find_best_employer(query, emp_data.get("items") or [])
+        except Exception as exc:  # noqa: BLE001
+            log.debug("hh.employer_resolve_skipped", query=query, error=str(exc))
+            matched_employer = None
+
+        # Шаг 2: запрос вакансий — строго по employer_id либо текстовый fallback
+        url = f"{settings.hh_base_url}/vacancies"
+        if matched_employer and matched_employer.get("id"):
+            emp_id = str(matched_employer["id"])
+            emp_name = matched_employer.get("name")
+            params = {
+                "employer_id": emp_id,
+                "order_by": "publication_time",
+                "per_page": 20,
+            }
+            found_by_name = False
+        else:
+            emp_id = None
+            emp_name = None
+            params = {
+                "text": query,
+                "search_field": "company_name",
+                "order_by": "publication_time",
+                "per_page": 20,
+            }
+            found_by_name = True
+
         try:
             if self._client is not None:
                 resp = await self._client.get(url, params=params, headers=headers)
@@ -152,7 +225,7 @@ class HhSource:
 
         it_investing = (it_count >= 2) or (it_count >= 1 and len(items) <= 3)
         ledger.record(service, method, "ok" if items else "empty")
-        log.info("hh.vacancies", name=query, found=len(items),
+        log.info("hh.vacancies", name=query, employer_id=emp_id, found=len(items),
                  leadership=len(leadership_roles), tech_count=len(tech_stack))
 
         return HiringInfo(
@@ -161,5 +234,7 @@ class HhSource:
             leadership_roles=leadership_roles,
             tech_stack=tech_stack,
             it_investing=it_investing,
-            found_by_name=True,
+            found_by_name=found_by_name,
+            employer_id=emp_id,
+            employer_name=emp_name,
         )
