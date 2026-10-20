@@ -23,6 +23,8 @@ from datetime import date, datetime, timedelta, timezone
 from osint_mcp.models import CompanyContext, FinancialYear, RiskCollection
 from osint_mcp.scoring.models import ScoreResult
 from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intelligence
+from osint_mcp.tools.statutory_hr import build_statutory_hr_profile as _build_statutory_hr
+from osint_mcp.tools.affiliations_lite import build_affiliations_lite as _build_affiliations_lite
 
 # Порог «крупная компания» для массового адреса: у крупного бизнеса
 # регистрация по адресу с другими организациями — норма (бизнес-центры),
@@ -740,6 +742,9 @@ def build_report(
             report["что_не_собралось"] = context_result.reason
         report["риски_кратко"] = _summary_lines(risk, score)
         if ctx is not None:
+            stat_hr = _build_statutory_hr(ctx)
+            if stat_hr:
+                report["кадровый_потенциал_документы"] = stat_hr
             sales_intel = _build_sales_intelligence(ctx, risk=risk)
             if sales_intel:
                 report["коммерческий_срез"] = {
@@ -772,6 +777,13 @@ def build_report(
             report["карточка"]["масштаб"] = ctx.size_category
 
     report["разбор"] = _full_sections(ctx, risk)
+    if ctx is not None:
+        stat_hr = _build_statutory_hr(ctx)
+        if stat_hr:
+            report["кадровый_потенциал_документы"] = stat_hr
+        aff_lite = _build_affiliations_lite(ctx)
+        if aff_lite:
+            report["корпоративные_связи_lite"] = aff_lite
     sales_intel = _build_sales_intelligence(ctx, risk=risk)
     if sales_intel:
         report["коммерческий_срез"] = sales_intel

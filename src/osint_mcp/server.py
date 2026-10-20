@@ -658,6 +658,12 @@ async def get_company_report(
             description="Включать ли глубокий OSINT-поиск инцидентов, аварий, неплатежей и публикаций в СМИ (по умолчанию true)",
         ),
     ] = True,
+    expected_name: Annotated[
+        str | None,
+        Field(
+            description="Ожидаемое наименование компании из запроса пользователя (для контроля соответствия ИНН ↔ название)",
+        ),
+    ] = None,
 ) -> dict:
     """Отчёт по организации, объём зависит от запроса пользователя.
 
@@ -725,8 +731,17 @@ async def get_company_report(
     пересчитывайте.
     """
     import asyncio
-    ledger.set_subject(inn)
-    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    from osint_mcp.tools.query_guard import (
+        extract_inn_and_name,
+        check_query_inn_consistency,
+        build_discrepancy_fact,
+    )
+    from osint_mcp.tools.hr_hub import detect_corporate_hr_hub
+
+    parsed_inn, parsed_name = extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    target_expected_name = expected_name or parsed_name
+    ledger.set_subject(clean_inn)
 
     # Запускаем сбор контекста и риск-фактов параллельно
     context_task = _build_context(clean_inn, _source, _checko)
@@ -747,25 +762,49 @@ async def get_company_report(
             ),
         }
 
-    # Параллельный поиск репутационных рисков и факапов (СМИ, Хабр, VC.ru, ЧП)
+    # Проверка расхождения запроса «Имя ↔ ИНН»
+    query_discrepancy = None
+    if target_expected_name and context_result.context:
+        query_discrepancy = check_query_inn_consistency(target_expected_name, context_result.context)
+        if query_discrepancy:
+            disc_fact = build_discrepancy_fact(query_discrepancy)
+            risk.facts.append(disc_fact)
+
+    # Параллельный поиск репутационных рисков и детекция HR-хаба холдинга
     fiasco_facts = []
-    if include_reputation and context_result.context:
+    hr_hub_info = None
+    if context_result.context:
         ctx = context_result.context
         target_name = (ctx.brand if ctx.brand_resolved else None) or ctx.name_short or ctx.name_legal
         target_domain = ctx.brand_domain or (
             ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None
         )
-        try:
-            fiasco_facts = await _async_build_reputation_fiasco_facts(
-                inn=clean_inn,
-                company_name=target_name or clean_inn,
-                brand=ctx.brand,
-                domain=target_domain,
-            )
-            if fiasco_facts:
-                _quarantine.add(clean_inn, fiasco_facts)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("get_company_report_reputation_error", error=str(exc))
+
+        async def _fetch_fiascos():
+            if not include_reputation:
+                return []
+            try:
+                facts = await _async_build_reputation_fiasco_facts(
+                    inn=clean_inn,
+                    company_name=target_name or clean_inn,
+                    brand=ctx.brand,
+                    domain=target_domain,
+                )
+                if facts:
+                    _quarantine.add(clean_inn, facts)
+                return facts
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_reputation_error", error=str(exc))
+                return []
+
+        async def _fetch_hr_hub():
+            try:
+                return await detect_corporate_hr_hub(ctx)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("get_company_report_hr_hub_error", error=str(exc))
+                return None
+
+        fiasco_facts, hr_hub_info = await asyncio.gather(_fetch_fiascos(), _fetch_hr_hub())
 
     score = _score_company(
         facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
@@ -775,6 +814,16 @@ async def get_company_report(
     if detail_norm not in ("brief", "full"):
         detail_norm = "brief"
     result = _build_report(detail_norm, context_result, risk, score)
+
+    # Прикрепляем расхождение запроса (если обнаружено)
+    if query_discrepancy:
+        result["расхождение_запроса"] = query_discrepancy
+
+    # Прикрепляем кадровый хаб (если обнаружен)
+    if hr_hub_info:
+        result["кадровый_хаб_холдинга"] = hr_hub_info
+        if "кадровый_потенциал_документы" in result:
+            result["кадровый_потенциал_документы"]["кадровый_хаб_холдинга"] = hr_hub_info
 
     # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
     if fiasco_facts:
@@ -842,6 +891,12 @@ async def generate_full_dossier(
             examples=["brief", "full"],
         ),
     ] = "full",
+    expected_name: Annotated[
+        str | None,
+        Field(
+            description="Ожидаемое наименование компании из запроса пользователя (для проверки расхождения названия и ИНН)",
+        ),
+    ] = None,
 ) -> dict:
     """Единый фасад для мгновенного сбора полного OSINT-досье на контрагента за 1 вызов.
 
@@ -853,8 +908,15 @@ async def generate_full_dossier(
     - Глубокий OSINT-поиск инцидентов, ЧП, уголовных дел, сбоев и споров с подрядчиками
       (РБК, Коммерсантъ, Ведомости, VC.ru, Хабр, Пикабу, чёрные списки)
     - Расчёт детерминированного вердикта риска со светофором (🟢/🟡/🟠/⛔).
+    - Query Guard: выявление расхождения запрошенного названия и данных реестра по ИНН.
+    - Corporate HR Hub: детекция централизованного хаба найма холдинга при 0 вакансий на основном юрлице.
     """
-    return await get_company_report(inn=inn, detail=detail, include_reputation=True)
+    return await get_company_report(
+        inn=inn,
+        detail=detail,
+        include_reputation=True,
+        expected_name=expected_name,
+    )
 
 
 @mcp.tool()

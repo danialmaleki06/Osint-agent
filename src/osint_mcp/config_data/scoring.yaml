@@ -55,6 +55,19 @@ groups:
 # Названия оценок — в verdicts ниже. Порядок в списке = порядок строгости.
 
 criteria:
+  query_name_mismatch:
+    group: registry_risk
+    description: "Запрошенное наименование контрагента не совпадает с данными по ИНН в ЕГРЮЛ"
+    match:
+      kind: registry
+      field: критичность
+      op: eq
+      values: ["high"]
+    score: -40
+    warn_always: true
+    verdict_floor: "рискованно"
+    reason: "{statement}"
+
   liquidated:
     group: registry_risk
     description: "Организация ликвидирована или в процессе ликвидации/реорганизации"

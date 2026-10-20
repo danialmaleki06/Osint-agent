@@ -557,3 +557,24 @@ def test_full_commercial_extended_signals():
     assert "ZHEJIANG CO, LTD (Китай)" in comm_text
     assert "реестр отечественного ПО: 1" in comm_text
 
+
+
+def test_report_includes_statutory_hr_and_affiliations_lite():
+    from osint_mcp.models import HiringInfo
+    ctx = make_context(
+        employees=386,
+        revenue_latest=2_769_645_000.0,
+        hiring=HiringInfo(open_vacancies=15),
+        founders=["ООО «ЛАНИТ ВЕНЧУРС»"],
+    )
+    score = make_score()
+    report = build_report("full", make_context_result(ctx), make_risk(), score)
+
+    assert "кадровый_потенциал_документы" in report
+    assert report["кадровый_потенциал_документы"]["официальный_штат_фнс"] == 386
+    assert report["кадровый_потенциал_документы"]["открыто_вакансий_30дней"] == 15
+    assert report["кадровый_потенциал_документы"]["динамика_найма"] == "плановая_ротация"
+
+    assert "корпоративные_связи_lite" in report
+    assert report["корпоративные_связи_lite"]["руководитель"]["фио"] == "Директоров Дмитрий Петрович"
+    assert report["корпоративные_связи_lite"]["учредители"][0]["наименование"] == "ООО «ЛАНИТ ВЕНЧУРС»"
