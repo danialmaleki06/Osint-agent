@@ -119,16 +119,30 @@ class HhSource:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
 
-    async def get_hiring(self, name: str) -> HiringInfo:
+    async def get_hiring(
+        self,
+        name: str,
+        name_variants: list[str] | tuple[str, ...] | None = None,
+    ) -> HiringInfo:
         """Вакансии по тексту имени компании.
         
         Сначала пытается однозначно определить работодателя через /employers,
-        чтобы не собирать вакансии чужих организаций с похожими названиями.
+        проверяя как основное имя, так и альтернативные варианты (кириллица, бренд),
+        чтобы исключить сбор вакансий чужих организаций с похожими названиями.
         Вакансии сортируются строго по времени публикации (order_by=publication_time).
         """
         service, method = self.name, "vacancies"
-        query = _search_query(name)
-        if not query:
+        candidate_names = [name]
+        if name_variants:
+            candidate_names.extend(name_variants)
+
+        queries: list[str] = []
+        for n in candidate_names:
+            q = _search_query(n)
+            if q and q not in queries:
+                queries.append(q)
+
+        if not queries:
             return HiringInfo(reason="имя компании не установлено, найм не искался")
 
         headers = dict(_HEADERS)
@@ -136,20 +150,26 @@ class HhSource:
             headers["Authorization"] = f"Bearer {settings.hh_app_token}"
 
         matched_employer = None
+        matched_query = queries[0]
         # Шаг 1: попытка однозначного разрешения профиля работодателя через /employers
         try:
             emp_url = f"{settings.hh_base_url}/employers"
-            emp_params = {"text": query, "per_page": 10}
-            if self._client is not None:
-                emp_resp = await self._client.get(emp_url, params=emp_params, headers=headers)
-            else:
-                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
-                    emp_resp = await client.get(emp_url, params=emp_params, headers=headers)
-            if emp_resp.status_code == 200:
-                emp_data = emp_resp.json()
-                matched_employer = _find_best_employer(query, emp_data.get("items") or [])
+            for q in queries:
+                emp_params = {"text": q, "per_page": 20}
+                if self._client is not None:
+                    emp_resp = await self._client.get(emp_url, params=emp_params, headers=headers)
+                else:
+                    async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+                        emp_resp = await client.get(emp_url, params=emp_params, headers=headers)
+                if emp_resp.status_code == 200:
+                    emp_data = emp_resp.json()
+                    best = _find_best_employer(q, emp_data.get("items") or [])
+                    if best:
+                        matched_employer = best
+                        matched_query = q
+                        break
         except Exception as exc:  # noqa: BLE001
-            log.debug("hh.employer_resolve_skipped", query=query, error=str(exc))
+            log.debug("hh.employer_resolve_skipped", queries=queries, error=str(exc))
             matched_employer = None
 
         # Шаг 2: запрос вакансий — строго по employer_id либо текстовый fallback
@@ -167,7 +187,7 @@ class HhSource:
             emp_id = None
             emp_name = None
             params = {
-                "text": query,
+                "text": matched_query,
                 "search_field": "company_name",
                 "order_by": "publication_time",
                 "per_page": 20,
@@ -196,7 +216,22 @@ class HhSource:
             ledger.record(service, method, "failed", "ответ не JSON")
             return HiringInfo(reason="сервис вернул не JSON")
 
-        items = data.get("items") or []
+        raw_items = data.get("items") or []
+        if found_by_name:
+            items = []
+            for it in raw_items:
+                emp = (it.get("employer") or {}).get("name") or ""
+                if not emp:
+                    # В фикстурах или тестах поле employer может отсутствовать
+                    items.append(it)
+                    continue
+                emp_clean = _search_query(emp).lower()
+                if any(q.lower() in emp_clean or emp_clean in q.lower() for q in queries):
+                    items.append(it)
+            open_vacancies = len(items)
+        else:
+            items = raw_items
+            open_vacancies = data.get("found", len(items))
         roles: list[str] = []
         leadership_roles: list[str] = []
         tech_stack: list[str] = []
@@ -225,11 +260,11 @@ class HhSource:
 
         it_investing = (it_count >= 2) or (it_count >= 1 and len(items) <= 3)
         ledger.record(service, method, "ok" if items else "empty")
-        log.info("hh.vacancies", name=query, employer_id=emp_id, found=len(items),
+        log.info("hh.vacancies", name=matched_query, employer_id=emp_id, found=len(items),
                  leadership=len(leadership_roles), tech_count=len(tech_stack))
 
         return HiringInfo(
-            open_vacancies=data.get("found", len(items)),
+            open_vacancies=open_vacancies,
             roles=roles,
             leadership_roles=leadership_roles,
             tech_stack=tech_stack,

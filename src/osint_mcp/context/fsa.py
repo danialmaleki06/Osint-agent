@@ -141,7 +141,7 @@ class FsaSource:
             resp = await self._client.post(url, json=body, headers=headers)
         else:
             async with httpx.AsyncClient(
-                timeout=max(settings.request_timeout, 15.0), headers=headers,
+                timeout=min(settings.request_timeout, 3.5), headers=headers,
             ) as client:
                 resp = await client.post(url, json=body)
         resp.raise_for_status()

@@ -124,7 +124,7 @@ class FedresursSource:
             resp = await self._client.get(url, headers=self._headers(referer))
         else:
             async with httpx.AsyncClient(
-                timeout=max(settings.request_timeout, 15.0),
+                timeout=min(settings.request_timeout, 3.5),
                 headers=self._headers(referer),
             ) as client:
                 resp = await client.get(url)

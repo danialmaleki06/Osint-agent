@@ -68,6 +68,7 @@ from osint_mcp.context.geo_reviews import (
 )
 from osint_mcp.context.reputation_fiascos import (
     build_reputation_fiasco_facts as _build_reputation_fiasco_facts,
+    async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
     evaluate_fiascos_findings as _evaluate_fiascos_findings,
 )
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
@@ -96,7 +97,7 @@ mcp = MCPServer(SERVER_NAME, version=VERSION)
 
 TOOLS = ["health_check", "validate_inn", "resolve_company",
          "get_company_context", "collect_risk_facts", "check_affiliations",
-         "check_coverage", "get_company_report", "check_companies_batch",
+         "check_coverage", "get_company_report", "generate_full_dossier", "check_companies_batch",
          "get_company_links", "get_verdict", "search_unverified",
          "review_pending", "check_provider_limits",
          "list_catalog_sources", "scan_catalog_source",
@@ -644,13 +645,19 @@ async def get_company_report(
         str,
         Field(
             description=(
-                'Объём отчёта: "brief" — карточка + вердикт, '
+                'Объём отчёта: "brief" — карточка + вердикт + ключевые риски, '
                 '"full" — всё собранное, включая финансы по годам, '
-                "налоги, лицензии, события истории"
+                "налоги, лицензии, события истории, СМИ и операционные сбои"
             ),
             examples=["brief", "full"],
         ),
     ] = "brief",
+    include_reputation: Annotated[
+        bool,
+        Field(
+            description="Включать ли глубокий OSINT-поиск инцидентов, аварий, неплатежей и публикаций в СМИ (по умолчанию true)",
+        ),
+    ] = True,
 ) -> dict:
     """Отчёт по организации, объём зависит от запроса пользователя.
 
@@ -707,23 +714,30 @@ async def get_company_report(
          поля там означают «не смогли получить», а не «сведений нет».
       6. pending — только в full: покажите в блоке «не проверено,
          нашлось в открытом виде», не превращая в вывод.
+      7. КОММЕРЧЕСКИЙ СРЕЗ ДЛЯ МЕНЕДЖЕРА (БЛОК «коммерческий_срез»):
+         ОБЯЗАТЕЛЬНО включи в ответ раздел «🎯 Коммерческий срез для менеджера»:
+         - Продуктовая линейка и формула бизнеса: что реально продают, кому, продукты в реестре ПО Минцифры или товарные знаки.
+         - Точки боли и триггеры потребностей (Pains: дефицит кадров, смена ЛПР, инфраструктурный контраст, судебные споры).
+         - Что можно предложить (2–3 прикладных B2B-оффера под их боли с указанием целевой роли ЛПР).
+         - Готовый персонализированный заход (icebreaker) для первого звонка или письма.
 
     Оценку считает движок по scoring.yaml — пересказывайте, а не
     пересчитывайте.
     """
+    import asyncio
     ledger.set_subject(inn)
-    context_result = await _build_context(inn, _source, _checko)
-    risk = await _collect_risk_facts(
-        inn, _checko,
-        name=(context_result.context.name_short or context_result.context.name_legal
-              if context_result.context else None),
-    )
+    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+
+    # Запускаем сбор контекста и риск-фактов параллельно
+    context_task = _build_context(clean_inn, _source, _checko)
+    risk_task = _collect_risk_facts(clean_inn, _checko)
+    context_result, risk = await asyncio.gather(context_task, risk_task)
 
     # Та же защита, что в get_verdict: молчание всех источников —
     # не «чистая проверка», и вердиктом это выдавать нельзя.
     if context_result.context is None and risk.sources_ok == 0:
         return {
-            "inn": inn,
+            "inn": clean_inn,
             "вердикт": "не рекомендуется",
             "оценка_не_выставлена": (
                 "Реестровые источники недоступны"
@@ -733,20 +747,114 @@ async def get_company_report(
             ),
         }
 
+    # Параллельный поиск репутационных рисков и факапов (СМИ, Хабр, VC.ru, ЧП)
+    fiasco_facts = []
+    if include_reputation and context_result.context:
+        ctx = context_result.context
+        target_name = (ctx.brand if ctx.brand_resolved else None) or ctx.name_short or ctx.name_legal
+        target_domain = ctx.brand_domain or (
+            ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None
+        )
+        try:
+            fiasco_facts = await _async_build_reputation_fiasco_facts(
+                inn=clean_inn,
+                company_name=target_name or clean_inn,
+                brand=ctx.brand,
+                domain=target_domain,
+            )
+            if fiasco_facts:
+                _quarantine.add(clean_inn, fiasco_facts)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_company_report_reputation_error", error=str(exc))
+
     score = _score_company(
-        facts=risk.facts + _quarantine.confirmed_facts(inn),
+        facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,
     )
     detail_norm = detail.strip().lower()
     if detail_norm not in ("brief", "full"):
         detail_norm = "brief"
     result = _build_report(detail_norm, context_result, risk, score)
+
+    # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
+    if fiasco_facts:
+        incidents_list = []
+        for f in fiasco_facts:
+            m_date = re.search(r"\[([0-3]?\d\.[0-1]?\d(?:\.(?:20)?\d{2})?|\d{4})\]", f.statement)
+            event_date = m_date.group(1) if m_date else None
+            m_lbl = re.search(r"^\[(.*?)\]", f.statement)
+            source_lbl = m_lbl.group(1) if m_lbl else ""
+            incidents_list.append({
+                "source": source_lbl,
+                "date": event_date,
+                "statement": f.statement,
+                "url": f.source_url,
+            })
+        if detail_norm == "full":
+            result["инциденты_и_сми"] = incidents_list
+        else:
+            result["инциденты_и_сми"] = incidents_list[:2]
+
+    # Обогащаем коммерческий срез репутационными фактами и инцидентами
+    if context_result.context:
+        from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intel
+        sales_intel = _build_sales_intel(
+            context_result.context,
+            risk=risk,
+            fiascos=fiasco_facts,
+            detail=detail_norm,
+        )
+        if sales_intel:
+            if detail_norm == "full":
+                result["коммерческий_срез"] = sales_intel
+            else:
+                result["коммерческий_срез"] = {
+                    "формула_бизнеса": sales_intel.get("формула_бизнеса"),
+                    "целевой_сегмент": sales_intel.get("целевой_сегмент"),
+                    "крючок_для_контакта": sales_intel.get("крючок_для_контакта"),
+                }
+
     # Добавляем кликабельные первоисточники для компактного цитирования агентом в markdown
     if context_result.context and context_result.context.source_links:
         result["ссылки"] = [l.model_dump() for l in context_result.context.source_links]
-    log.info("tool_call", tool="get_company_report", inn=inn,
-             detail=detail_norm, verdict=score.verdict.label)
+    log.info("tool_call", tool="get_company_report", inn=clean_inn,
+             detail=detail_norm, verdict=score.verdict.label,
+             fiascos=len(fiasco_facts))
     return result
+
+
+@mcp.tool()
+async def generate_full_dossier(
+    inn: Annotated[
+        str,
+        Field(
+            description="ИНН организации (10 или 12 цифр)",
+            examples=["7724744134"],
+        ),
+    ],
+    detail: Annotated[
+        str,
+        Field(
+            description=(
+                'Объём досье: "full" (по умолчанию) — полное детальное досье (карточка, финансы, суды, СМИ, сбои, риски), '
+                '"brief" — краткая выжимка со светофором и ключевыми риск-факторами'
+            ),
+            examples=["brief", "full"],
+        ),
+    ] = "full",
+) -> dict:
+    """Единый фасад для мгновенного сбора полного OSINT-досье на контрагента за 1 вызов.
+
+    Объединяет в один параллельный прогон:
+    - Официальные реестры (ЕГРЮЛ, ФНС, ГИР БО, Реестр МСП, Минцифры)
+    - Арбитраж, исполнительные производства ФССП, проверки и реестровые метки
+    - Кадровый контур и наём (HeadHunter)
+    - Инфраструктуру (WHOIS, DNS, SSL, технологии сайта)
+    - Глубокий OSINT-поиск инцидентов, ЧП, уголовных дел, сбоев и споров с подрядчиками
+      (РБК, Коммерсантъ, Ведомости, VC.ru, Хабр, Пикабу, чёрные списки)
+    - Расчёт детерминированного вердикта риска со светофором (🟢/🟡/🟠/⛔).
+    """
+    return await get_company_report(inn=inn, detail=detail, include_reputation=True)
 
 
 @mcp.tool()
@@ -1778,9 +1886,11 @@ async def check_reputation_fiascos(
     brand_candidate = None
 
     if not target_name or not target_domain:
-        ctx_res = await _build_context(clean_inn, _source, _checko)
-        if ctx_res.context:
-            ctx = ctx_res.context
+        fast_res = await _source.get_context(clean_inn)
+        if fast_res.status != "ok" or not fast_res.context:
+            fast_res = await _checko.get_context(clean_inn)
+        if fast_res.context:
+            ctx = fast_res.context
             if not target_name:
                 b = (ctx.brand or "").strip()
                 if b and len(b) > 2 and re.search(r"[а-яА-ЯёЁ]", b):
@@ -1800,9 +1910,7 @@ async def check_reputation_fiascos(
         if clean_core and len(clean_core) > 2:
             brand_candidate = clean_core
 
-    import asyncio
-    facts = await asyncio.to_thread(
-        _build_reputation_fiasco_facts,
+    facts = await _async_build_reputation_fiasco_facts(
         inn=clean_inn,
         company_name=target_name or clean_inn,
         brand=brand_candidate or target_name,

@@ -136,6 +136,39 @@ RU_MONTHS = {
 }
 
 
+def extract_date_from_html(html: str) -> str | None:
+    """Извлекает дату публикации из фрагмента HTML по стандартным мета-тегам и разметке."""
+    # 1. article:published_time или datePublished или pubdate
+    m = re.search(r"""(?:article:published_time|datePublished|pubdate|publish_date)["'][^>]*?content=["']([0-9T:Z+.-]+)["']""", html, re.I)
+    if not m:
+        m = re.search(r"""content=["']([0-9T:Z+.-]+)["'][^>]*?(?:article:published_time|datePublished|pubdate|publish_date)["']""", html, re.I)
+    if not m:
+        m = re.search(r"""content=["']([0-9T:Z+.-]+)["']\s+itemprop=["']datePublished["']""", html, re.I)
+    if not m:
+        m = re.search(r"""<time[^>]*datetime=["']([0-9T:Z+.-]+)["']""", html, re.I)
+    if m:
+        raw_dt = m.group(1)
+        m_iso = re.search(r'(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])', raw_dt)
+        if m_iso:
+            return f"{m_iso.group(3)}.{m_iso.group(2)}.{m_iso.group(1)}"
+        m_yr = re.search(r'(20\d{2})', raw_dt)
+        if m_yr:
+            return m_yr.group(1)
+    # Поиск даты внутри элементов с классами даты/времени
+    m_cls = re.search(r'(?:date|time|published|created)[^>]*>(?:<[^>]+>|\s)*([0-3]?\d\.[0-1]?\d\.20\d{2})', html, re.I)
+    if m_cls:
+        return m_cls.group(1)
+    # Поиск дат на странице в стиле "23 марта 2022"
+    m_page_ru = re.search(r'\b([0-3]?\d)\s+([а-яё]+)\s+(20\d{2})\b', html, re.I)
+    if m_page_ru:
+        d = int(m_page_ru.group(1))
+        mw = m_page_ru.group(2).lower()
+        yr = m_page_ru.group(3)
+        if mw in RU_MONTHS and 1 <= d <= 31:
+            return f"{d:02d}.{RU_MONTHS[mw]}.{yr}"
+    return None
+
+
 def fetch_page_metadata_date(url: str, timeout: float = 2.0) -> str | None:
     """Извлекает дату публикации из meta/time тегов HTML страницы (fallback)."""
     try:
@@ -144,35 +177,30 @@ def fetch_page_metadata_date(url: str, timeout: float = 2.0) -> str | None:
             resp = client.get(url)
             if resp.status_code != 200:
                 return None
-            html = resp.text[:262144]
-            # 1. article:published_time или datePublished или pubdate
-            m = re.search(r"""(?:article:published_time|datePublished|pubdate|publish_date)["'][^>]*?content=["']([0-9T:Z+.-]+)["']""", html, re.I)
-            if not m:
-                m = re.search(r"""content=["']([0-9T:Z+.-]+)["'][^>]*?(?:article:published_time|datePublished|pubdate|publish_date)["']""", html, re.I)
-            if not m:
-                m = re.search(r"""content=["']([0-9T:Z+.-]+)["']\s+itemprop=["']datePublished["']""", html, re.I)
-            if not m:
-                m = re.search(r"""<time[^>]*datetime=["']([0-9T:Z+.-]+)["']""", html, re.I)
-            if m:
-                raw_dt = m.group(1)
-                m_iso = re.search(r'(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])', raw_dt)
-                if m_iso:
-                    return f"{m_iso.group(3)}.{m_iso.group(2)}.{m_iso.group(1)}"
-                m_yr = re.search(r'(20\d{2})', raw_dt)
-                if m_yr:
-                    return m_yr.group(1)
-            # Поиск даты внутри элементов с классами даты/времени (например, <div class="newsdetail-date"><i ...></i> 05.11.2025</div>)
-            m_cls = re.search(r'(?:date|time|published|created)[^>]*>(?:<[^>]+>|\s)*([0-3]?\d\.[0-1]?\d\.20\d{2})', html, re.I)
-            if m_cls:
-                return m_cls.group(1)
-            # Поиск дат на странице в стиле "23 марта 2022"
-            m_page_ru = re.search(r'\b([0-3]?\d)\s+([а-яё]+)\s+(20\d{2})\b', html, re.I)
-            if m_page_ru:
-                d = int(m_page_ru.group(1))
-                mw = m_page_ru.group(2).lower()
-                yr = m_page_ru.group(3)
-                if mw in RU_MONTHS and 1 <= d <= 31:
-                    return f"{d:02d}.{RU_MONTHS[mw]}.{yr}"
+            return extract_date_from_html(resp.text[:262144])
+    except Exception:
+        pass
+    return None
+
+
+async def async_fetch_page_metadata_date(
+    url: str,
+    client: Any | None = None,
+    timeout: float = 1.8,
+) -> str | None:
+    """Асинхронное извлечение даты публикации из meta/time тегов HTML страницы."""
+    try:
+        import httpx
+        if client is not None:
+            resp = await client.get(url, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}
+            ) as c:
+                resp = await c.get(url)
+        if resp.status_code != 200:
+            return None
+        return extract_date_from_html(resp.text[:262144])
     except Exception:
         pass
     return None
@@ -571,6 +599,7 @@ def evaluate_fiascos_findings(
     company_name: str,
     raw_hits: list[dict[str, Any]],
     brand: str | None = None,
+    fetch_fallback: bool = True,
 ) -> ReputationFiascosProfile:
     """Агрегирует сырые поисковые находки в профиль инцидентов с фильтрацией релевантности."""
     incidents: list[FiascoIncident] = []
@@ -653,7 +682,7 @@ def evaluate_fiascos_findings(
                 plat = FiascoPlatform.CYBER_LEAKS
 
             source_lbl = resolve_media_source_label(url, plat)
-            inc_date = extract_incident_date(url, title, snippet, fetch_fallback=True)
+            inc_date = extract_incident_date(url, title, snippet, fetch_fallback=fetch_fallback)
             platforms_seen.add(plat.value)
             incidents.append(
                 FiascoIncident(
@@ -716,6 +745,42 @@ def evaluate_fiascos_findings(
     )
 
 
+async def async_evaluate_fiascos_findings(
+    inn: str,
+    company_name: str,
+    raw_hits: list[dict[str, Any]],
+    brand: str | None = None,
+) -> ReputationFiascosProfile:
+    """Асинхронная агрегация находок с параллельным fallback-извлечением недостающих дат."""
+    import asyncio
+    # 1. Быстрый локальный парсинг дат через regex без блокирующих HTTP-запросов
+    profile = evaluate_fiascos_findings(
+        inn, company_name, raw_hits, brand=brand, fetch_fallback=False,
+    )
+    # 2. Асинхронное параллельное обогащение для находок без найденной даты
+    missing_dates = [
+        inc for inc in profile.incidents
+        if not inc.incident_date and inc.url.startswith("http")
+    ]
+    if missing_dates:
+        import httpx
+        try:
+            async with httpx.AsyncClient(
+                timeout=1.8, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}
+            ) as client:
+                tasks = [
+                    async_fetch_page_metadata_date(inc.url, client=client, timeout=1.8)
+                    for inc in missing_dates
+                ]
+                dates = await asyncio.gather(*tasks, return_exceptions=True)
+                for inc, d in zip(missing_dates, dates):
+                    if isinstance(d, str) and d:
+                        inc.incident_date = d
+        except Exception:
+            pass
+    return profile
+
+
 DEFAULT_MONITORING_PLATFORMS = [
     FiascoPlatform.DISASTERS,
     FiascoPlatform.CYBER_LEAKS,
@@ -726,39 +791,50 @@ DEFAULT_MONITORING_PLATFORMS = [
 ]
 
 
-def build_reputation_fiasco_facts(
+async def async_build_reputation_fiasco_facts(
     inn: str,
     company_name: str,
     brand: str | None = None,
     domain: str | None = None,
     platforms: list[str] | None = None,
 ) -> list[PendingFact]:
-    """Сбор и генерация фактов инцидентов и новостных событий для шины фактов и карантина."""
+    """Асинхронный параллельный сбор и генерация фактов инцидентов и новостных событий."""
+    import asyncio
     facts: list[PendingFact] = []
     now = datetime.now(timezone.utc)
 
     queries_map = build_fiasco_queries(company_name, brand, domain, inn=inn)
-    
+
     if platforms:
         target_platform_vals = set(platforms)
     else:
         target_platform_vals = {p.value for p in DEFAULT_MONITORING_PLATFORMS}
 
-    raw_hits: list[dict[str, Any]] = []
+    # Параллельный поиск по целевым контурам (без последовательного time.sleep)
+    async def _search_one(plat: FiascoPlatform, q: str) -> list[dict[str, Any]]:
+        try:
+            hits = await asyncio.to_thread(search_web, q, limit=3, retries=1, retry_delay=0.5)
+            for h in hits:
+                h["platform_hint"] = plat
+            return hits
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fiasco_search_error", query=q, error=str(exc))
+            return []
+
+    search_tasks = []
     for plat, q_list in queries_map.items():
         if plat.value not in target_platform_vals:
             continue
         for q in q_list[:1]:  # По одному высокоточному запросу на контур
-            try:
-                hits = search_web(q, limit=3, retries=2, retry_delay=1.0)
-                for h in hits:
-                    h["platform_hint"] = plat
-                raw_hits.extend(hits)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("fiasco_search_error", query=q, error=str(exc))
-            time.sleep(0.35)
+            search_tasks.append(_search_one(plat, q))
 
-    profile = evaluate_fiascos_findings(inn, company_name, raw_hits, brand=brand)
+    gathered_hits = await asyncio.gather(*search_tasks, return_exceptions=True)
+    raw_hits: list[dict[str, Any]] = []
+    for r in gathered_hits:
+        if isinstance(r, list):
+            raw_hits.extend(r)
+
+    profile = await async_evaluate_fiascos_findings(inn, company_name, raw_hits, brand=brand)
 
     for i, inc in enumerate(profile.incidents, 1):
         date_str = f"[{inc.incident_date}] " if inc.incident_date else ""
@@ -776,3 +852,42 @@ def build_reputation_fiasco_facts(
         )
 
     return facts
+
+
+def build_reputation_fiasco_facts(
+    inn: str,
+    company_name: str,
+    brand: str | None = None,
+    domain: str | None = None,
+    platforms: list[str] | None = None,
+) -> list[PendingFact]:
+    """Синхронная обёртка для обратной совместимости с тестами и скриптами."""
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run,
+                async_build_reputation_fiasco_facts(
+                    inn=inn,
+                    company_name=company_name,
+                    brand=brand,
+                    domain=domain,
+                    platforms=platforms,
+                ),
+            ).result()
+    else:
+        return asyncio.run(
+            async_build_reputation_fiasco_facts(
+                inn=inn,
+                company_name=company_name,
+                brand=brand,
+                domain=domain,
+                platforms=platforms,
+            )
+        )

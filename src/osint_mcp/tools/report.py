@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from osint_mcp.models import CompanyContext, FinancialYear, RiskCollection
 from osint_mcp.scoring.models import ScoreResult
+from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intelligence
 
 # Порог «крупная компания» для массового адреса: у крупного бизнеса
 # регистрация по адресу с другими организациями — норма (бизнес-центры),
@@ -738,6 +739,14 @@ def build_report(
         if context_result and context_result.reason:
             report["что_не_собралось"] = context_result.reason
         report["риски_кратко"] = _summary_lines(risk, score)
+        if ctx is not None:
+            sales_intel = _build_sales_intelligence(ctx, risk=risk)
+            if sales_intel:
+                report["коммерческий_срез"] = {
+                    "формула_бизнеса": sales_intel.get("формула_бизнеса"),
+                    "целевой_сегмент": sales_intel.get("целевой_сегмент"),
+                    "крючок_для_контакта": sales_intel.get("крючок_для_контакта"),
+                }
         if score.reasons:
             report["основания"] = score.reasons
         report["scored_at"] = score.scored_at.isoformat()
@@ -763,6 +772,9 @@ def build_report(
             report["карточка"]["масштаб"] = ctx.size_category
 
     report["разбор"] = _full_sections(ctx, risk)
+    sales_intel = _build_sales_intelligence(ctx, risk=risk)
+    if sales_intel:
+        report["коммерческий_срез"] = sales_intel
     if risk is not None:
         report["источники"] = [
             {"source": r.source, "status": r.status,

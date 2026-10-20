@@ -534,20 +534,62 @@ async def build_company_context(
     # по рыночному имени (под ним работодатель обычно и зарегистрирован
     # на hh), при его отсутствии — по краткому юридическому. Источник
     # бесплатен, исключений наружу не бросает: отказ приходит в reason.
-    search_name = ((ctx.brand or ctx.name_short) if ctx.brand_resolved
-                   else ctx.name_short) or ctx.name_legal
-    ctx.hiring = await HhSource().get_hiring(search_name)
+    search_name = ctx.name_short or ctx.brand or ctx.name_legal
 
-    # Сайт компании: возраст домена и самоназвание. Оба сигнала косвенные,
-    # оба бесплатны. Домен младше обещанного возраста бизнеса — признак
-    # перерегистрации; мёртвый DNS у «действующей» компании — тоже ответ.
-    # Блок стоит ПОСЛЕ карточки (в ctx.extras приходят сайт и знаки) и
-    # после восстановления бренда: выбранный сайт уже в brand_domain.
+    # Найм и проверка сайта запускаются параллельно в фоне
     site_url = ctx.brand_domain or registry_site
+
+    async def _fetch_hiring():
+        try:
+            return await HhSource().get_hiring(search_name, name_variants=ctx.name_variants)
+        except Exception:
+            return None
+
+    async def _fetch_domain():
+        if not site_url:
+            return None, 'Сайт не указан'
+        try:
+            return await domain_age(site_url)
+        except Exception as e:
+            return None, f'Ошибка WHOIS: {type(e).__name__}'
+
+    async def _fetch_content():
+        if not site_url:
+            return None, None, 'Сайт не указан'
+        try:
+            return await inspect_site_content(site_url)
+        except Exception as e:
+            return None, None, f'Ошибка анализа сайта: {type(e).__name__}'
+
+    async def _fetch_ssl():
+        if not site_url:
+            return None, 'Сайт не указан'
+        try:
+            return await ssl_info(site_url)
+        except Exception as e:
+            return None, f'Ошибка SSL: {type(e).__name__}'
+
+    hiring_res, domain_res, site_res, ssl_res_tuple = await asyncio.gather(
+        _fetch_hiring(),
+        _fetch_domain(),
+        _fetch_content(),
+        _fetch_ssl(),
+        return_exceptions=True,
+    )
+
+    if not isinstance(hiring_res, BaseException) and hiring_res is not None:
+        ctx.hiring = hiring_res
+
     if site_url:
-        domain_created, whois_failure = await domain_age(site_url)
-        self_description, tech, site_failure = await inspect_site_content(site_url)
-        ssl_res, ssl_failure = await ssl_info(site_url)
+        domain_created, whois_failure = (
+            domain_res if isinstance(domain_res, tuple) else (None, str(domain_res))
+        )
+        self_description, tech, site_failure = (
+            site_res if isinstance(site_res, tuple) else (None, None, str(site_res))
+        )
+        ssl_res, ssl_failure = (
+            ssl_res_tuple if isinstance(ssl_res_tuple, tuple) else (None, str(ssl_res_tuple))
+        )
 
         ctx.domain_created_at = domain_created
         if self_description:
@@ -558,12 +600,12 @@ async def build_company_context(
             ctx.ssl_info = ssl_res
 
         if whois_failure:
-            gaps.append(f"WHOIS по домену не проверен: {whois_failure}.")
+            gaps.append(f'WHOIS по домену не проверен: {whois_failure}.')
         if site_failure and not whois_failure:
-            gaps.append(f"Сайт не открыт: {site_failure}. "
-                        "Для «действующей» компании мёртвый сайт — сам по себе сигнал.")
+            gaps.append(f'Сайт не открыт: {site_failure}. '
+                        'Для «действующей» компании мёртвый сайт — сам по себе сигнал.')
         if ssl_failure:
-            gaps.append(f"SSL-сертификат сайта не проверен: {ssl_failure}.")
+            gaps.append(f'SSL-сертификат сайта не проверен: {ssl_failure}.')
 
 
     log.info("context_built", inn=ctx.inn, brand=ctx.brand,

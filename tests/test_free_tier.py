@@ -483,6 +483,57 @@ async def test_hh_orders_by_publication_time_on_fallback():
     assert vac_route.calls.last.request.url.params["order_by"] == "publication_time"
 
 
+@respx.mock
+async def test_hh_resolves_via_name_variants():
+    """Если имя на латинице (бренд сайта), работодатель находится по кириллическому названию из variants."""
+    respx.get(f"{settings.hh_base_url}/employers", params={"text": "BPMSOFT", "per_page": "20"}).mock(
+        return_value=httpx.Response(200, json={"found": 0, "items": []})
+    )
+    respx.get(f"{settings.hh_base_url}/employers", params={"text": "БПМСОФТ", "per_page": "20"}).mock(
+        return_value=httpx.Response(200, json={
+            "found": 1,
+            "items": [{"id": "9251203", "name": "БПМСОФТ", "open_vacancies": 15}]
+        })
+    )
+    respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={
+            "found": 15,
+            "items": [{"name": "Инженер технической поддержки"}]
+        })
+    )
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("BPMSOFT", name_variants=["ООО «БПМСОФТ»", "БПМСОФТ"])
+
+    assert info.employer_id == "9251203"
+    assert info.employer_name == "БПМСОФТ"
+    assert info.open_vacancies == 15
+    assert info.found_by_name is False
+
+
+@respx.mock
+async def test_hh_fallback_filters_unmatched_employers():
+    """В текстовом fallback отсекаются вакансии сторонних организаций."""
+    respx.get(f"{settings.hh_base_url}/employers").mock(
+        return_value=httpx.Response(200, json={"found": 0, "items": []})
+    )
+    respx.get(f"{settings.hh_base_url}/vacancies").mock(
+        return_value=httpx.Response(200, json={
+            "found": 141,
+            "items": [
+                {"name": "Фитнес-тренер", "employer": {"name": "128bpm фитнес"}},
+                {"name": "Кладовщик", "employer": {"name": "ЛАНИТ"}},
+                {"name": "Системный аналитик", "employer": {"name": "ООО «БПМСОФТ»"}}
+            ]
+        })
+    )
+    from osint_mcp.context.hh import HhSource
+    info = await HhSource().get_hiring("БПМСОФТ")
+
+    assert info.found_by_name is True
+    assert info.open_vacancies == 1
+    assert info.roles == ["Системный аналитик"]
+
+
 def test_sales_block_in_full_report():
     """Блок «коммерческие сигналы» собирается в полном отчёте.
 
