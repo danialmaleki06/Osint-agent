@@ -236,6 +236,13 @@ async def build_company_context(
         what_card = "карточка организации в ЕГРЮЛ (Контур.Фокус)"
         url_card = f"https://focus.kontur.ru/entity?query={ctx.ogrn or ctx.inn}"
         links.append(SourceLink(what=what_card, url=url_card, source="kontur"))
+        links.append(
+            SourceLink(
+                what="профиль организации и публикации в РБК Компании",
+                url=f"https://companies.rbc.ru/search/?query={ctx.ogrn or ctx.inn}",
+                source="rbc_companies",
+            )
+        )
         # ИТ-компании: официального бесплатного API реестра нет (проверено
         # 29.09.2026 — поиск Госуслуг закрыт pos-proxy с подписанными
         # запросами), поэтому даём эвристику по ОКВЭД и ссылку на

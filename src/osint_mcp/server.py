@@ -1783,10 +1783,12 @@ async def check_reputation_fiascos(
             ctx = ctx_res.context
             if not target_name:
                 b = (ctx.brand or "").strip()
-                if b and len(b) > 2:
+                if b and len(b) > 2 and re.search(r"[а-яА-ЯёЁ]", b):
                     target_name = b
                 else:
                     target_name = ctx.name_short or ctx.name_legal or b
+            if not brand_candidate and ctx.brand:
+                brand_candidate = ctx.brand
             if not target_domain:
                 target_domain = ctx.brand_domain or (
                     ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None
@@ -1819,9 +1821,12 @@ async def check_reputation_fiascos(
     for f in facts:
         m_date = re.search(r"\[([0-3]?\d\.[0-1]?\d(?:\.(?:20)?\d{2})?|\d{4})\]", f.statement)
         event_date = m_date.group(1) if m_date else None
+        m_lbl = re.search(r"^\[(.*?)\]", f.statement)
+        source_lbl = m_lbl.group(1) if m_lbl else ""
         incidents_summary.append({
             "fact_id": f.fact_id,
             "kind": f.kind,
+            "source_label": source_lbl,
             "date": event_date,
             "statement": f.statement,
             "source_url": f.source_url,

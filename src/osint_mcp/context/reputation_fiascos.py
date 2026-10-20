@@ -75,6 +75,9 @@ PAYMENT_MARKERS = [
     "не подписывает акты", "кинули на деньги", "немотивированный отказ",
     "задолженность перед подрядчиком", "просрочка платежа", "досудебная претензия",
     "выбиваем оплату", "отказываются платить", "удержание денег", "не возвращают",
+    "банкротств", "дело о банкротстве", "иск о банкротстве", "процедура банкротства",
+    "исполнительный лист", "взыскание", "взыскать", "долг перед фнс",
+    "неуплата налогов", "налоговая задолженность", "арест счетов", "арест имущества",
 ]
 
 VENDOR_DISPUTE_MARKERS = [
@@ -82,6 +85,8 @@ VENDOR_DISPUTE_MARKERS = [
     "обман подрядчика", "суд с подрядчиком", "скандал", "не выполнили обязательства",
     "срыв поставки", "односторонний отказ", "штрафные санкции", "штраф фас", "предписание",
     "антимонопольное дело", "нарушение антимонопольного",
+    "расторжение контракта", "расторгла контракт", "расторгнут контракт",
+    "одностороннее расторжение", "неустойка", "взыскание неустойки",
 ]
 
 TECH_INCIDENT_MARKERS = [
@@ -139,13 +144,15 @@ def fetch_page_metadata_date(url: str, timeout: float = 2.0) -> str | None:
             resp = client.get(url)
             if resp.status_code != 200:
                 return None
-            html = resp.text[:65536]
+            html = resp.text[:262144]
             # 1. article:published_time или datePublished или pubdate
-            m = re.search(r'(?:article:published_time|datePublished|pubdate|publish_date)["\']\s+content=["\']([0-9T:Z+.-]+)["\']', html, re.I)
+            m = re.search(r"""(?:article:published_time|datePublished|pubdate|publish_date)["'][^>]*?content=["']([0-9T:Z+.-]+)["']""", html, re.I)
             if not m:
-                m = re.search(r'content=["\']([0-9T:Z+.-]+)["\']\s+itemprop=["\']datePublished["\']', html, re.I)
+                m = re.search(r"""content=["']([0-9T:Z+.-]+)["'][^>]*?(?:article:published_time|datePublished|pubdate|publish_date)["']""", html, re.I)
             if not m:
-                m = re.search(r'<time[^>]*datetime=["\']([0-9T:Z+.-]+)["\']', html, re.I)
+                m = re.search(r"""content=["']([0-9T:Z+.-]+)["']\s+itemprop=["']datePublished["']""", html, re.I)
+            if not m:
+                m = re.search(r"""<time[^>]*datetime=["']([0-9T:Z+.-]+)["']""", html, re.I)
             if m:
                 raw_dt = m.group(1)
                 m_iso = re.search(r'(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])', raw_dt)
@@ -154,6 +161,10 @@ def fetch_page_metadata_date(url: str, timeout: float = 2.0) -> str | None:
                 m_yr = re.search(r'(20\d{2})', raw_dt)
                 if m_yr:
                     return m_yr.group(1)
+            # Поиск даты внутри элементов с классами даты/времени (например, <div class="newsdetail-date"><i ...></i> 05.11.2025</div>)
+            m_cls = re.search(r'(?:date|time|published|created)[^>]*>(?:<[^>]+>|\s)*([0-3]?\d\.[0-1]?\d\.20\d{2})', html, re.I)
+            if m_cls:
+                return m_cls.group(1)
             # Поиск дат на странице в стиле "23 марта 2022"
             m_page_ru = re.search(r'\b([0-3]?\d)\s+([а-яё]+)\s+(20\d{2})\b', html, re.I)
             if m_page_ru:
@@ -244,6 +255,7 @@ class FiascoIncident:
     severity: str  # "critical", "high", "moderate"
     vendor_risk_advice: str
     incident_date: str | None = None
+    source_label: str = ""
 
 
 @dataclass
@@ -257,23 +269,139 @@ class ReputationFiascosProfile:
     recommended_countermeasures: list[str] = field(default_factory=list)
 
 
+# Региональные редакции РБК: маппинг первых двух цифр ИНН (код региона РФ)
+# на название региональной редакции и целевой поддомен/поисковый термин.
+REGIONAL_RBC_MAP: dict[str, tuple[str, str]] = {
+    "16": ("РБК Татарстан", "rt.rbc.ru"),
+    "78": ("РБК Санкт-Петербург", "spb.rbc.ru"),
+    "47": ("РБК Санкт-Петербург", "spb.rbc.ru"),
+    "66": ("РБК Екатеринбург", "ekb.rbc.ru"),
+    "02": ("РБК Уфа", "ufa.rbc.ru"),
+    "54": ("РБК Новосибирск", "nsk.rbc.ru"),
+    "61": ("РБК Ростов", "rostov.rbc.ru"),
+    "23": ("РБК Краснодар", "kuban.rbc.ru"),
+    "59": ("РБК Пермь", "perm.rbc.ru"),
+    "52": ("РБК Нижний Новгород", "nn.rbc.ru"),
+    "39": ("РБК Калининград", "kaliningrad.rbc.ru"),
+    "25": ("РБК Приморье", "vostok.rbc.ru"),
+    "72": ("РБК Тюмень", "tumen.rbc.ru"),
+    "24": ("РБК Красноярск", "krasnoyarsk.rbc.ru"),
+    "36": ("РБК Черноземье", "chr.rbc.ru"),
+    "34": ("РБК Юг", "ug.rbc.ru"),
+}
+
+RBC_SUBDOMAIN_NAMES: dict[str, str] = {
+    "rt.rbc.ru": "РБК Татарстан",
+    "spb.rbc.ru": "РБК Санкт-Петербург",
+    "ekb.rbc.ru": "РБК Екатеринбург",
+    "ufa.rbc.ru": "РБК Уфа",
+    "nsk.rbc.ru": "РБК Новосибирск",
+    "rostov.rbc.ru": "РБК Ростов",
+    "kuban.rbc.ru": "РБК Краснодар",
+    "perm.rbc.ru": "РБК Пермь",
+    "nn.rbc.ru": "РБК Нижний Новгород",
+    "kaliningrad.rbc.ru": "РБК Калининград",
+    "vostok.rbc.ru": "РБК Приморье",
+    "tumen.rbc.ru": "РБК Тюмень",
+    "krasnoyarsk.rbc.ru": "РБК Красноярск",
+    "chr.rbc.ru": "РБК Черноземье",
+    "ug.rbc.ru": "РБК Юг",
+    "companies.rbc.ru": "РБК Компании",
+}
+
+RBC_PATH_NAMES: dict[str, str] = {
+    "/spb_sz/": "РБК Санкт-Петербург",
+    "/tatarstan/": "РБК Татарстан",
+    "/ekb/": "РБК Екатеринбург",
+    "/ufa/": "РБК Уфа",
+    "/nsk/": "РБК Новосибирск",
+    "/rostov/": "РБК Ростов",
+    "/krasnodar/": "РБК Краснодар",
+    "/perm/": "РБК Пермь",
+    "/nn/": "РБК Нижний Новгород",
+    "/kaliningrad/": "РБК Калининград",
+    "/vostok/": "РБК Приморье",
+    "/tumen/": "РБК Тюмень",
+    "/krasnoyarsk/": "РБК Красноярск",
+    "/chr/": "РБК Черноземье",
+    "/ug/": "РБК Юг",
+}
+
+
+def resolve_media_source_label(url: str, default_plat: FiascoPlatform) -> str:
+    """Определяет человекочитаемое наименование источника / регионального СМИ."""
+    u_low = (url or "").lower()
+    for sub, name in RBC_SUBDOMAIN_NAMES.items():
+        if sub in u_low:
+            return name
+    for path, name in RBC_PATH_NAMES.items():
+        if path in u_low:
+            return name
+    if "rbc.ru" in u_low:
+        return "РБК"
+    if "business-gazeta.ru" in u_low:
+        return "Бизнес Online"
+    if "rusbankrot.ru" in u_low:
+        return "Русбанкрот"
+    if "116.ru" in u_low:
+        return "116.ru"
+    if "e1.ru" in u_low:
+        return "E1.ru"
+    if "ngs.ru" in u_low:
+        return "NGS.ru"
+    if "74.ru" in u_low:
+        return "74.ru"
+    if "kommersant.ru" in u_low:
+        return "Коммерсантъ"
+    if "vedomosti.ru" in u_low:
+        return "Ведомости"
+    if "forbes.ru" in u_low:
+        return "Forbes"
+    if "interfax.ru" in u_low:
+        return "Интерфакс"
+    if "tass.ru" in u_low:
+        return "ТАСС"
+    if "fontanka.ru" in u_low:
+        return "Фонтанка"
+    if "vc.ru" in u_low:
+        return "VC.ru"
+    if "habr.com" in u_low:
+        return "Хабр"
+    if "pikabu.ru" in u_low:
+        return "Пикабу"
+    if "antijob" in u_low:
+        return "Antijob"
+    if "pravda-sotrudnikov" in u_low:
+        return "Правда Сотрудников"
+    if "dreamjob" in u_low:
+        return "DreamJob"
+    return default_plat.value.upper()
+
 def build_fiasco_queries(
     company_name: str,
     brand: str | None = None,
     domain: str | None = None,
+    inn: str | None = None,
 ) -> dict[FiascoPlatform, list[str]]:
     """Формирует адресные поисковые запросы по ключевым информационным контурам.
     
     Использует естественные поисковые паттерны, которые безотказно обрабатываются
     поисковиками без сбоев на сложной булевой логике со скобками.
     """
-    clean_name = re.sub(r'^(ооо|зао|ао|пао|нко|ип)\s+', '', company_name, flags=re.I).strip('"«» ')
-    if brand and len(brand.strip()) > 2:
+    clean_name = re.sub(
+        r'^(общество с ограниченной ответственностью|акционерное общество|публичное акционерное общество|непубличное акционерное общество|закрытое акционерное общество|ооо|зао|ао|пао|нко|ип)\s+',
+        '', company_name, flags=re.I
+    ).strip('"«» ')
+    clean_name = re.sub(r'["«»„“\'\`]', '', clean_name).strip()
+
+    if brand and len(brand.strip()) > 2 and (re.search(r'[а-яА-ЯёЁ]', brand) or not re.search(r'[а-яА-ЯёЁ]', clean_name)):
         brand_term = brand.strip()
     elif clean_name and len(clean_name.strip()) > 2:
         brand_term = clean_name.strip()
     else:
         brand_term = (brand or clean_name).strip()
+
+    brand_term = re.sub(r'["«»„“\'\`]', '', brand_term).strip()
     domain_term = domain.strip().lower() if domain else ""
 
     queries: dict[FiascoPlatform, list[str]] = {}
@@ -291,10 +419,19 @@ def build_fiasco_queries(
     ]
 
     # 3. Федеральные и деловые медиа: обыски, уголовные дела, расследования
-    queries[FiascoPlatform.FEDERAL_MEDIA] = [
+    fed_queries = [
         f'{brand_term} обыск "уголовное дело" арест',
         f'"{brand_term}" санкции блокировка арест счетов',
     ]
+
+    # Если передан ИНН — добавляем целевой запрос по региональной редакции РБК
+    if inn and len(str(inn).strip()) in (10, 12):
+        reg_code = str(inn).strip()[:2]
+        if reg_code in REGIONAL_RBC_MAP:
+            rbc_label, _ = REGIONAL_RBC_MAP[reg_code]
+            fed_queries.insert(0, f'{rbc_label} {brand_term} обыск суд')
+
+    queries[FiascoPlatform.FEDERAL_MEDIA] = fed_queries
 
     # 4. VC.ru (Приёмная и коммерческие претензии)
     queries[FiascoPlatform.VC_RU] = [
@@ -439,17 +576,39 @@ def evaluate_fiascos_findings(
     incidents: list[FiascoIncident] = []
     platforms_seen: set[str] = set()
 
-    clean_name = re.sub(r'^(ооо|зао|ао|пао|нко|ип)\s+', '', company_name, flags=re.I).strip('"«» ')
+    clean_name = re.sub(
+        r'^(общество с ограниченной ответственностью|акционерное общество|публичное акционерное общество|непубличное акционерное общество|закрытое акционерное общество|ооо|зао|ао|пао|нко|ип)\s+',
+        '', company_name, flags=re.I
+    ).strip('"«» ')
+    clean_name = re.sub(r'["«»„“\'\`]', '', clean_name).strip()
+
     stems = set()
-    for t in [brand, clean_name]:
+    for t in [brand, clean_name, company_name]:
         if not t:
             continue
         t_clean = t.strip().lower()
-        if len(t_clean) >= 4:
-            stems.add(re.sub(r'[аеёиоуыэюяь]$', '', t_clean))
-            stems.add(t_clean)
-        elif len(t_clean) >= 2:
-            stems.add(t_clean)
+        t_norm = re.sub(r'["«»„“\'\`]', '', t_clean).strip()
+        t_norm = re.sub(r'\s+', ' ', t_norm)
+        for cand in {t_clean, t_norm}:
+            if not cand:
+                continue
+            if len(cand) >= 4:
+                stems.add(re.sub(r'[аеёиоуыэюяь]$', '', cand))
+                stems.add(cand)
+            elif len(cand) >= 2:
+                stems.add(cand)
+
+    # Для составных названий добавляем ключевые уникальные слова длиной >= 5
+    _STOP_WORDS = {
+        "компания", "холдинг", "предприятие", "сервис", "группа", "общество",
+        "центр", "россия", "северной", "южной", "восточной", "западной",
+        "столицы", "инвест", "капитал", "трейд", "проект", "технологии", "решения"
+    }
+    for w in re.split(r'[\s"«»„“\'`]+', clean_name.lower()):
+        w_clean = re.sub(r'[^а-яa-z0-9]', '', w)
+        if len(w_clean) >= 5 and w_clean not in _STOP_WORDS:
+            stems.add(re.sub(r'[аеёиоуыэюяь]$', '', w_clean))
+            stems.add(w_clean)
 
     for hit in raw_hits:
         url = hit.get("url", "")
@@ -458,7 +617,15 @@ def evaluate_fiascos_findings(
         full_text = f"{title} {snippet}".strip()
 
         # Фильтр релевантности: компания или бренд обязаны упоминаться в заголовке или сниппете
-        if stems and not any(stem in full_text.lower() for stem in stems):
+        full_lower = full_text.lower()
+        full_clean = re.sub(r'["«»„“\'\`]', '', full_lower)
+        full_clean_spaced = re.sub(r'[\s"«»„“\'\`]+', ' ', full_lower)
+
+        matched_stem = any(
+            stem in full_lower or stem in full_clean or stem in full_clean_spaced
+            for stem in stems
+        )
+        if stems and not matched_stem:
             continue
 
         url_lower = url.lower()
@@ -485,6 +652,7 @@ def evaluate_fiascos_findings(
             elif cat == FiascoCategory.CYBER_DATA_BREACH:
                 plat = FiascoPlatform.CYBER_LEAKS
 
+            source_lbl = resolve_media_source_label(url, plat)
             inc_date = extract_incident_date(url, title, snippet, fetch_fallback=True)
             platforms_seen.add(plat.value)
             incidents.append(
@@ -498,6 +666,7 @@ def evaluate_fiascos_findings(
                     severity=severity,
                     vendor_risk_advice=advice,
                     incident_date=inc_date,
+                    source_label=source_lbl,
                 )
             )
 
@@ -568,7 +737,7 @@ def build_reputation_fiasco_facts(
     facts: list[PendingFact] = []
     now = datetime.now(timezone.utc)
 
-    queries_map = build_fiasco_queries(company_name, brand, domain)
+    queries_map = build_fiasco_queries(company_name, brand, domain, inn=inn)
     
     if platforms:
         target_platform_vals = set(platforms)
@@ -593,11 +762,12 @@ def build_reputation_fiasco_facts(
 
     for i, inc in enumerate(profile.incidents, 1):
         date_str = f"[{inc.incident_date}] " if inc.incident_date else ""
+        label_str = f"[{inc.source_label}] " if inc.source_label else f"[{inc.platform.value.upper()}] "
         facts.append(
             PendingFact(
                 fact_id=f"FIASCO-{inc.platform.value.upper()}-{i}-{inn}",
                 kind=f"fiasco_{inc.category.value}",
-                statement=f"[{inc.platform.value.upper()}] {date_str}{inc.title}: {inc.snippet} | Вывод: {inc.vendor_risk_advice}",
+                statement=f"{label_str}{date_str}{inc.title}: {inc.snippet} | Вывод: {inc.vendor_risk_advice}",
                 source_url=inc.url,
                 found_by="reputation_fiascos_engine",
                 found_at=now,

@@ -203,3 +203,38 @@ def test_build_reputation_fiasco_facts(mock_search):
     assert f.found_by == "reputation_fiascos_engine"
     assert "https://vc.ru" in f.source_url
     assert "FIASCO-" in f.fact_id
+
+
+def test_regional_rbc_query_targeting():
+    """Тест таргетирования запросов на региональные редакции РБК по коду региона ИНН."""
+    from osint_mcp.context.reputation_fiascos import build_fiasco_queries, FiascoPlatform
+
+    # 1. Татарстан (код региона 16) -> РБК Татарстан
+    q_tatarstan = build_fiasco_queries("ПАО КАМАЗ", brand="КАМАЗ", inn="1650032058")
+    fed_q_tt = q_tatarstan[FiascoPlatform.FEDERAL_MEDIA]
+    assert any("РБК Татарстан" in q for q in fed_q_tt)
+
+    # 2. Санкт-Петербург (код региона 78) -> РБК Санкт-Петербург
+    q_spb = build_fiasco_queries("ООО Север", brand="Север", inn="7810123456")
+    fed_q_spb = q_spb[FiascoPlatform.FEDERAL_MEDIA]
+    assert any("РБК Санкт-Петербург" in q for q in fed_q_spb)
+
+    # 3. Москва (код региона 77) -> общий федеральный запрос
+    q_msk = build_fiasco_queries("ООО Яндекс", brand="Яндекс", inn="7736207543")
+    fed_q_msk = q_msk[FiascoPlatform.FEDERAL_MEDIA]
+    assert not any("РБК Татарстан" in q for q in fed_q_msk)
+
+
+def test_resolve_media_source_label():
+    """Тест определения региональных и федеральных изданий РБК."""
+    from osint_mcp.context.reputation_fiascos import resolve_media_source_label, FiascoPlatform
+
+    assert resolve_media_source_label("https://rt.rbc.ru/tatarstan/16/02/2026/123", FiascoPlatform.FEDERAL_MEDIA) == "РБК Татарстан"
+    assert resolve_media_source_label("https://spb.rbc.ru/spb/05/04/2025/456", FiascoPlatform.FEDERAL_MEDIA) == "РБК Санкт-Петербург"
+    assert resolve_media_source_label("https://ufa.rbc.ru/ufa/30/07/2026/789", FiascoPlatform.FEDERAL_MEDIA) == "РБК Уфа"
+    assert resolve_media_source_label("https://companies.rbc.ru/id/1067746062449-ooo-vajldberriz/", FiascoPlatform.FEDERAL_MEDIA) == "РБК Компании"
+    assert resolve_media_source_label("https://www.rbc.ru/business/09/10/2026/999", FiascoPlatform.FEDERAL_MEDIA) == "РБК"
+    assert resolve_media_source_label("https://www.rbc.ru/spb_sz/28/04/2026/69f05dfe", FiascoPlatform.FEDERAL_MEDIA) == "РБК Санкт-Петербург"
+    assert resolve_media_source_label("https://www.rbc.ru/tatarstan/20/05/2026/456", FiascoPlatform.FEDERAL_MEDIA) == "РБК Татарстан"
+    assert resolve_media_source_label("https://www.business-gazeta.ru/news/705157", FiascoPlatform.FEDERAL_MEDIA) == "Бизнес Online"
+    assert resolve_media_source_label("https://rusbankrot.ru/new-claim/123", FiascoPlatform.FEDERAL_MEDIA) == "Русбанкрот"
