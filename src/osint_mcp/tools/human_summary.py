@@ -121,6 +121,17 @@ def build_human_summary(
                 enforce_count += res.enforcement.total or 0
                 enforce_amount += (res.enforcement.outstanding or res.enforcement.total_amount or 0.0)
 
+    # Происшествия, инциденты и операционные риски из СМИ (OSINT)
+    fiasco_items = []
+    if score and score.pending:
+        for p in score.pending:
+            if p.kind.startswith("fiasco_") and p.statement not in fiasco_items:
+                fiasco_items.append(p.statement)
+    if risk and risk.facts:
+        for f in risk.facts:
+            if f.kind.startswith("fiasco_") and f.statement not in fiasco_items:
+                fiasco_items.append(f.statement)
+
     # 1. TL;DR ("Суть в трёх предложениях")
     brand_hint = f' (бренд «{brand}»)' if brand else ''
     if is_ip:
@@ -164,6 +175,9 @@ def build_human_summary(
 
     if def_count > 0:
         p2_parts.append(f"в судах выступает ответчиком по искам на {_fmt_rub(def_amount)}")
+
+    if fiasco_items:
+        p2_parts.append(f"в СМИ зафиксированы публичные инциденты/ЧП ({len(fiasco_items)})")
 
     p2 = "; ".join(p2_parts).capitalize() + "." if p2_parts else "Финансовые и реестровые данные в норме."
 
@@ -255,16 +269,6 @@ def build_human_summary(
         q3_lines.append(f"• Кадровый вектор (HeadHunter): {'; '.join(hh_parts)}.")
 
     # Происшествия, инциденты и операционные риски из СМИ (OSINT)
-    fiasco_items = []
-    if score and score.pending:
-        for p in score.pending:
-            if p.kind.startswith("fiasco_") and p.statement not in fiasco_items:
-                fiasco_items.append(p.statement)
-    if risk and risk.facts:
-        for f in risk.facts:
-            if f.kind.startswith("fiasco_") and f.statement not in fiasco_items:
-                fiasco_items.append(f.statement)
-
     if fiasco_items:
         for st in fiasco_items[:2]:
             main_part = st.split(" | Вывод: ")[0] if " | Вывод: " in st else st

@@ -863,6 +863,21 @@ async def get_company_report(
         else:
             result["инциденты_и_сми"] = incidents_list[:2]
 
+        # Выносим ключевые репутационные инциденты и публикации СМИ в warnings,
+        # чтобы прямо под оценкой у пользователя не возникало ложного впечатления «золотой репутации»
+        if "warnings" not in result or result["warnings"] is None:
+            result["warnings"] = []
+        for item in incidents_list[:3]:
+            d_prefix = f"[{item['date']}] " if item.get("date") else ""
+            s_label = f"{item['source']}: " if item.get("source") else ""
+            summary_txt = item.get("сюжет_простыми_словами") or item["statement"]
+            short_txt = summary_txt.split(" | Вывод:")[0].strip()
+            if len(short_txt) > 160:
+                short_txt = short_txt[:157] + "..."
+            warn_msg = f"Репутационный риск / инцидент в СМИ: {d_prefix}{s_label}{short_txt}"
+            if warn_msg not in result["warnings"]:
+                result["warnings"].append(warn_msg)
+
     # Обогащаем коммерческий срез репутационными фактами и инцидентами
     if context_result.context:
         from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intel

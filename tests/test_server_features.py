@@ -276,3 +276,35 @@ async def test_check_companies_batch_debug_flag():
         res_dev = await check_companies_batch(inns=["7707083893"], debug=True)
         item_dev = res_dev["результаты"][0]
         assert "что_не_собралось" in item_dev
+
+
+@pytest.mark.asyncio
+async def test_get_company_report_fiascos_in_warnings():
+    from osint_mcp.server import get_company_report
+    from osint_mcp.scoring.models import PendingFact
+    from datetime import datetime, timezone
+
+    ctx = CompanyContext(
+        inn="7736207543",
+        name_legal="ООО Яндекс",
+        name_short="Яндекс",
+    )
+    ctx_res = ContextResult(status="ok", context=ctx)
+    risk_col = RiskCollection(inn="7736207543", results=[], sources_ok=1, facts=[])
+    fiasco = PendingFact(
+        fact_id="F-1",
+        kind="fiasco_disaster_incident",
+        statement="[РБК] [08.10.2026] Атака дронов на дата-центр компании в Сасово: пожар локализован | Вывод: операционный риск",
+        source_url="https://rbc.ru",
+        found_by="reputation_fiascos_engine",
+        found_at=datetime.now(timezone.utc),
+    )
+
+    with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
+         patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[fiasco])):
+
+        res = await get_company_report(inn="7736207543")
+        assert "warnings" in res
+        assert any("Репутационный риск / инцидент в СМИ" in w for w in res["warnings"])
+        assert any("08.10.2026" in w and "Атака дронов" in w for w in res["warnings"])
