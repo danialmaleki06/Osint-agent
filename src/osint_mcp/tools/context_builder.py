@@ -522,8 +522,12 @@ async def build_company_context(
                 ctx.brand_resolved = True
                 host = urlparse(candidate).netloc.lower().removeprefix("www.")
                 core = host.rsplit(".", 2)[0] if host.count(".") >= 2 else host.split(".")[0]
-                ctx.brand = core.upper() if core.isascii() else core
-                ctx.name_variants = name_variants(*ctx.name_variants, ctx.brand)
+                clean_core = core_name(ctx.name_short or ctx.name_legal)
+                if clean_core and (len(core) <= 3 or (not re.search(r'[а-яА-ЯёЁ]', core) and re.search(r'[а-яА-ЯёЁ]', clean_core) and len(clean_core) > len(core))):
+                    ctx.brand = clean_core.title() if clean_core.isupper() else clean_core
+                else:
+                    ctx.brand = core.upper() if core.isascii() else core
+                ctx.name_variants = name_variants(*ctx.name_variants, ctx.brand, core.upper(), clean_core)
                 gaps.append(
                     f"Рыночное наименование восстановлено по официальному сайту "
                     f"({candidate}): бренд «{ctx.brand}». Платный метод бренда "

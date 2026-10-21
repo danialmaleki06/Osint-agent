@@ -333,6 +333,14 @@ class HiringInfo(BaseModel):
         default=None,
         description="Наименование верифицированного работодателя на HeadHunter",
     )
+    functional_breakdown: dict[str, int] = Field(
+        default_factory=dict,
+        description="Распределение вакансий по направлениям (IT, продажи, менеджмент)",
+    )
+    hiring_focus: str | None = Field(
+        default=None,
+        description="Аналитический вывод о фокусе найма и ключевых приоритетах компании",
+    )
 
 
 class MspInfo(BaseModel):

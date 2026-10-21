@@ -416,18 +416,28 @@ def build_fiasco_queries(
     Использует естественные поисковые паттерны, которые безотказно обрабатываются
     поисковиками без сбоев на сложной булевой логике со скобками.
     """
-    clean_name = re.sub(
+    from osint_mcp.tools.names import core_name
+    c_core = core_name(company_name)
+    clean_name = c_core or re.sub(
         r'^(общество с ограниченной ответственностью|акционерное общество|публичное акционерное общество|непубличное акционерное общество|закрытое акционерное общество|ооо|зао|ао|пао|нко|ип)\s+',
         '', company_name, flags=re.I
     ).strip('"«» ')
     clean_name = re.sub(r'["«»„“\'\`]', '', clean_name).strip()
 
-    if brand and len(brand.strip()) > 2 and (re.search(r'[а-яА-ЯёЁ]', brand) or not re.search(r'[а-яА-ЯёЁ]', clean_name)):
-        brand_term = brand.strip()
-    elif clean_name and len(clean_name.strip()) > 2:
-        brand_term = clean_name.strip()
+    b_clean = (brand or "").strip()
+    b_clean = re.sub(r'["«»„“\'\`]', '', b_clean).strip()
+
+    has_cyrillic_brand = bool(b_clean and re.search(r'[а-яА-ЯёЁ]', b_clean))
+    has_cyrillic_name = bool(re.search(r'[а-яА-ЯёЁ]', clean_name))
+
+    if b_clean and len(b_clean) > 3 and (has_cyrillic_brand or not has_cyrillic_name):
+        brand_term = b_clean
+    elif clean_name and len(clean_name) >= 3:
+        brand_term = clean_name
+    elif b_clean and len(b_clean) >= 2:
+        brand_term = b_clean
     else:
-        brand_term = (brand or clean_name).strip()
+        brand_term = (clean_name or b_clean or company_name).strip()
 
     brand_term = re.sub(r'["«»„“\'\`]', '', brand_term).strip()
     domain_term = domain.strip().lower() if domain else ""
@@ -611,8 +621,9 @@ def evaluate_fiascos_findings(
     ).strip('"«» ')
     clean_name = re.sub(r'["«»„“\'\`]', '', clean_name).strip()
 
+    from osint_mcp.tools.names import name_variants
     stems = set()
-    for t in [brand, clean_name, company_name]:
+    for t in [brand, clean_name, company_name] + name_variants(company_name, brand):
         if not t:
             continue
         t_clean = t.strip().lower()

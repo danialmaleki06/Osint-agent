@@ -464,14 +464,30 @@ def _extras_lines(ctx: CompanyContext) -> list[str]:
     return lines
 
 
-def _event_lines(ctx: CompanyContext) -> list[str]:
-    """События истории — кратко, свежие первыми."""
+def _event_lines(ctx: CompanyContext, max_events: int = 5) -> list[str]:
+    """События истории — только ключевые вехи, без технического шума ЕГРЮЛ."""
     if not ctx.events:
         return []
-    lines = []
-    for ev in sorted(ctx.events, key=lambda e: e.event_date or date.min, reverse=True)[:10]:
-        lines.append(f"{ev.event_date.isoformat() if ev.event_date else '—'}: {ev.event}")
-    return lines
+    _ROUTINE_NOISE = (
+        "внесение изменений в сведения, содержащиеся в егрюл, не связанных",
+        "изменение сведений о юридическом лице, содержащихся в едином государственном реестре",
+        "представление сведений о регистрации юридического лица в качестве страхователя",
+        "представление сведений об учете юридического лица в налоговом органе",
+    )
+    filtered = []
+    for ev in sorted(ctx.events, key=lambda e: e.event_date or date.min, reverse=True):
+        ev_text = (ev.event or "").strip()
+        ev_low = ev_text.lower()
+        if any(noise in ev_low for noise in _ROUTINE_NOISE):
+            continue
+        filtered.append(f"{ev.event_date.isoformat() if ev.event_date else '—'}: {ev_text}")
+
+    if not filtered:
+        filtered = [
+            f"{ev.event_date.isoformat() if ev.event_date else '—'}: {ev.event}"
+            for ev in sorted(ctx.events, key=lambda e: e.event_date or date.min, reverse=True)[:3]
+        ]
+    return filtered[:max_events]
 
 
 def _management_turnover_line(ctx: CompanyContext) -> str | None:
@@ -652,7 +668,7 @@ def _sales_lines(ctx: CompanyContext, risk: RiskCollection | None = None) -> lis
     return lines
 
 
-def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None) -> list[dict]:
+def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None, human_mode: bool = False) -> list[dict]:
     """Секции полного отчёта, которых нет в кратком."""
     if ctx is None:
         return []
@@ -669,7 +685,7 @@ def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None) -> l
     extras = _extras_lines(ctx)
     if extras:
         sections.append({"название": "лицензии, контакты, адрес", "пункты": extras})
-    events = _event_lines(ctx)
+    events = _event_lines(ctx, max_events=3 if human_mode else 5)
     turnover = _management_turnover_line(ctx)
     if turnover:
         events = (events or []) + [turnover]
@@ -1050,7 +1066,7 @@ def build_report(
         if ctx.size_category != "unknown":
             report["карточка"]["масштаб"] = ctx.size_category
 
-    report["разбор"] = _full_sections(ctx, risk)
+    report["разбор"] = _full_sections(ctx, risk, human_mode=is_human)
     if ctx is not None:
         fin_matrix = _build_financial_health_matrix(ctx)
         if fin_matrix:

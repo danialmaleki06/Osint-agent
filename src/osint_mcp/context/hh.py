@@ -62,13 +62,44 @@ _TECH_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("bitrix24", "битрикс24"), "Битрикс24"),
     (("amocrm", "амосрм"), "amoCRM"),
     (("sap", "oracle erp", "navision", "axapta"), "ERP (SAP/Oracle)"),
-    (("python", "django", "fastapi"), "Python"),
-    (("java", "spring"), "Java"),
-    (("c#", ".net"), "C# / .NET"),
+    (("python", "django", "fastapi", "flask"), "Python"),
+    (("java", "spring", "kotlin"), "Java / Kotlin"),
+    (("c#", ".net", "dotnet"), "C# / .NET"),
     (("golang", "go"), "Go"),
-    (("react", "vue", "angular"), "Frontend (React/Vue/Angular)"),
-    (("docker", "kubernetes", "k8s"), "DevOps (Docker/K8s)"),
-    (("postgresql", "postgres", "sql"), "SQL / PostgreSQL"),
+    (("c++", "cpp", "c/c++"), "C / C++"),
+    (("react", "vue", "angular", "typescript", "frontend", "next.js"), "Frontend (React/Vue/TS)"),
+    (("docker", "kubernetes", "k8s", "devops", "ci/cd", "ansible", "terraform"), "DevOps / SRE (Docker/K8s/CI)"),
+    (("postgresql", "postgres", "sql", "mysql"), "SQL / PostgreSQL"),
+    (("clickhouse",), "ClickHouse"),
+    (("ml", "machine learning", "ai", "нейросети", "data science", "llm", "cv", "nlp", "deep learning", "pytorch", "tensorflow"), "AI / Machine Learning (ML/LLM)"),
+    (("spark", "hadoop", "kafka", "airflow", "data engineer"), "Data Engineering (Kafka/Spark/Airflow)"),
+    (("ios", "swift", "android", "flutter"), "Mobile (iOS/Android)"),
+    (("информационная безопасность", "кибербезопасность", "infosec", "security", "devsecops", "soc", "пентест"), "Информационная безопасность (InfoSec)"),
+)
+
+_FUNCTIONAL_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("IT и разработка ПО", (
+        "разработчик", "developer", "программист", "инженер", "devops",
+        "qa", "тестировщик", "архитектор", "data scientist", "data engineer",
+        "frontend", "backend", "fullstack", "системный администратор", "sre",
+        "ml", "ios", "android", "информационная безопасность", "security",
+    )),
+    ("Продажи и развитие бизнеса", (
+        "менеджер по продажам", "sales", "аккаунт", "account", "клиентск",
+        "развития бизнеса", "bdo", "коммерческ", "роп", "продаж", "сопровождени",
+    )),
+    ("Управление и тимлиды", (
+        "директор", "руководитель", "начальник", "head of", "lead", "тимлид",
+        "project manager", "product manager", "управляющ", "лидер",
+    )),
+    ("Маркетинг и аналитика", (
+        "маркетолог", "marketing", "аналитик", "analyst", "таргетолог",
+        "seo", "smm", "pr", "копирайтер", "контент", "дизайнер", "ui/ux",
+    )),
+    ("Операции, логистика и поддержка", (
+        "поддержк", "support", "оператор", "логист", "склад", "диспетчер",
+        "курьер", "специалист колл", "бухгалтер", "юрист", "кадров", "hr",
+    )),
 )
 
 _IT_ROLE_KEYWORDS = (
@@ -259,6 +290,34 @@ class HhSource:
                         tech_stack.append(label)
 
         it_investing = (it_count >= 2) or (it_count >= 1 and len(items) <= 3)
+
+        # Классификация направлений найма
+        functional_breakdown: dict[str, int] = {}
+        for role_name in roles:
+            r_low = role_name.lower()
+            matched = False
+            for cat_name, patterns in _FUNCTIONAL_CATEGORIES:
+                if any(p in r_low for p in patterns):
+                    functional_breakdown[cat_name] = functional_breakdown.get(cat_name, 0) + 1
+                    matched = True
+                    break
+            if not matched:
+                functional_breakdown["Прочие специальности"] = functional_breakdown.get("Прочие специальности", 0) + 1
+
+        # Формирование текстового фокуса найма
+        focus_bits = []
+        if functional_breakdown:
+            top_cats = sorted(functional_breakdown.items(), key=lambda x: x[1], reverse=True)
+            top_cat_names = [f"{c[0]} ({c[1]})" for c in top_cats if c[0] != "Прочие специальности"][:2]
+            if top_cat_names:
+                focus_bits.append(f"фокус на {', '.join(top_cat_names)}")
+        if tech_stack:
+            focus_bits.append(f"стек: {', '.join(tech_stack[:5])}")
+        if leadership_roles:
+            focus_bits.append(f"усиление менеджмента: {'; '.join(leadership_roles[:2])}")
+
+        hiring_focus = "; ".join(focus_bits).capitalize() if focus_bits else None
+
         ledger.record(service, method, "ok" if items else "empty")
         log.info("hh.vacancies", name=matched_query, employer_id=emp_id, found=len(items),
                  leadership=len(leadership_roles), tech_count=len(tech_stack))
@@ -272,4 +331,6 @@ class HhSource:
             found_by_name=found_by_name,
             employer_id=emp_id,
             employer_name=emp_name,
+            functional_breakdown=functional_breakdown,
+            hiring_focus=hiring_focus,
         )

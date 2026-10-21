@@ -771,7 +771,17 @@ async def get_company_report(
     hr_hub_info = None
     if context_result.context:
         ctx = context_result.context
-        target_name = (ctx.brand if ctx.brand_resolved else None) or ctx.name_short or ctx.name_legal
+        from osint_mcp.tools.names import core_name
+        clean_core = core_name(ctx.name_short or ctx.name_legal)
+        b_raw = (ctx.brand or "").strip()
+        if b_raw and len(b_raw) > 3:
+            brand_to_use = b_raw
+        elif clean_core and len(clean_core) >= 3:
+            brand_to_use = clean_core
+        else:
+            brand_to_use = b_raw or clean_core
+
+        target_name = ctx.name_short or ctx.name_legal or clean_core or clean_inn
         target_domain = ctx.brand_domain or (
             ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None
         )
@@ -783,7 +793,7 @@ async def get_company_report(
                 facts = await _async_build_reputation_fiasco_facts(
                     inn=clean_inn,
                     company_name=target_name or clean_inn,
-                    brand=ctx.brand,
+                    brand=brand_to_use,
                     domain=target_domain,
                 )
                 if facts:
@@ -809,6 +819,10 @@ async def get_company_report(
         facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,
     )
+    if fiasco_facts:
+        for f in fiasco_facts:
+            if f not in score.pending:
+                score.pending.append(f)
     detail_norm = detail.strip().lower()
     if detail_norm not in ("brief", "full"):
         detail_norm = "brief"

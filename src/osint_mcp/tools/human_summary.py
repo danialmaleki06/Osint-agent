@@ -242,8 +242,39 @@ def build_human_summary(
     if plaintiff_count > 0:
         q3_lines.append(f"• Претензии к клиентам: компания сама судится и требует {_fmt_rub(plaintiff_amount)} за выполненные работы (возможен кассовый разрыв).")
 
+    # Найм и кадровый срез по вакансиям HeadHunter
+    hiring = ctx.hiring if ctx else None
+    if hiring and hiring.open_vacancies:
+        hh_parts = [f"активный найм ({hiring.open_vacancies} вакансий за 30 дней)"]
+        if getattr(hiring, "hiring_focus", None):
+            hh_parts.append(hiring.hiring_focus)
+        elif hiring.tech_stack:
+            hh_parts.append(f"стек: {', '.join(hiring.tech_stack[:5])}")
+        if hiring.leadership_roles and not getattr(hiring, "hiring_focus", None):
+            hh_parts.append(f"руководящие роли: {', '.join(hiring.leadership_roles[:2])}")
+        q3_lines.append(f"• Кадровый вектор (HeadHunter): {'; '.join(hh_parts)}.")
+
+    # Происшествия, инциденты и операционные риски из СМИ (OSINT)
+    fiasco_items = []
+    if score and score.pending:
+        for p in score.pending:
+            if p.kind.startswith("fiasco_") and p.statement not in fiasco_items:
+                fiasco_items.append(p.statement)
+    if risk and risk.facts:
+        for f in risk.facts:
+            if f.kind.startswith("fiasco_") and f.statement not in fiasco_items:
+                fiasco_items.append(f.statement)
+
+    if fiasco_items:
+        for st in fiasco_items[:2]:
+            main_part = st.split(" | Вывод: ")[0] if " | Вывод: " in st else st
+            q3_lines.append(f"• Происшествия и инциденты в СМИ: ⚠️ {main_part}.")
+
+    if ctx and ctx.status and ctx.status != "Действует":
+        q3_lines.append(f"• Корпоративный статус: ⚠️ организация в процессе изменения статуса ({ctx.status}).")
+
     if ctx and ctx.former_names:
-        q3_lines.append(f"• Смена названий: ранее была известна как «{'; '.join(ctx.former_names)}».")
+        q3_lines.append(f"• Прежние названия: ранее была известна как «{'; '.join(ctx.former_names)}».")
 
     if not q3_lines:
         q3_lines.append("• Текущая активность: стабильный рабочий ритм без резких судебных или кадровых скачков.")

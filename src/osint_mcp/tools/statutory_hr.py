@@ -79,4 +79,18 @@ def build_statutory_hr_profile(ctx: CompanyContext | None) -> dict[str, Any] | N
     if hiring_ratio is not None:
         res["доля_найма_к_штату_процент"] = hiring_ratio
 
+    if hiring:
+        if hiring.hiring_focus:
+            res["анализ_hh_фокус"] = hiring.hiring_focus
+        if hiring.tech_stack:
+            res["технологический_стек_вакансий"] = hiring.tech_stack
+        if hiring.leadership_roles:
+            res["руководящие_позиции"] = hiring.leadership_roles[:5]
+        if hiring.roles:
+            res["топ_открытых_вакансий"] = hiring.roles[:7]
+        if getattr(hiring, "functional_breakdown", None):
+            res["структура_найма_направления"] = hiring.functional_breakdown
+        if hiring.employer_id:
+            res["ссылка_hh_работодатель"] = f"https://hh.ru/employer/{hiring.employer_id}"
+
     return res
