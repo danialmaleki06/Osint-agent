@@ -1273,19 +1273,41 @@ class ServiceQuota(BaseModel):
 class ProviderLimit(BaseModel):
     """Сведения о лимитах и состоянии ключей конкретного провайдера."""
 
-    provider: str = Field(description="Кодовое имя (dadata, checko, apicloud, hh, open_registries)")
+    provider: str = Field(description="Кодовое имя (dadata, checko, apicloud, hh, bo_nalog, egrul, etc.)")
     name: str = Field(description="Понятное название сервиса")
     status: Literal["ok", "warning", "exhausted", "not_configured", "unlimited"] = Field(
         description="Статус доступности сервиса: ok, warning, exhausted, not_configured, unlimited"
     )
+    category: str = Field(
+        default="commercial",
+        description="Категория: commercial (платный API), official_registry (госреестр), osint_web (веб-разведка), aggregator (резервный шлюз)"
+    )
     keys_total: int = Field(default=0, description="Всего ключей в пуле")
     keys_active: int = Field(default=0, description="Число активных неизрасходованных ключей")
     keys: list[KeyStatus] = Field(default_factory=list, description="Статус каждого ключа пула")
-    methods: dict[str, ServiceQuota] = Field(
-        default_factory=dict, description="Расход и остаток по отдельным методам API"
+    daily_limit_per_key: int | None = Field(
+        default=None, description="Базовый суточный лимит запросов на 1 ключ"
+    )
+    pool_daily_capacity: int | None = Field(
+        default=None, description="Суммарная суточная ёмкость пула ключей (запросов в день)"
     )
     daily_spent: int | None = Field(
-        default=None, description="Израсходовано за сутки по данным службы (если применимо)"
+        default=None, description="Израсходовано за сутки по данным службы или локального учёта"
+    )
+    session_spent: int = Field(
+        default=0, description="Израсходовано запросов в текущей сессии"
+    )
+    estimated_remaining_requests: int | None = Field(
+        default=None, description="Расчётный остаток доступных запросов на сегодня"
+    )
+    cost_per_company_requests: int = Field(
+        default=1, description="Средний расход запросов данного сервиса на одну проверку компании"
+    )
+    estimated_companies_remaining: int | None = Field(
+        default=None, description="Расчётное число компаний, на которое хватит оставшихся лимитов"
+    )
+    methods: dict[str, ServiceQuota] = Field(
+        default_factory=dict, description="Расход и остаток по отдельным методам API"
     )
     notes: str | None = Field(default=None, description="Пояснения к тарифу или ограничениям")
     error: str | None = Field(default=None, description="Текст ошибки при запросе статистики, если была")
@@ -1294,6 +1316,10 @@ class ProviderLimit(BaseModel):
 class ProvidersLimitsReport(BaseModel):
     """Сводный отчёт по лимитам, суточным квотам и ключам всех провайдеров."""
 
+    summary: dict = Field(
+        default_factory=dict,
+        description="Сводная статистика: общая ёмкость, активные ключи, доступный запас проверок"
+    )
     providers: list[ProviderLimit] = Field(
         default_factory=list, description="Состояние лимитов по каждому провайдеру"
     )
