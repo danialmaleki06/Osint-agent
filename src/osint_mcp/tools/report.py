@@ -614,9 +614,11 @@ def _sales_lines(ctx: CompanyContext, risk: RiskCollection | None = None) -> lis
             if hiring.it_investing:
                 lines.append("инвестиции в IT/R&D: компания активно нанимает инженерные и продуктовые кадры")
         elif hiring.reason:
-            lines.append(f"найм не проверен: {hiring.reason}")
+            if getattr(settings, "osint_debug", False):
+                lines.append(f"найм не проверен: {hiring.reason}")
         else:
-            lines.append("открытых вакансий не найдено")
+            if getattr(settings, "osint_debug", False):
+                lines.append("открытых вакансий не найдено")
     if ctx.site_tech:
         tech_items = []
         if ctx.site_tech.cms:

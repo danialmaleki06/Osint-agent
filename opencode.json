@@ -5,7 +5,9 @@
       "type": "local",
       "command": ["uv", "run", "python", "-m", "osint_mcp.server"],
       "environment": {
-        "PYTHONUTF8": "1"
+        "PYTHONUTF8": "1",
+        "OSINT_DEBUG": "false",
+        "OSINT_HUMAN_MODE": "true"
       },
       "enabled": true
     }
