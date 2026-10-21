@@ -88,6 +88,11 @@ class Settings(BaseSettings):
         validation_alias="OSINT_DEBUG",
         description="Режим отладки: выводить диагностику недоступных источников и технические детали",
     )
+    human_friendly_mode: bool = Field(
+        default=True,
+        validation_alias="OSINT_HUMAN_MODE",
+        description="Человеческий язык отчёта: понятные формулировки, TL;DR-резюме и сюжетные карточки вместо канцелярита и аббревиатур",
+    )
 
     # Списочные методы Checko и Федресурса отдают записи постранично. У крупных
     # организаций страниц бывают тысячи — выкачать всё нельзя. Берём первые

@@ -172,6 +172,18 @@ def _classify_license(lic) -> str:
     return "Отраслевая государственная лицензия"
 
 
+_CATEGORY_DESCRIPTIONS = {
+    "ФСБ (криптография и защита гостайны)": "Разрешение на работу с шифровальными средствами и защиту гостайны",
+    "ФСТЭК (техническая защита конфиденциальной информации)": "Право на защиту конфиденциальных данных и аттестацию информационных систем",
+    "Роскомнадзор / Минцифры (связь, телематика и СМИ)": "Лицензия оператора связи, телематических служб или медиа",
+    "МЧС (пожарная безопасность)": "Монтаж, техобслуживание и ремонт систем пожарной безопасности",
+    "Минкультуры (реставрация объектов культурного наследия)": "Работы по сохранению объектов культурного наследия",
+    "Росздравнадзор (медицина и фармацевтика)": "Медицинская или фармацевтическая деятельность",
+    "Ростехнадзор (промышленная безопасность)": "Эксплуатация взрывопожароопасных и опасных производственных объектов",
+    "Образовательная деятельность": "Официальная образовательная деятельность и выдача дипломов/сертификатов",
+}
+
+
 def _build_license_breakdown(licenses: list) -> dict | None:
     if not licenses:
         return None
@@ -186,9 +198,14 @@ def _build_license_breakdown(licenses: list) -> dict | None:
         }
         groups.setdefault(cat, []).append(entry)
     summary_lines = [f"{cat}: {len(items)}" for cat, items in groups.items()]
+    explanations = [
+        f"{cat} — {_CATEGORY_DESCRIPTIONS.get(cat, 'Отраслевое лицензирование')}"
+        for cat in groups.keys()
+    ]
     return {
         "всего": len(licenses),
         "по_категориям": summary_lines,
+        "расшифровка_смысла": explanations,
         "детализация": groups,
     }
 
@@ -218,6 +235,10 @@ def _build_financial_health_matrix(ctx: CompanyContext) -> dict | None:
             matrix["рентабельность_продаж_ros"] = {
                 "значение_процент": round(ros, 1),
                 "оценка": ros_status,
+                "пояснение_простыми_словами": (
+                    f"С каждых 100 ₽ выручки чистыми остаётся {ros:.0f} ₽."
+                    if ros >= 0 else "Бизнес работает с чистым убытком."
+                ),
                 "выручка": _fmt_amount(latest.revenue),
                 "чистая_прибыль": _fmt_amount(latest.profit),
             }
@@ -232,6 +253,10 @@ def _build_financial_health_matrix(ctx: CompanyContext) -> dict | None:
                     "темп_прироста_процент": round(growth_pct, 1),
                     "период": f"{prev.year} → {latest.year}",
                     "оценка": f"{growth_label} ({growth_pct:+.1f}%)",
+                    "пояснение_простыми_словами": (
+                        f"Выручка выросла на {growth_pct:.0f}% к прошлому году."
+                        if growth_pct > 0 else f"Выручка упала на {abs(growth_pct):.0f}% к прошлому году."
+                    ),
                 }
 
         # 3. Чистые активы (собственный капитал)
@@ -240,6 +265,10 @@ def _build_financial_health_matrix(ctx: CompanyContext) -> dict | None:
             matrix["чистые_активы"] = {
                 "сумма": _fmt_amount(latest.equity),
                 "статус": "⛔ Отрицательные чистые активы (риск ликвидации ст. 20 14-ФЗ)" if is_negative else "🟢 Капитал в норме",
+                "пояснение_простыми_словами": (
+                    "Долги превышают стоимость всего имущества (высокий риск банкротства)."
+                    if is_negative else "Собственный капитал положителен: имущество и активы превышают долги."
+                ),
                 "критично": is_negative,
             }
 
@@ -910,6 +939,7 @@ def build_report(
     risk: RiskCollection | None,
     score: ScoreResult,
     debug: bool = False,
+    human_mode: bool | None = None,
 ) -> dict:
     """Собрать отчёт нужного объёма из уже собранных сведений.
 
@@ -918,6 +948,7 @@ def build_report(
     о том, чего проверка не охватила.
     """
     is_debug = debug or getattr(settings, "osint_debug", False)
+    is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
     ctx = context_result.context if context_result else None
     traffic = _get_traffic_light(score.verdict.label)
 
@@ -989,11 +1020,17 @@ def build_report(
             if score.unmatched_fact_kinds:
                 diagnostic["факты_без_критерия"] = score.unmatched_fact_kinds
             report["_диагностика_разработчика"] = diagnostic
+        if is_human:
+            from osint_mcp.tools.human_summary import build_human_summary, build_human_court_cases
+            report["резюме_для_человека"] = build_human_summary(ctx, risk, score)
+            court_cases = build_human_court_cases(risk)
+            if court_cases:
+                report["судебные_дела_сюжеты"] = court_cases
         report["scored_at"] = score.scored_at.isoformat()
         return report
 
     # full: краткое ядро плюс всё остальное
-    report = build_report("brief", context_result, risk, score, debug=is_debug)
+    report = build_report("brief", context_result, risk, score, debug=is_debug, human_mode=is_human)
     report.pop("scored_at", None)
 
     report["карточка"]["адрес"] = ctx.address_full if ctx else None

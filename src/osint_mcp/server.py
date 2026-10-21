@@ -693,6 +693,17 @@ async def get_company_report(
             ),
         ),
     ] = False,
+    human_mode: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "Человеческий понятный язык отчёта (по умолчанию true, настраивается в конфиге). "
+                "Если true — добавляет TL;DR-резюме в 3 предложениях, ответы на 3 ключевых вопроса "
+                "и переводит чиновничьи аббревиатуры (ОКВЭД, ССЧ, ГИР БО, ФССП, РНП) на живой русский язык. "
+                "Если false — возвращает официальный сухой реестровый формат."
+            ),
+        ),
+    ] = None,
 ) -> dict:
     """Отчёт по организации, объём зависит от запроса пользователя.
 
@@ -851,7 +862,8 @@ async def get_company_report(
     if detail_norm not in ("brief", "full"):
         detail_norm = "brief"
     is_debug = debug or getattr(settings, "osint_debug", False)
-    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug)
+    is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
+    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human)
 
     # Прикрепляем расхождение запроса (если обнаружено)
     if query_discrepancy:
@@ -871,12 +883,16 @@ async def get_company_report(
             event_date = m_date.group(1) if m_date else None
             m_lbl = re.search(r"^\[(.*?)\]", f.statement)
             source_lbl = m_lbl.group(1) if m_lbl else ""
-            incidents_list.append({
+            clean_stmt = re.sub(r"^\[.*?\]\s*", "", f.statement).strip()
+            item = {
                 "source": source_lbl,
                 "date": event_date,
                 "statement": f.statement,
                 "url": f.source_url,
-            })
+            }
+            if is_human:
+                item["сюжет_простыми_словами"] = clean_stmt
+            incidents_list.append(item)
         if detail_norm == "full":
             result["инциденты_и_сми"] = incidents_list
         else:
@@ -945,6 +961,15 @@ async def generate_full_dossier(
             ),
         ),
     ] = False,
+    human_mode: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "Человеческий понятный язык отчёта (по умолчанию true, настраивается в конфиге). "
+                "Если true — формирует TL;DR, ответы на 3 вопроса и понятные сюжетные описания."
+            ),
+        ),
+    ] = None,
 ) -> dict:
     """Единый фасад для мгновенного сбора полного OSINT-досье на контрагента за 1 вызов.
 
@@ -965,6 +990,7 @@ async def generate_full_dossier(
         include_reputation=True,
         expected_name=expected_name,
         debug=debug,
+        human_mode=human_mode,
     )
 
 
