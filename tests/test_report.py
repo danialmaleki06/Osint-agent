@@ -120,16 +120,31 @@ def test_brief_drops_full_sections():
     assert "pending" not in report
 
 
-def test_brief_keeps_reason_not_verdict():
-    """Причина несбора обязана дойти и в кратком отчёте."""
+def test_brief_keeps_reason_in_debug_mode():
+    """В режиме отладки (debug=True) причина несбора передается в отчёт."""
     report = build_report(
         "brief",
         make_context_result(make_context(), reason="Масштаб НЕ УСТАНОВЛЕН: источник молчал."),
         None,
         make_score(),
+        debug=True,
     )
     assert "что_не_собралось" in report
     assert "НЕ УСТАНОВЛЕН" in report["что_не_собралось"]
+    assert "_диагностика_разработчика" in report
+
+
+def test_brief_omits_reason_in_user_mode():
+    """В пользовательском режиме (debug=False) технические ошибки несбора не выводятся."""
+    report = build_report(
+        "brief",
+        make_context_result(make_context(), reason="Масштаб НЕ УСТАНОВЛЕН: источник молчал."),
+        None,
+        make_score(),
+        debug=False,
+    )
+    assert "что_не_собралось" not in report
+    assert "_диагностика_разработчика" not in report
 
 
 def test_brief_without_context():
@@ -457,9 +472,17 @@ def test_full_includes_pending_and_sources():
         found_at=NOW,
     )
     score = make_score(pending=[pending])
-    report = build_report("full", make_context_result(make_context()), make_risk(), score)
+    report = build_report("full", make_context_result(make_context()), make_risk(), score, debug=True)
     assert report["pending"][0]["fact_id"] == "SRCH-1"
     assert report["источники"][0]["status"] == "ok"
+    assert "_диагностика_разработчика" in report
+
+
+def test_full_omits_sources_in_user_mode():
+    score = make_score()
+    report = build_report("full", make_context_result(make_context()), make_risk(), score, debug=False)
+    assert "источники" not in report
+    assert "_диагностика_разработчика" not in report
 
 
 def test_full_without_context_still_works():
@@ -480,15 +503,28 @@ def test_batch_entry_is_compact():
     assert "источники" not in entry
 
 
-def test_batch_entry_keeps_warnings_and_reason():
+def test_batch_entry_keeps_warnings_and_reason_in_debug():
     score = make_score(warnings=["Долг ФССП: 12 млн ₽"])
     entry = build_batch_entry(
         make_context_result(make_context(), reason="Рыночное имя не установлено."),
         make_risk(),
         score,
+        debug=True,
     )
     assert entry["warnings"] == ["Долг ФССП: 12 млн ₽"]
     assert "что_не_собралось" in entry
+
+
+def test_batch_entry_omits_reason_in_user_mode():
+    score = make_score(warnings=["Долг ФССП: 12 млн ₽"])
+    entry = build_batch_entry(
+        make_context_result(make_context(), reason="Рыночное имя не установлено."),
+        make_risk(),
+        score,
+        debug=False,
+    )
+    assert entry["warnings"] == ["Долг ФССП: 12 млн ₽"]
+    assert "что_не_собралось" not in entry
 
 
 def test_batch_entry_without_anything():

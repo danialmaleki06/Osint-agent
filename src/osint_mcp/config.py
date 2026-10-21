@@ -83,6 +83,11 @@ class Settings(BaseSettings):
 
     request_timeout: float = Field(default=8.0, description="Таймаут запроса, секунды")
     cache_ttl_hours: int = Field(default=24, description="Срок жизни кэша реестровых данных")
+    osint_debug: bool = Field(
+        default=False,
+        validation_alias="OSINT_DEBUG",
+        description="Режим отладки: выводить диагностику недоступных источников и технические детали",
+    )
 
     # Списочные методы Checko и Федресурса отдают записи постранично. У крупных
     # организаций страниц бывают тысячи — выкачать всё нельзя. Берём первые

@@ -176,3 +176,103 @@ def test_check_coverage_dirty_inn():
     assert rep.total_requests == 1
     ledger.reset()
 
+
+
+@pytest.mark.asyncio
+async def test_get_company_report_clean_user_mode():
+    from osint_mcp.server import get_company_report
+    from osint_mcp.models import SourceResult
+
+    ctx = CompanyContext(
+        inn="7707083893",
+        name_legal="ПАО СБЕРБАНК",
+        name_short="СБЕРБАНК",
+    )
+    ctx_res = ContextResult(status="ok", context=ctx, reason="Технический сбой дополнительного источника")
+    risk_col = RiskCollection(
+        inn="7707083893",
+        results=[
+            SourceResult(source="checko.arbitration", status="ok"),
+            SourceResult(source="fedresurs", status="unavailable", reason="451 Unavailable"),
+        ],
+        sources_ok=1,
+        coverage_note="Недоступны источники: fedresurs",
+        facts=[],
+    )
+
+    with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
+         patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])):
+
+        # В обычном пользовательском режиме (debug=False по умолчанию)
+        user_rep = await get_company_report(inn="7707083893", detail="full", debug=False)
+        assert "что_не_собралось" not in user_rep
+        assert "источники" not in user_rep
+        assert "_диагностика_разработчика" not in user_rep
+        # В кратких рисках нет строки "охват: ..."
+        assert not any("охват:" in line for line in user_rep.get("риски_кратко", []))
+
+        # В режиме разработчика (debug=True)
+        dev_rep = await get_company_report(inn="7707083893", detail="full", debug=True)
+        assert "что_не_собралось" in dev_rep
+        assert "источники" in dev_rep
+        assert "_диагностика_разработчика" in dev_rep
+        diag = dev_rep["_диагностика_разработчика"]
+        assert "отказы_источников" in diag
+        assert diag["отказы_источников"][0]["source"] == "fedresurs"
+        assert diag["отказы_источников"][0]["reason"] == "451 Unavailable"
+        assert any("охват:" in line for line in dev_rep.get("риски_кратко", []))
+
+
+@pytest.mark.asyncio
+async def test_generate_full_dossier_debug_flag_propagation():
+    from osint_mcp.server import generate_full_dossier
+    from osint_mcp.models import SourceResult
+
+    ctx = CompanyContext(inn="7707083893", name_legal="ПАО СБЕРБАНК")
+    ctx_res = ContextResult(status="ok", context=ctx, reason="Таймаут")
+    risk_col = RiskCollection(
+        inn="7707083893",
+        results=[SourceResult(source="fsa", status="unavailable", reason="Timeout")],
+        coverage_note="Недоступны источники: fsa",
+        facts=[],
+    )
+
+    with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
+         patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])):
+
+        dossier_user = await generate_full_dossier(inn="7707083893", debug=False)
+        assert "_диагностика_разработчика" not in dossier_user
+        assert "что_не_собралось" not in dossier_user
+
+        dossier_dev = await generate_full_dossier(inn="7707083893", debug=True)
+        assert "_диагностика_разработчика" in dossier_dev
+        assert "что_не_собралось" in dossier_dev
+
+
+@pytest.mark.asyncio
+async def test_check_companies_batch_debug_flag():
+    from osint_mcp.server import check_companies_batch
+    from osint_mcp.models import SourceResult
+
+    ctx = CompanyContext(inn="7707083893", name_legal="ПАО СБЕРБАНК")
+    ctx_res = ContextResult(status="ok", context=ctx, reason="Таймаут")
+    risk_col = RiskCollection(
+        inn="7707083893",
+        results=[SourceResult(source="fsa", status="unavailable", reason="Timeout")],
+        coverage_note="Недоступны источники: fsa",
+        facts=[],
+    )
+
+    with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
+         patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)):
+
+        res_user = await check_companies_batch(inns=["7707083893"], debug=False)
+        item_user = res_user["результаты"][0]
+        assert "что_не_собралось" not in item_user
+        assert "охват" not in item_user
+
+        res_dev = await check_companies_batch(inns=["7707083893"], debug=True)
+        item_dev = res_dev["результаты"][0]
+        assert "что_не_собралось" in item_dev

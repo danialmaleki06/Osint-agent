@@ -21,6 +21,7 @@ get_company_links — иначе отчёт разбухает там, где п
 from datetime import date, datetime, timedelta, timezone
 
 from osint_mcp.models import CompanyContext, FinancialYear, RiskCollection
+from osint_mcp.config import settings
 from osint_mcp.scoring.models import ScoreResult
 from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intelligence
 from osint_mcp.tools.statutory_hr import build_statutory_hr_profile as _build_statutory_hr
@@ -566,13 +567,13 @@ def _plaintiff_lines(risk: RiskCollection | None) -> list[str]:
     return lines
 
 
-def _summary_lines(risk: RiskCollection | None, score: ScoreResult) -> list[str]:
+def _summary_lines(risk: RiskCollection | None, score: ScoreResult, debug: bool = False) -> list[str]:
     """Сжатая выжимка рисков для краткого отчёта."""
     lines: list[str] = []
     if risk is None:
         lines.append("реестровые проверки не проводились")
         return lines
-    if risk.coverage_note:
+    if debug and risk.coverage_note:
         lines.append(f"охват: {risk.coverage_note}")
     flags = [
         f.statement for res in risk.results for f in res.facts
@@ -703,6 +704,7 @@ def build_report(
     context_result,   # ContextResult: обёртка со статусом и причиной
     risk: RiskCollection | None,
     score: ScoreResult,
+    debug: bool = False,
 ) -> dict:
     """Собрать отчёт нужного объёма из уже собранных сведений.
 
@@ -710,6 +712,7 @@ def build_report(
     идут в отчёт всегда: сокращать можно объём данных, но не честность
     о том, чего проверка не охватила.
     """
+    is_debug = debug or getattr(settings, "osint_debug", False)
     ctx = context_result.context if context_result else None
     traffic = _get_traffic_light(score.verdict.label)
 
@@ -738,9 +741,7 @@ def build_report(
                     "руководитель": ctx.director_fio,
                 }.items() if v is not None},
             }
-        if context_result and context_result.reason:
-            report["что_не_собралось"] = context_result.reason
-        report["риски_кратко"] = _summary_lines(risk, score)
+        report["риски_кратко"] = _summary_lines(risk, score, debug=is_debug)
         if ctx is not None:
             stat_hr = _build_statutory_hr(ctx)
             if stat_hr:
@@ -754,11 +755,32 @@ def build_report(
                 }
         if score.reasons:
             report["основания"] = score.reasons
+        if is_debug:
+            diagnostic: dict = {}
+            if context_result and context_result.reason:
+                diagnostic["что_не_собралось"] = context_result.reason
+                report["что_не_собралось"] = context_result.reason
+            if risk and risk.coverage_note:
+                diagnostic["охват"] = risk.coverage_note
+            if risk is not None:
+                failed = [r for r in risk.results if r.status != "ok"]
+                if failed:
+                    diagnostic["отказы_источников"] = [
+                        {"source": r.source, "status": r.status, **({"reason": r.reason} if r.reason else {})}
+                        for r in failed
+                    ]
+                diagnostic["источники"] = [
+                    {"source": r.source, "status": r.status, **({"reason": r.reason} if r.reason else {})}
+                    for r in risk.results
+                ]
+            if score.unmatched_fact_kinds:
+                diagnostic["факты_без_критерия"] = score.unmatched_fact_kinds
+            report["_диагностика_разработчика"] = diagnostic
         report["scored_at"] = score.scored_at.isoformat()
         return report
 
     # full: краткое ядро плюс всё остальное
-    report = build_report("brief", context_result, risk, score)
+    report = build_report("brief", context_result, risk, score, debug=is_debug)
     report.pop("scored_at", None)
 
     report["карточка"]["адрес"] = ctx.address_full if ctx else None
@@ -787,14 +809,14 @@ def build_report(
     sales_intel = _build_sales_intelligence(ctx, risk=risk)
     if sales_intel:
         report["коммерческий_срез"] = sales_intel
-    if risk is not None:
+    if is_debug and risk is not None:
         report["источники"] = [
             {"source": r.source, "status": r.status,
              **({"reason": r.reason} if r.reason else {})}
             for r in risk.results
         ]
     report["pending"] = [p.model_dump(mode="json") for p in score.pending]
-    if score.unmatched_fact_kinds:
+    if is_debug and score.unmatched_fact_kinds:
         report["факты_без_критерия"] = score.unmatched_fact_kinds
     report["scored_at"] = score.scored_at.isoformat()
     return report
@@ -804,6 +826,7 @@ def build_batch_entry(
     context_result,
     risk: RiskCollection | None,
     score: ScoreResult,
+    debug: bool = False,
 ) -> dict:
     """Одна строка пакетного отчёта: вердикт, суть, главные оговорки."""
     ctx = context_result.context if context_result else None
@@ -829,11 +852,13 @@ def build_batch_entry(
             }
     if score.warnings:
         entry["warnings"] = score.warnings[:3]
-    if context_result and context_result.reason:
-        entry["что_не_собралось"] = context_result.reason
-    elif risk is not None and risk.coverage_note:
-        entry["охват"] = risk.coverage_note
-    summary = _summary_lines(risk, score)
+    is_debug = debug or getattr(settings, "osint_debug", False)
+    if is_debug:
+        if context_result and context_result.reason:
+            entry["что_не_собралось"] = context_result.reason
+        elif risk is not None and risk.coverage_note:
+            entry["охват"] = risk.coverage_note
+    summary = _summary_lines(risk, score, debug=is_debug)
     if summary:
         entry["риски_кратко"] = summary[:5]
     if score.reasons:
