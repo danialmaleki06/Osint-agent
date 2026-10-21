@@ -284,7 +284,11 @@ async def get_company_context(
 ) -> ContextResult:
     """Собрать карточку организации из государственного реестра.
 
-    ПОРЯДОК РАБОТЫ:
+    💡 РЕКОМЕНДАЦИЯ: Для комплексной проверки компании или сбора досье используй единый
+    инструмент generate_full_dossier или get_company_report — они объединяют реестры, суды,
+    СМИ, аварии ЦОД и скоринг за 1 вызов.
+
+    ПОРЯДОК РАБОТЫ (при пошаговом вызове):
       1. resolve_company     — определить организацию
       2. get_company_context — собрать карточку          <-- ты здесь
       3. collect_risk_facts  — проверить риски
@@ -463,7 +467,11 @@ async def collect_risk_facts(
 ) -> RiskCollection:
     """Собрать все реестровые риск-факты по организации за одно обращение.
 
-    ПОРЯДОК РАБОТЫ:
+    💡 РЕКОМЕНДАЦИЯ: Для комплексной проверки компании или сбора досье используй единый
+    инструмент generate_full_dossier или get_company_report — они объединяют реестры, суды,
+    СМИ, аварии ЦОД и скоринг за 1 вызов.
+
+    ПОРЯДОК РАБОТЫ (при пошаговом вызове):
       1. resolve_company     — определить организацию
       2. get_company_context — собрать карточку
       3. collect_risk_facts  — проверить риски           <-- ты здесь
@@ -1245,9 +1253,8 @@ async def get_verdict(
            каждый с обязательной ссылкой (pending[].source_url) в блоке
            «не проверено, нашлось в открытом виде». Не подтверждай находку
            сам и не превращай её в вывод — предложи проверить человеку.
-        6. Что проверить НЕ удалось: направления со статусом
-           unavailable/partial и unmatched_fact_kinds — отсутствие данных
-           не доказывает отсутствие рисков, скажи это прямо.
+        6. В обычном пользовательском режиме (debug=false) НЕ создавай раздел
+           «что не удалось проверить». Ограничивайся реально собранными фактами и объективной оценкой.
 
       НЕ придумывай баллы и не складывай свои: total_score уже готов.
 
@@ -1341,6 +1348,16 @@ async def get_verdict(
         if result.verdict.total_score >= 50.0:
             result.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(result.verdict.total_score, 45.0), floored=True)
             result.reasons.append("Оценка ограничена до «удовлетворительно»: ключевые реестры арбитража и юридических рисков не ответили")
+
+    # Снижение оценки при наличии инцидентов ЦОД, аварий или кибератак
+    pending_facts = _quarantine.list_pending(clean_inn)
+    has_disaster = any(
+        getattr(f, "kind", "") in ("fiasco_disaster_incident", "fiasco_cyber_data_breach")
+        for f in (risk.facts + pending_facts + _quarantine.confirmed_facts(clean_inn))
+    )
+    if has_disaster and result.verdict.total_score >= 50.0:
+        result.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(result.verdict.total_score, 40.0), floored=True)
+        result.reasons.append("Оценка снижена: в открытых источниках/СМИ зафиксированы аварии ЦОД/инфраструктуры или утечки данных")
 
     log.info("tool_call", tool="get_verdict", inn=clean_inn,
              verdict=result.verdict.label, score=result.verdict.total_score,

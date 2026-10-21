@@ -212,8 +212,15 @@ def build_human_summary(
     if ctx and ctx.city:
         q1_lines.append(f"• География: {ctx.city}.")
 
+    if profit is not None:
+        profit_str = f"чистая прибыль {_fmt_rub(profit)}" if profit >= 0 else f"чистый убыток {_fmt_rub(abs(profit))}"
+        if equity is not None and equity < 0:
+            profit_str += f", собственный капитал отрицательный ({_fmt_rub(equity)})"
+    else:
+        profit_str = "данные о чистой прибыли не раскрыты в ГИР БО"
+
     q2_lines = [
-        f"• Доходность и запас прочности: {p2_parts[0] if p2_parts else 'данные о прибыли не раскрыты'}.",
+        f"• Доходность и капитал: {profit_str}.",
     ]
     if tax_debt > 10_000:
         q2_lines.append(f"• Налоговая дисциплина: ⚠️ задолженность {_fmt_rub(tax_debt)} перед ФНС.")
