@@ -54,7 +54,7 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 # Максимум сообщений за один проход. Федресурс отдаёт постранично,
 # но для оценки контрагента достаточно свежих публикаций.
-MAX_PUBLICATIONS = 30
+MAX_PUBLICATIONS = 15
 
 # Заголовки сообщений, опознаваемые без разбора текста. Порядок важен:
 # проверяется сверху вниз, первое совпадение определяет вид факта.
@@ -114,8 +114,14 @@ class FedresursSource:
         return {
             "User-Agent": _UA,
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": referer,
+            "Sec-Ch-Ua": '"Not A(Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
 
     async def _get_json(self, url: str, referer: str) -> dict:

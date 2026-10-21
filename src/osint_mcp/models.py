@@ -447,6 +447,14 @@ class CompanyContext(BaseModel):
     okved_code: str | None = Field(default=None, description="Основной код ОКВЭД")
     okved_text: str | None = Field(default=None, description="Расшифровка ОКВЭД")
     capital: float | None = Field(default=None, description="Уставный капитал, рублей")
+    entity_type: str = Field(
+        default="legal_entity",
+        description="Тип субъекта: legal_entity (юрлицо), individual_entrepreneur (ИП) или individual (физлицо)",
+    )
+    npd_status: str | None = Field(
+        default=None,
+        description="Статус специального налогового режима / плательщика НПД (самозанятого)",
+    )
 
     # derived — выведено нами
     name_variants: list[str] = Field(

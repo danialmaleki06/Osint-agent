@@ -218,6 +218,13 @@ class DaDataSource:
                 okved_text = entry.get("name")
                 break
 
+        is_individual = (data.get("type") == "INDIVIDUAL") or (len(str(data.get("inn") or "")) == 12)
+        fio_dict = data.get("fio") or {}
+        fio_str = " ".join(filter(None, [fio_dict.get("surname"), fio_dict.get("name"), fio_dict.get("patronymic")]))
+        director_fio = management.get("name") or (fio_str if fio_str else None) or (names.get("full") if is_individual else None)
+        director_post = management.get("post") or ("Индивидуальный предприниматель" if is_individual else None)
+        ent_type = "individual_entrepreneur" if is_individual else "legal_entity"
+
         return CompanyContext(
             inn=data.get("inn") or "",
             ogrn=data.get("ogrn"),
@@ -228,12 +235,13 @@ class DaDataSource:
             address_full=address.get("value"),
             city=addr_data.get("city"),
             region=addr_data.get("region_with_type"),
-            director_fio=management.get("name"),
-            director_post=management.get("post"),
+            director_fio=director_fio,
+            director_post=director_post,
             founders=founders,
             okved_code=okved_code,
             okved_text=okved_text,
             capital=capital,
+            entity_type=ent_type,
             # Готовые чистые имена от источника надёжнее выведенных отсечением,
             # поэтому передаём их все, включая латиницу
             name_variants=name_variants(

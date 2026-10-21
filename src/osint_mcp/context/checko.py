@@ -1594,6 +1594,10 @@ class CheckoSource:
         registered = _parse_date(data.get("ДатаРег"))
         capital = (data.get("УстКап") or {}).get("Сумма")
 
+        is_ip = endpoint == "entrepreneur" or len(inn.strip()) == 12
+        ip_fio = (director or {}).get("ФИО") or (legal if is_ip else None)
+        ip_post = (director or {}).get("НаимДолжн") or ("Индивидуальный предприниматель" if is_ip else None)
+
         ctx = CompanyContext(
             inn=data.get("ИНН") or inn,
             ogrn=data.get("ОГРН"),
@@ -1604,12 +1608,13 @@ class CheckoSource:
             address_full=addr.get("АдресРФ"),
             city=addr.get("НасПункт"),
             region=(data.get("Регион") or {}).get("Наим"),
-            director_fio=(director or {}).get("ФИО"),
-            director_post=(director or {}).get("НаимДолжн"),
+            director_fio=ip_fio,
+            director_post=ip_post,
             founders=founders,
             okved_code=okved_code,
             okved_text=okved.get("Наим"),
             capital=capital,
+            entity_type="individual_entrepreneur" if is_ip else "legal_entity",
             name_variants=name_variants(legal, short, data.get("НаимАнгл")),
             industry_terms=industry_terms(okved_code),
             brand_resolved=False,

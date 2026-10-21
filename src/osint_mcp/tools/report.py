@@ -148,6 +148,203 @@ def _capital_cushion(ctx: CompanyContext) -> str | None:
     )
 
 
+
+
+# ───────────────────  Лицензии: категоризация по регуляторам  ───────────────────
+
+_LICENSE_CATEGORIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("фсб", "криптограф", "шифрован", "государственной тайны", "гостайн"), "ФСБ (Криптография / Защита гостайны)"),
+    (("фстэк", "конфиденциальн", "кии", "средств защиты информации", "технической защиты"), "ФСТЭК (Защита конфиденциальной информации / КИИ)"),
+    (("роскомнадзор", "минкомсвяз", "минцифр", "связ", "телематическ", "передач"), "Роскомнадзор (Связь и телематика)"),
+    (("мчс", "пожарн", "огнезащит", "тушени"), "МЧС (Пожарная безопасность)"),
+    (("минкульт", "культурного наследия", "реставрац", "памятник"), "Минкультуры (Реставрация памятников культуры)"),
+    (("росздравнадзор", "минздрав", "медицинск", "фармацевтическ"), "Росздравнадзор (Медицина и фармацевтика)"),
+    (("ростехнадзор", "промышленной безопасности", "маркшейдер", "опасных производств"), "Ростехнадзор (Промбезопасность)"),
+    (("образован", "учебн"), "Минобрнауки (Образовательная деятельность)"),
+)
+
+
+def _classify_license(lic) -> str:
+    text = f"{getattr(lic, 'issuer', '') or ''} {getattr(lic, 'activity', '') or ''} {getattr(lic, 'number', '') or ''}".lower()
+    for needles, cat in _LICENSE_CATEGORIES:
+        if any(n in text for n in needles):
+            return cat
+    return "Отраслевая государственная лицензия"
+
+
+def _build_license_breakdown(licenses: list) -> dict | None:
+    if not licenses:
+        return None
+    groups: dict[str, list[dict]] = {}
+    for lic in licenses:
+        cat = _classify_license(lic)
+        entry = {
+            "номер": lic.number,
+            **({"орган": lic.issuer} if lic.issuer else {}),
+            **({"деятельность": lic.activity} if lic.activity else {}),
+            **({"дата": lic.issued_at.isoformat()} if lic.issued_at else {}),
+        }
+        groups.setdefault(cat, []).append(entry)
+    summary_lines = [f"{cat}: {len(items)}" for cat, items in groups.items()]
+    return {
+        "всего": len(licenses),
+        "по_категориям": summary_lines,
+        "детализация": groups,
+    }
+
+
+# ───────────────────  Матрица финансового здоровья  ───────────────────
+
+def _build_financial_health_matrix(ctx: CompanyContext) -> dict | None:
+    """Сводная матрица финансового здоровья: рентабельность ROS, динамика, чистые активы, соразмерность налогов."""
+    if not ctx.fin_history and not (ctx.extras and ctx.extras.tax_debt):
+        return None
+
+    matrix: dict = {}
+    years = ctx.fin_history
+    if years:
+        latest = years[0]
+        # 1. Рентабельность продаж (ROS)
+        if latest.revenue and latest.revenue > 0 and latest.profit is not None:
+            ros = (latest.profit / latest.revenue) * 100.0
+            if ros >= 20.0:
+                ros_status = "🟢 Высокая рентабельность бизнеса"
+            elif ros >= 5.0:
+                ros_status = "🟢 Стандартная операционная рентабельность"
+            elif ros >= 0.0:
+                ros_status = "🟡 Низкая маржинальность (чувствительность к издержкам)"
+            else:
+                ros_status = "🟠 Отрицательная рентабельность (операционный убыток)"
+            matrix["рентабельность_продаж_ros"] = {
+                "значение_процент": round(ros, 1),
+                "оценка": ros_status,
+                "выручка": _fmt_amount(latest.revenue),
+                "чистая_прибыль": _fmt_amount(latest.profit),
+            }
+
+        # 2. Динамика выручки год к году (YoY)
+        if len(years) >= 2:
+            prev = next((y for y in years[1:] if y.revenue is not None and y.revenue > 0), None)
+            if prev and latest.revenue is not None:
+                growth_pct = ((latest.revenue - prev.revenue) / prev.revenue) * 100.0
+                growth_label = "🟢 Рост оборота" if growth_pct > 0 else "🟠 Сжатие выручки"
+                matrix["динамика_выручки_yoy"] = {
+                    "темп_прироста_процент": round(growth_pct, 1),
+                    "период": f"{prev.year} → {latest.year}",
+                    "оценка": f"{growth_label} ({growth_pct:+.1f}%)",
+                }
+
+        # 3. Чистые активы (собственный капитал)
+        if latest.equity is not None:
+            is_negative = latest.equity < 0
+            matrix["чистые_активы"] = {
+                "сумма": _fmt_amount(latest.equity),
+                "статус": "⛔ Отрицательные чистые активы (риск ликвидации ст. 20 14-ФЗ)" if is_negative else "🟢 Капитал в норме",
+                "критично": is_negative,
+            }
+
+    # 4. Налоговая нагрузка и соразмерность недоимки
+    if ctx.extras and ctx.extras.tax_debt:
+        debt = ctx.extras.tax_debt
+        matrix["налоговая_задолженность"] = {
+            "сумма": _fmt_amount(debt),
+        }
+        if years and years[0].profit is not None and years[0].profit > 0:
+            ratio = (debt / years[0].profit) * 100.0
+            matrix["налоговая_задолженность"]["доля_к_годовой_прибыли_процент"] = round(ratio, 1)
+            if ratio > 50.0:
+                matrix["налоговая_задолженность"]["оценка"] = "🟠 Высокий риск блокировки счетов (долг >50% чистой прибыли)"
+            else:
+                matrix["налоговая_задолженность"]["оценка"] = "🟡 Умеренная текущая недоимка"
+        elif years and years[0].revenue and years[0].revenue > 0:
+            ratio_rev = (debt / years[0].revenue) * 100.0
+            matrix["налоговая_задолженность"]["доля_к_выручке_процент"] = round(ratio_rev, 2)
+
+    return matrix or None
+
+
+# ───────────────────  Цифровой контур и стек (Digital Footprint)  ───────────────────
+
+def _build_digital_footprint(ctx: CompanyContext) -> dict | None:
+    """Блок цифрового контура: только значимые сигналы (CMS, CRM, аналитика с ID, SSL, возраст домена).
+
+    Отфильтровывает тривиальный шум вроде 'HTML' или 'CSS'.
+    """
+    fp: dict = {}
+    site_url = ctx.brand_domain or (ctx.extras.contacts.website if ctx.extras and ctx.extras.contacts else None)
+    if site_url:
+        fp["сайт"] = site_url
+
+    if ctx.domain_created_at:
+        age_years = (date.today() - ctx.domain_created_at).days / 365.25
+        fp["возраст_домена"] = f"{int(age_years)} лет (с {ctx.domain_created_at.strftime('%d.%m.%Y')})"
+
+    if ctx.ssl_info:
+        ssl_val = "🟢 Действителен" if ctx.ssl_info.valid else "⛔ Недействителен / истёк"
+        bits = [ssl_val]
+        if ctx.ssl_info.issuer:
+            bits.append(f"эмитент: {ctx.ssl_info.issuer}")
+        if ctx.ssl_info.days_left is not None:
+            bits.append(f"осталось {ctx.ssl_info.days_left} дн.")
+        fp["ssl_сертификат"] = ", ".join(bits)
+
+    tech = ctx.site_tech
+    if tech:
+        # CMS/платформа: фильтруем тривиальные заглушки
+        cms_clean = [c for c in tech.cms if c.lower() not in ("html", "html5", "css", "css3", "javascript", "jquery")]
+        if cms_clean:
+            fp["платформа_cms"] = cms_clean
+
+        crm_list = getattr(tech, "crm_widgets", None) or getattr(tech, "crm", None)
+        if crm_list:
+            fp["crm_и_виджеты"] = crm_list
+
+        # Аналитика с конкретными номерами счётчиков (критично для выявления аффилированных сетей)
+        analytics_items = []
+        tr_dict = getattr(tech, "tracker_ids", None) or getattr(tech, "trackers", None)
+        if tr_dict:
+            for k, ids in tr_dict.items():
+                label = "Яндекс.Метрика" if "yandex" in k else ("Google Analytics" if "google" in k else k)
+                analytics_items.append(f"{label} (ID: {', '.join(ids[:3])})")
+        elif tech.analytics:
+            analytics_items = [a for a in tech.analytics if a.lower() not in ("html", "meta")]
+        if analytics_items:
+            fp["аналитика_и_трекеры"] = analytics_items
+
+    # Корпоративная почта
+    if ctx.extras and ctx.extras.contacts and ctx.extras.contacts.emails:
+        domains = set()
+        for em in ctx.extras.contacts.emails:
+            if "@" in em:
+                domains.add(em.split("@", 1)[1].lower())
+        if domains:
+            fp["доменная_почта"] = sorted(domains)
+
+    return fp or None
+
+
+def _digital_footprint_lines(ctx: CompanyContext) -> list[str]:
+    """Строки цифрового следа для секции полного отчёта."""
+    fp = _build_digital_footprint(ctx)
+    if not fp:
+        return []
+    lines = []
+    if fp.get("сайт"):
+        age_str = f" ({fp.get('возраст_домена')})" if fp.get("возраст_домена") else ""
+        lines.append(f"домен: {fp['сайт']}{age_str}")
+    if fp.get("платформа_cms"):
+        lines.append("платформа / CMS: " + ", ".join(fp["платформа_cms"]))
+    if fp.get("crm_и_виджеты"):
+        lines.append("клиентские виджеты / CRM: " + ", ".join(fp["crm_и_виджеты"]))
+    if fp.get("аналитика_и_трекеры"):
+        lines.append("веб-аналитика: " + "; ".join(fp["аналитика_и_трекеры"]))
+    if fp.get("ssl_сертификат"):
+        lines.append(f"SSL: {fp['ssl_сертификат']}")
+    if fp.get("доменная_почта"):
+        lines.append("корпоративная почта: " + ", ".join(fp["доменная_почта"]))
+    return lines
+
+
 def _fin_lines(ctx: CompanyContext) -> list[str]:
     """Динамика финансов словами: то, что не видно из одного числа.
 
@@ -213,12 +410,17 @@ def _extras_lines(ctx: CompanyContext) -> list[str]:
             "(признак массового адреса)"
         )
     if extras.licenses:
+        cat_counts: dict[str, int] = {}
+        for lic in extras.licenses:
+            cat = _classify_license(lic)
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        cat_summary = ", ".join(f"{cat} ({cnt})" for cat, cnt in cat_counts.items())
         names = "; ".join(
             f"{lic.number}{f' ({lic.activity})' if lic.activity else ''}"
-            for lic in extras.licenses[:5]
+            for lic in extras.licenses[:3]
         )
-        more = f" и ещё {len(extras.licenses) - 5}" if len(extras.licenses) > 5 else ""
-        lines.append(f"лицензии: {names}{more}")
+        more = f" и ещё {len(extras.licenses) - 3}" if len(extras.licenses) > 3 else ""
+        lines.append(f"лицензии ({len(extras.licenses)} шт.): {cat_summary} — {names}{more}")
     contacts = extras.contacts
     if contacts:
         bits = []
@@ -454,6 +656,9 @@ def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None) -> l
     commercial = _commercial_lines(risk)
     if commercial:
         sections.append({"название": "коммерческая активность", "пункты": commercial})
+    fp_lines = _digital_footprint_lines(ctx)
+    if fp_lines:
+        sections.append({"название": "цифровой контур и стек", "пункты": fp_lines})
     return sections
 
 
@@ -728,21 +933,29 @@ def build_report(
             "warnings": score.warnings,
         }
         if ctx is not None:
-            report["карточка"] = {
+            is_ip = len(str(ctx.inn or "")) == 12 or getattr(ctx, "entity_type", "") == "individual_entrepreneur"
+            card_data = {
                 "наименование": ctx.name_legal,
                 "ИНН": ctx.inn,
                 "ОГРН": ctx.ogrn,
+                "тип_субъекта": "Индивидуальный предприниматель (ИП)" if is_ip else "Юридическое лицо",
                 **{k: v for k, v in {
                     "город": ctx.city,
-                    "статус": ctx.status,
+                    "статус": (ctx.status + " (зарегистрирован в ЕГРИП)") if (is_ip and ctx.status == "Действует") else ctx.status,
                     "деятельность": ctx.okved_text or ctx.okved_code,
                     "выручка_последний_год": ctx.revenue_latest,
                     "численность": ctx.employees,
-                    "руководитель": ctx.director_fio,
+                    "руководитель": ctx.director_fio or (ctx.name_legal if is_ip else None),
                 }.items() if v is not None},
             }
+            if is_ip and ctx.ogrn:
+                card_data["ОГРНИП"] = ctx.ogrn
+            report["карточка"] = card_data
         report["риски_кратко"] = _summary_lines(risk, score, debug=is_debug)
         if ctx is not None:
+            fin_matrix = _build_financial_health_matrix(ctx)
+            if fin_matrix:
+                report["финансовая_матрица"] = fin_matrix
             stat_hr = _build_statutory_hr(ctx)
             if stat_hr:
                 report["кадровый_потенциал_документы"] = stat_hr
@@ -800,6 +1013,16 @@ def build_report(
 
     report["разбор"] = _full_sections(ctx, risk)
     if ctx is not None:
+        fin_matrix = _build_financial_health_matrix(ctx)
+        if fin_matrix:
+            report["финансовая_матрица"] = fin_matrix
+        if ctx.extras and ctx.extras.licenses:
+            lic_breakdown = _build_license_breakdown(ctx.extras.licenses)
+            if lic_breakdown:
+                report["лицензии_расшифровка"] = lic_breakdown
+        digital_fp = _build_digital_footprint(ctx)
+        if digital_fp:
+            report["цифровой_контур"] = digital_fp
         stat_hr = _build_statutory_hr(ctx)
         if stat_hr:
             report["кадровый_потенциал_документы"] = stat_hr

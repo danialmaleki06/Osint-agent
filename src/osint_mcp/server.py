@@ -40,7 +40,10 @@ from osint_mcp.tools.inn import validate_inn as _validate_inn
 from osint_mcp.tools.quota import check_all_limits as _check_all_limits
 from osint_mcp.tools.report import build_batch_entry as _build_batch_entry
 from osint_mcp.tools.report import build_report as _build_report
-from osint_mcp.tools.risk import collect_risk_facts as _collect_risk_facts
+from osint_mcp.tools.risk import (
+    collect_risk_facts as _collect_risk_facts,
+    extract_context_financial_risk_facts as _extract_financial_risk_facts,
+)
 from osint_mcp.scoring import score_company as _score_company
 from osint_mcp.scoring.engine import load_config as _load_scoring_config
 from osint_mcp.scoring.models import (
@@ -837,6 +840,9 @@ async def get_company_report(
 
         fiasco_facts, hr_hub_info = await asyncio.gather(_fetch_fiascos(), _fetch_hr_hub())
 
+    if context_result.context:
+        risk.facts.extend(_extract_financial_risk_facts(context_result.context))
+
     score = _score_company(
         facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,
@@ -1119,6 +1125,8 @@ async def check_companies_batch(
                 disc_fact = _build_discrepancy_fact(query_discrepancy)
                 risk.facts.append(disc_fact)
 
+        if context_result.context:
+            risk.facts.extend(_extract_financial_risk_facts(context_result.context))
         score = _score_company(
             facts=risk.facts + _quarantine.confirmed_facts(inn),
             context=context_result.context,
@@ -1279,6 +1287,8 @@ async def get_verdict(
             disc_fact = _build_discrepancy_fact(query_discrepancy)
             risk.facts.append(disc_fact)
 
+    if context_result.context:
+        risk.facts.extend(_extract_financial_risk_facts(context_result.context))
     result = _score_company(
         facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,

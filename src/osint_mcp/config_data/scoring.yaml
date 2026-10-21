@@ -336,6 +336,30 @@ criteria:
       - { below: 365,  score: -8, label: "молодая компания, меньше года" }
     reason: "{label}"
 
+
+  negative_net_assets_risk:
+    group: finance
+    description: "Отрицательные чистые активы — риск банкротства и принудительной ликвидации (ст. 20 14-ФЗ)"
+    match:
+      kind: negative_net_assets
+      op: exists
+    score: -40
+    verdict_floor: "рискованно"
+    warn_always: true
+    reason: "Отрицательный собственный капитал: {statement}"
+
+  tax_debt_scale_risk:
+    group: finance
+    description: "Налоговая недоимка несоразмерна масштабу бизнеса (риск блокировки счетов по ст. 76 НК РФ)"
+    match:
+      kind: tax_debt_scale_risk
+      op: exists
+    score: -25
+    verdict_floor: "рискованно"
+    warn_always: true
+    reason: "Налоговая задолженность: {statement}"
+
+
   # ── Подключаемые сигналы из Каталога Источников ───────────────────
   # Сигналы из пополняемой библиотеки источников (sources.yaml).
   # При обнаружении подтверждённого факта они влияют на скоринг

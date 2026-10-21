@@ -18,7 +18,7 @@ from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.fedresurs import FedresursSource
 from osint_mcp.context.fsa import FsaSource
 from osint_mcp.context.software_registry import SoftwareRegistrySource
-from osint_mcp.models import Fact, RiskCollection, SourceResult
+from osint_mcp.models import ExtFact, Fact, RiskCollection, SourceResult
 from osint_mcp.tools.country import detect_country
 from osint_mcp.tools.inn import validate_inn
 
@@ -205,3 +205,80 @@ async def _backup_checks(
         else:
             out.append(item)
     return out
+
+
+
+def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[Fact]:
+    """Генерация риск-фактов по финансовым показателям карточки организации (отрицательные активы, налоговый долг)."""
+    if ctx is None:
+        return []
+    from datetime import datetime, timezone
+
+    facts: list[Fact] = []
+
+    def _fmt_rub(val: float | None) -> str:
+        if val is None:
+            return "0 ₽"
+        abs_v = abs(val)
+        if abs_v >= 1_000_000_000:
+            return f"{val / 1_000_000_000:.1f} млрд ₽"
+        if abs_v >= 1_000_000:
+            return f"{val / 1_000_000:.1f} млн ₽"
+        if abs_v >= 1_000:
+            return f"{val / 1_000:.0f} тыс. ₽"
+        return f"{val:,.0f} ₽".replace(",", " ")
+
+    # 1. Отрицательные чистые активы (ст. 20 14-ФЗ)
+    if ctx.fin_history:
+        latest = ctx.fin_history[0]
+        if latest.equity is not None and latest.equity < 0:
+            facts.append(
+                ExtFact(
+                    fact_id="FIN-NEG-EQUITY",
+                    kind="negative_net_assets",
+                    statement=f"собственный капитал {_fmt_rub(latest.equity)} за {latest.year} г. (отрицательные чистые активы — признак банкротного состояния по ст. 20 14-ФЗ)",
+                    source_url=latest.report_url or f"https://bo.nalog.gov.ru/organizations-card/{ctx.inn}",
+                    source_type="registry_api",
+                    trust="registry",
+                    retrieved_at=datetime.now(timezone.utc),
+                    payload={"equity": latest.equity, "year": latest.year},
+                )
+            )
+
+    # 2. Налоговая недоимка относительно масштаба бизнеса
+    if ctx.extras and ctx.extras.tax_debt and ctx.extras.tax_debt >= 300_000:
+        debt = ctx.extras.tax_debt
+        latest = ctx.fin_history[0] if ctx.fin_history else None
+        revenue = latest.revenue if latest else None
+        profit = latest.profit if latest else None
+
+        scale_risk = False
+        ratio_desc = ""
+        if profit is not None and profit <= 0:
+            scale_risk = True
+            ratio_desc = f"при убыточном бизнесе (убыток {_fmt_rub(abs(profit))})"
+        elif profit is not None and profit > 0 and (debt / profit) > 0.5:
+            scale_risk = True
+            ratio_desc = f"составляет {(debt / profit):.0%} от годовой чистой прибыли"
+        elif revenue is not None and revenue > 0 and (debt / revenue) > 0.05:
+            scale_risk = True
+            ratio_desc = f"составляет {(debt / revenue):.1%} от годовой выручки"
+        elif debt >= 10_000_000:
+            scale_risk = True
+            ratio_desc = "крупная сумма недоимки перед бюджетом"
+
+        if scale_risk:
+            facts.append(
+                ExtFact(
+                    fact_id="FIN-TAX-DEBT-SCALE",
+                    kind="tax_debt_scale_risk",
+                    statement=f"задолженность по налогам {_fmt_rub(debt)} {ratio_desc} (риск приостановки операций по счетам по ст. 76 НК РФ)",
+                    source_url=f"https://service.nalog.ru/zd.do?inn={ctx.inn}",
+                    source_type="registry_api",
+                    trust="registry",
+                    retrieved_at=datetime.now(timezone.utc),
+                    payload={"tax_debt": debt, "revenue": revenue, "profit": profit},
+                )
+            )
+
+    return facts
