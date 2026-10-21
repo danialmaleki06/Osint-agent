@@ -134,24 +134,26 @@ def build_human_summary(
 
     # 1. TL;DR ("Суть в трёх предложениях")
     brand_hint = f' (бренд «{brand}»)' if brand else ''
+    status_lower = (status_str or "").lower()
+    is_active = any(status_lower.startswith(p) for p in ("действ", "зарегистр"))
     if is_ip:
-        p1 = f"{name} — действующий индивидуальный предприниматель из {city}, основное направление: {profile}"
+        p1 = f"{name} — действующий индивидуальный предприниматель из {city}, профиль: {profile}"
         if age_str:
             p1 += f" ({age_str})"
         p1 += "."
-    elif status_str != "Действует":
-        p1 = f"{name}{brand_hint} — организация из {city} находится в статусе «{status_str}» (деятельность не ведётся либо находится в процессе ликвидации)."
+    elif not is_active:
+        p1 = f"{name}{brand_hint} — организация из {city}, текущий статус: «{status_str}» (деятельность прекращена или в процессе реорганизации/ликвидации)."
     else:
-        bits = [f"{name}{brand_hint} — действующий {size_desc} из {city}"]
+        bits = [f"{name}{brand_hint} — действующее юрлицо из {city}"]
         if profile:
-            bits.append(f"направление: {profile}")
+            bits.append(f"профиль: {profile}")
         tail = []
         if rev_fmt:
-            tail.append(f"годовой оборот {rev_fmt}")
+            tail.append(f"выручка {rev_fmt}")
         if employees:
-            tail.append(f"штат {employees} сотрудников")
+            tail.append(f"штат {employees} чел.")
         if tail:
-            bits.append("со статистикой: " + ", ".join(tail))
+            bits.append(", ".join(tail))
         p1 = ", ".join(bits) + "."
 
     p2_parts = []
@@ -159,22 +161,22 @@ def build_human_summary(
         if profit >= 0:
             p2_parts.append(f"бизнес прибыльный (чистая прибыль {_fmt_rub(profit)})")
         else:
-            p2_parts.append(f"зафиксирован чистый убыток {_fmt_rub(abs(profit))}")
+            p2_parts.append(f"чистый убыток {_fmt_rub(abs(profit))}")
     if equity is not None and equity < 0:
-        p2_parts.append(f"собственный капитал отрицательный ({_fmt_rub(equity)}, долги превышают активы)")
+        p2_parts.append(f"собственный капитал отрицательный ({_fmt_rub(equity)})")
 
     if tax_debt > 10_000:
-        p2_parts.append(f"имеется налоговая задолженность {_fmt_rub(tax_debt)}")
+        p2_parts.append(f"налоговая задолженность {_fmt_rub(tax_debt)}")
     else:
-        p2_parts.append("долгов перед налоговой нет")
+        p2_parts.append("долгов перед ФНС нет")
 
     if enforce_count > 0:
-        p2_parts.append(f"у приставов открыто {enforce_count} производств на {_fmt_rub(enforce_amount)}")
+        p2_parts.append(f"у приставов ФССП {enforce_count} производств на {_fmt_rub(enforce_amount)}")
     else:
-        p2_parts.append("счета свободны от арестов приставов")
+        p2_parts.append("счета свободны от арестов ФССП")
 
     if def_count > 0:
-        p2_parts.append(f"в судах выступает ответчиком по искам на {_fmt_rub(def_amount)}")
+        p2_parts.append(f"в судах ответчик по искам на {_fmt_rub(def_amount)}")
 
     if fiasco_items:
         p2_parts.append(f"в СМИ зафиксированы публичные инциденты/ЧП ({len(fiasco_items)})")
@@ -182,12 +184,12 @@ def build_human_summary(
     p2 = "; ".join(p2_parts).capitalize() + "." if p2_parts else "Финансовые и реестровые данные в норме."
 
     label = score.verdict.label
-    if label == "хорошо":
+    if label in ("отлично", "хорошо"):
         p3 = "Критических стоп-факторов не обнаружено, сотрудничество оценивается как надёжное и безопасное."
     elif label == "удовлетворительно":
-        p3 = "Риск умеренный: базовые требования соблюдены, перед крупными сделками достаточно запросить стандартный комплект закрывающих документов."
+        p3 = "Риск умеренный: базовые требования соблюдены, перед сделками достаточна стандартная проверка документов."
     elif label == "рискованно":
-        p3 = "Повышенный риск: выявлены чувствительные факторы (суды, долги или падение показателей), безопаснее работать по предоплате."
+        p3 = "Повышенный риск: выявлены чувствительные факторы (суды, долги или спад показателей), безопаснее работать по предоплате."
     else:
         p3 = "Критический риск: присутствуют блокирующие реестровые факторы или риск несостоятельности, заключать сделки не рекомендуется."
 
@@ -274,7 +276,7 @@ def build_human_summary(
             main_part = st.split(" | Вывод: ")[0] if " | Вывод: " in st else st
             q3_lines.append(f"• Происшествия и инциденты в СМИ: ⚠️ {main_part}.")
 
-    if ctx and ctx.status and ctx.status != "Действует":
+    if ctx and ctx.status and not any(ctx.status.lower().startswith(p) for p in ("действ", "зарегистр")):
         q3_lines.append(f"• Корпоративный статус: ⚠️ организация в процессе изменения статуса ({ctx.status}).")
 
     if ctx and ctx.former_names:

@@ -819,6 +819,28 @@ async def get_company_report(
         facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,
     )
+
+    # Защита от фальшивого «отлично»: если ключевые реестры судов/рисков отказали (Checko 403 / лимиты)
+    core_risk_sources = {"checko.arbitration", "checko.registry_flags", "checko.enforcement"}
+    core_ok = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status in ("ok", "partial"))
+    core_failed = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status not in ("ok", "partial"))
+
+    if core_failed >= 2 and core_ok == 0:
+        quota_warn = "⚠️ Базовые реестры рисков (арбитраж Kad.Arbitr, приставы ФССП, отметки ЕГРЮЛ) недоступны (лимит API Checko 403). Судебные и юридические риски не проверены!"
+        if quota_warn not in score.warnings:
+            score.warnings.append(quota_warn)
+        if score.verdict.total_score >= 50.0:
+            from osint_mcp.scoring.models import Verdict
+            score.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(score.verdict.total_score, 45.0), floored=True)
+            score.reasons.append("Оценка ограничена до «удовлетворительно»: ключевые реестры арбитража и юридических рисков не ответили")
+
+    # Если зафиксированы ЧП инфраструктуры/ЦОД или кибератаки — снижаем вердикт с «отлично»
+    has_disaster = any(getattr(f, "kind", "") in ("fiasco_disaster_incident", "fiasco_cyber_data_breach") for f in fiasco_facts)
+    if has_disaster and score.verdict.total_score >= 50.0:
+        from osint_mcp.scoring.models import Verdict
+        score.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(score.verdict.total_score, 40.0), floored=True)
+        score.reasons.append("Оценка снижена: в открытых источниках/СМИ зафиксированы аварии ЦОД/инфраструктуры или утечки данных")
+
     if fiasco_facts:
         for f in fiasco_facts:
             if f not in score.pending:
@@ -1306,6 +1328,19 @@ async def get_verdict(
             f"однако по указанному ИНН в ЕГРЮЛ зарегистрирована «{query_discrepancy['фактическое_в_реестре']}». "
             "Возможно, передан ошибочный ИНН чужого юридического лица!",
         )
+
+    # Защита от фальшивого «отлично» при отказе ключевых реестров
+    core_risk_sources = {"checko.arbitration", "checko.registry_flags", "checko.enforcement"}
+    core_ok = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status in ("ok", "partial"))
+    core_failed = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status not in ("ok", "partial"))
+
+    if core_failed >= 2 and core_ok == 0:
+        quota_warn = "⚠️ Базовые реестры рисков (арбитраж Kad.Arbitr, приставы ФССП, отметки ЕГРЮЛ) недоступны (лимит API Checko 403). Судебные и юридические риски не проверены!"
+        if quota_warn not in result.warnings:
+            result.warnings.append(quota_warn)
+        if result.verdict.total_score >= 50.0:
+            result.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(result.verdict.total_score, 45.0), floored=True)
+            result.reasons.append("Оценка ограничена до «удовлетворительно»: ключевые реестры арбитража и юридических рисков не ответили")
 
     log.info("tool_call", tool="get_verdict", inn=clean_inn,
              verdict=result.verdict.label, score=result.verdict.total_score,
