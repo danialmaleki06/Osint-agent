@@ -42,6 +42,11 @@ MEANING: dict[tuple[str, str], str] = {
     ("apicloud", "kad_arbitr.php"): "арбитражные дела через резервный агрегатор",
     ("fedresurs", "publications"): "коммерческие сведения Федресурса: лизинг, залоги, факторинг, гарантии, СРО",
     ("fsa", "declarations"): "сертификаты и декларации соответствия (ФГИС Росаккредитации)",
+    ("hh", "vacancies"): "вакансии и динамика найма (HeadHunter)",
+    ("software_registry", "search"): "реестр отечественного ПО (Минцифры РФ)",
+    ("site", "content"): "содержимое официального сайта и веб-стек",
+    ("site", "dns"): "сетевая инфраструктура и DNS-записи",
+    ("site", "ssl"): "криптографический сертификат безопасности SSL/TLS",
 }
 
 # Направления, которые система умеет, но запускает только по требованию.
@@ -56,6 +61,7 @@ ON_DEMAND = {
 FREE_ALWAYS = {
     ("bo_nalog", "request"): "финансовая история из ГИР БО",
     ("rmsp", "request"): "реестр МСП: независимое подтверждение масштаба",
+    ("software_registry", "search"): "реестр отечественного ПО Минцифры",
 }
 
 # Направления, которых в системе пока нет вовсе. Перечисляются явно,
@@ -74,7 +80,10 @@ def _label(service: str, method: str) -> str:
 
 def build_coverage(inn: str) -> CoverageReport:
     """Собрать отчёт о полноте проверки по идентификатору организации."""
-    calls = ledger.calls_for(inn)
+    from osint_mcp.tools.query_guard import extract_inn_and_name
+    parsed_inn, _ = extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    calls = ledger.calls_for(clean_inn)
     session = ledger.session_totals()
     daily = ledger.daily_totals()
 
@@ -82,7 +91,7 @@ def build_coverage(inn: str) -> CoverageReport:
         # Пустой журнал — не «ничего не нашли», а «ничего не проверяли».
         # Без этой развилки отчёт читался бы как результат.
         return CoverageReport(
-            inn=inn,
+            inn=clean_inn,
             checked=False,
             gaps=[DataGap(
                 what="проверка организации",
@@ -155,7 +164,7 @@ def build_coverage(inn: str) -> CoverageReport:
         gaps.append(DataGap(what=what, kind="not_implemented", reason=why))
 
     report = CoverageReport(
-        inn=inn,
+        inn=clean_inn,
         checked=True,
         total_requests=len(calls),
         services=sorted(per_service.values(), key=lambda u: u.service),

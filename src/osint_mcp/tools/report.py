@@ -820,6 +820,13 @@ def build_batch_entry(
         entry["наименование"] = ctx.name_legal
         entry["статус"] = ctx.status
         entry["город"] = ctx.city
+        stat_hr = _build_statutory_hr(ctx)
+        if stat_hr:
+            entry["кадры"] = {
+                "штат_фнс": stat_hr.get("официальный_штат_фнс"),
+                "вакансий": stat_hr.get("открыто_вакансий_30дней"),
+                "динамика": stat_hr.get("динамика_найма"),
+            }
     if score.warnings:
         entry["warnings"] = score.warnings[:3]
     if context_result and context_result.reason:

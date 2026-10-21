@@ -72,6 +72,11 @@ from osint_mcp.context.reputation_fiascos import (
     evaluate_fiascos_findings as _evaluate_fiascos_findings,
 )
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
+from osint_mcp.tools.query_guard import (
+    extract_inn_and_name as _extract_inn_and_name,
+    check_query_inn_consistency as _check_query_inn_consistency,
+    build_discrepancy_fact as _build_discrepancy_fact,
+)
 
 
 # Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
@@ -357,9 +362,11 @@ async def get_company_context(
     registered_at годится как фильтр: публикация, вышедшая раньше даты
     регистрации, не может относиться к этой организации.
     """
-    ledger.set_subject(inn)
-    result = await _build_context(inn, _source, _checko)
-    log.info("tool_call", tool="get_company_context", inn=inn, status=result.status)
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
+    result = await _build_context(clean_inn, _source, _checko)
+    log.info("tool_call", tool="get_company_context", inn=clean_inn, status=result.status)
     return result
 
 
@@ -468,15 +475,17 @@ async def check_affiliations(
     на два шага — организация, её люди, их компании. Компании партнёров
     этих людей уже вне охвата. Не утверждай, что связей больше нет.
     """
-    ledger.set_subject(inn)
-    graph, result = await _checko.check_affiliations(inn, deep=deep)
-    log.info("tool_call", tool="check_affiliations", inn=inn,
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
+    graph, result = await _checko.check_affiliations(clean_inn, deep=deep)
+    log.info("tool_call", tool="check_affiliations", inn=clean_inn,
              people=len(graph.people) if graph else 0,
              suspicious=graph.suspicious_count if graph else 0,
              status=result.status)
     if graph is None:
         return AffiliationGraph(
-            inn=inn,
+            inn=clean_inn,
             coverage_note=(f"Проверка связей НЕ ВЫПОЛНЕНА: {result.reason}. "
                            f"Пустые списки здесь не означают отсутствия связей."),
         )
@@ -566,9 +575,11 @@ async def collect_risk_facts(
     Оценки риска в ответе нет — только исходные факты со ссылками
     на первоисточники. Выводы делаешь ты, опираясь ТОЛЬКО на них.
     """
-    ledger.set_subject(inn)
-    result = await _collect_risk_facts(inn)
-    log.info("tool_call", tool="collect_risk_facts", inn=inn,
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
+    result = await _collect_risk_facts(clean_inn, _checko)
+    log.info("tool_call", tool="collect_risk_facts", inn=clean_inn,
              facts=len(result.facts), ok=result.sources_ok,
              failed=result.sources_failed)
     return result
@@ -626,8 +637,10 @@ def check_coverage(
     session_requests — обращения с момента запуска сервера по всем
     организациям сразу. Для оценки стоимости одной проверки не годится.
     """
-    result = _build_coverage(inn)
-    log.info("tool_call", tool="check_coverage", inn=inn,
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    result = _build_coverage(clean_inn)
+    log.info("tool_call", tool="check_coverage", inn=clean_inn,
              checked=result.checked, requests=result.total_requests)
     return result
 
@@ -949,12 +962,14 @@ async def get_company_links(
     организации уже показан, предупреждай пользователя о доценке —
     сервер не кэширует между вызовами.
     """
-    ledger.set_subject(inn)
-    context_result = await _build_context(inn, _source, _checko)
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
+    context_result = await _build_context(clean_inn, _source, _checko)
     ctx = context_result.context
     links = list(ctx.source_links) if ctx is not None else []
 
-    result: dict = {"inn": inn, "links": [l.model_dump() for l in links]}
+    result: dict = {"inn": clean_inn, "links": [l.model_dump() for l in links]}
     if not links:
         result["note"] = (
             "Ссылок нет: организация не найдена в реестрах либо все "
@@ -963,7 +978,7 @@ async def get_company_links(
         )
     elif context_result.reason:
         result["что_не_собралось"] = context_result.reason
-    log.info("tool_call", tool="get_company_links", inn=inn, links=len(links))
+    log.info("tool_call", tool="get_company_links", inn=clean_inn, links=len(links))
     return result
 
 
@@ -1008,26 +1023,27 @@ async def check_companies_batch(
     """
     # Дедупликация с сохранением порядка: один ИНН дважды — одна проверка.
     seen: set[str] = set()
-    unique: list[str] = []
+    unique_items: list[tuple[str, str | None]] = []
     for raw in inns:
-        cleaned = raw.strip().replace(" ", "").replace("-", "")
+        parsed_inn, parsed_name = _extract_inn_and_name(raw)
+        cleaned = (parsed_inn or raw).strip().replace(" ", "").replace("-", "")
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
-            unique.append(cleaned)
+            unique_items.append((cleaned, parsed_name))
 
-    if not unique:
+    if not unique_items:
         return {"error": "Список ИНН пуст"}
-    if len(unique) > 20:
+    if len(unique_items) > 20:
         return {
             "error": (
-                f"В списке {len(unique)} ИНН, максимум за вызов — 20. "
+                f"В списке {len(unique_items)} ИНН, максимум за вызов — 20. "
                 "Разбейте на несколько вызовов и предупредите пользователя "
                 "о расходе квоты"
             )
         }
 
     entries: list[dict] = []
-    for inn in unique:
+    for inn, expected_name in unique_items:
         ledger.set_subject(inn)
         try:
             context_result = await _build_context(inn, _source, _checko)
@@ -1057,10 +1073,23 @@ async def check_companies_batch(
             })
             continue
 
+        query_discrepancy = None
+        if expected_name and context_result.context:
+            query_discrepancy = _check_query_inn_consistency(expected_name, context_result.context)
+            if query_discrepancy:
+                disc_fact = _build_discrepancy_fact(query_discrepancy)
+                risk.facts.append(disc_fact)
+
         score = _score_company(
             facts=risk.facts + _quarantine.confirmed_facts(inn),
             context=context_result.context,
         )
+        if query_discrepancy:
+            score.warnings.insert(
+                0,
+                f"ВНИМАНИЕ: Запрошена «{query_discrepancy['запрошено_наименование']}», "
+                f"в ЕГРЮЛ — «{query_discrepancy['фактическое_в_реестре']}»!",
+            )
         entries.append(_build_batch_entry(context_result, risk, score))
         log.info("batch_item", inn=inn, verdict=score.verdict.label)
 
@@ -1094,6 +1123,12 @@ async def get_verdict(
             ),
         ),
     ] = False,
+    expected_name: Annotated[
+        str | None,
+        Field(
+            description="Ожидаемое наименование компании (для контроля соответствия ИНН ↔ название)",
+        ),
+    ] = None,
 ) -> ScoreResult:
     """Итоговая оценка организации: вердикт + баллы + причины со ссылками.
 
@@ -1145,12 +1180,15 @@ async def get_verdict(
     урезал вердикт. Объясни это пользователю: «несмотря на X, оценка
     не может быть выше Y из-за Z».
     """
-    ledger.set_subject(inn)
+    parsed_inn, parsed_name = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    target_expected_name = expected_name or parsed_name
+    ledger.set_subject(clean_inn)
     # Карточка собирается первой: наименование из неё нужно резервному
     # источнику банкротств, который ищет по строке, а не по ИНН.
-    context_result = await _build_context(inn, _source, _checko)
+    context_result = await _build_context(clean_inn, _source, _checko)
     risk = await _collect_risk_facts(
-        inn, _checko,
+        clean_inn, _checko,
         name=(context_result.context.name_short or context_result.context.name_legal
               if context_result.context else None),
     )
@@ -1176,11 +1214,11 @@ async def get_verdict(
             "Карточка компании сама по себе проверкой рисков не является. "
             "Проверьте ключи DaData/Checko в .env и доступность API."
         )
-        log.warning("verdict_refused", inn=inn,
+        log.warning("verdict_refused", inn=clean_inn,
                     sources_failed=risk.sources_failed,
                     context_status=context_result.status)
         return ScoreResult(
-            inn=inn,
+            inn=clean_inn,
             verdict=Verdict(label="не рекомендуется", total_score=0.0),
             groups=[],
             matched=[],
@@ -1192,11 +1230,28 @@ async def get_verdict(
             criteria_version=_load_scoring_config().criteria_version,
             scored_at=datetime.now(timezone.utc),
         )
+
+    # Проверка расхождения запроса «Имя ↔ ИНН»
+    query_discrepancy = None
+    if target_expected_name and context_result.context:
+        query_discrepancy = _check_query_inn_consistency(target_expected_name, context_result.context)
+        if query_discrepancy:
+            disc_fact = _build_discrepancy_fact(query_discrepancy)
+            risk.facts.append(disc_fact)
+
     result = _score_company(
-        facts=risk.facts + _quarantine.confirmed_facts(inn),
+        facts=risk.facts + _quarantine.confirmed_facts(clean_inn),
         context=context_result.context,
     )
-    log.info("tool_call", tool="get_verdict", inn=inn,
+    if query_discrepancy:
+        result.warnings.insert(
+            0,
+            f"ВНИМАНИЕ: Запрошена организация «{query_discrepancy['запрошено_наименование']}», "
+            f"однако по указанному ИНН в ЕГРЮЛ зарегистрирована «{query_discrepancy['фактическое_в_реестре']}». "
+            "Возможно, передан ошибочный ИНН чужого юридического лица!",
+        )
+
+    log.info("tool_call", tool="get_verdict", inn=clean_inn,
              verdict=result.verdict.label, score=result.verdict.total_score,
              floored=result.verdict.floored)
     if profile:
@@ -1253,13 +1308,15 @@ async def search_unverified(
       * «<название> задержка зарплаты» — точечная проверка долгов по оплате
         труда.
     """
-    ledger.set_subject(inn)
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
     found = _search_pending(query, kind, limit=min(limit, 10))
-    added = _quarantine.add(inn, found)
-    log.info("tool_call", tool="search_unverified", inn=inn,
+    added = _quarantine.add(clean_inn, found)
+    log.info("tool_call", tool="search_unverified", inn=clean_inn,
              found=len(found), added=added)
     return SearchUnverifiedResult(
-        inn=inn,
+        inn=clean_inn,
         query=query,
         found=len(found),
         added_to_quarantine=added,
@@ -1314,10 +1371,12 @@ def review_pending(
          с тобой не согласиться.
       4. action=reject — находка мусор (другая компания, омоним, реклама).
     """
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     if action == "list":
-        pending = _quarantine.list_pending(inn)
+        pending = _quarantine.list_pending(clean_inn)
         return {
-            "inn": inn,
+            "inn": clean_inn,
             "pending": [p.model_dump(mode="json") for p in pending],
             "count": len(pending),
         }
@@ -1328,11 +1387,11 @@ def review_pending(
                 "error": "weight обязателен: выставь оценку находки сам — "
                          "насколько она влияет на решение о сотрудничестве"
             }
-        result = _quarantine.confirm(inn, fact_id or "", weight,
+        result = _quarantine.confirm(clean_inn, fact_id or "", weight,
                                      confirmed_by="agent", rationale=rationale)
         if result is None:
             return {"error": f"Находка {fact_id} не найдена в карантине"}
-        log.info("tool_call", tool="review_pending", inn=inn,
+        log.info("tool_call", tool="review_pending", inn=clean_inn,
                  action="confirm", fact_id=fact_id, weight=weight)
         return {
             "confirmed": True,
@@ -1345,8 +1404,8 @@ def review_pending(
         }
 
     if action == "reject":
-        ok = _quarantine.reject(inn, fact_id or "")
-        log.info("tool_call", tool="review_pending", inn=inn,
+        ok = _quarantine.reject(clean_inn, fact_id or "")
+        log.info("tool_call", tool="review_pending", inn=clean_inn,
                  action="reject", fact_id=fact_id, ok=ok)
         return {"rejected": ok}
 
@@ -1438,12 +1497,14 @@ async def scan_catalog_source(
     Все находки изолируются в карантин с указанием вида факта (kind) и ссылки (source_url).
     После подтверждения (review_pending) факт попадает в скоринг по правилам scoring.yaml.
     """
-    ledger.set_subject(inn)
+    parsed_inn, auto_name = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    ledger.set_subject(clean_inn)
     catalog = _load_source_catalog()
     spec = catalog.sources.get(source_name)
     if spec is None:
         return SearchUnverifiedResult(
-            inn=inn,
+            inn=clean_inn,
             query=source_name,
             found=0,
             added_to_quarantine=0,
@@ -1452,11 +1513,11 @@ async def scan_catalog_source(
         )
 
     # Достаём название и сайт из контекста (если уже собраны)
-    context_res = await _build_context(inn, _source, _checko)
+    context_res = await _build_context(clean_inn, _source, _checko)
     name = (
         context_res.context.name_short or context_res.context.name_legal
         if context_res.context
-        else None
+        else auto_name
     )
     domain = context_res.context.brand_domain if context_res.context else None
 
@@ -1465,16 +1526,16 @@ async def scan_catalog_source(
         _execute_catalog_source,
         source_name=source_name,
         spec=spec,
-        inn=inn,
+        inn=clean_inn,
         name=name,
         brand_domain=domain,
     )
-    added = _quarantine.add(inn, found)
-    log.info("tool_call", tool="scan_catalog_source", inn=inn,
+    added = _quarantine.add(clean_inn, found)
+    log.info("tool_call", tool="scan_catalog_source", inn=clean_inn,
              source=source_name, found=len(found), added=added)
 
     return SearchUnverifiedResult(
-        inn=inn,
+        inn=clean_inn,
         query=f"catalog:{source_name}",
         found=len(found),
         added_to_quarantine=added,
@@ -1576,7 +1637,12 @@ async def scan_catalog_batch(
     Опрашивает центральную базу/реестр за один шаг.
     Находки автоматически изолируются в карантин для каждого ИНН со ссылками на первоисточник.
     """
-    clean_inns = [i.strip().replace(" ", "").replace("-", "") for i in inns if i.strip()]
+    clean_inns = []
+    for raw in inns:
+        p_inn, _ = _extract_inn_and_name(raw)
+        c = (p_inn or raw).strip().replace(" ", "").replace("-", "")
+        if c:
+            clean_inns.append(c)
     if not clean_inns:
         return {"error": "Список ИНН пуст"}
     if len(clean_inns) > 100:
@@ -1660,7 +1726,8 @@ async def check_shared_analytics(
        - Достоверные связанные домены помещаются в карантин (quarantine) как PendingFact вида 'affiliate_domain_signal',
          позволяя учесть цифровую сеть в итоговом скоринге после подтверждения.
     """
-    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    parsed_inn, _ = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     target_site = site_url
 
     # Если сайт не передан, получаем его из контекста
@@ -1773,8 +1840,9 @@ async def check_customs_ved(
        - Если компания внезапно прекратила возить от постоянного китайского или европейского завода,
          это сигнал кризиса отношений с поставщиком или проблем с расчетами.
     """
-    clean_inn = inn.strip().replace(" ", "").replace("-", "")
-    target_name = company_name
+    parsed_inn, auto_name = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    target_name = company_name or auto_name
 
     if not target_name:
         ctx_res = await _build_context(clean_inn, _source, _checko)
@@ -1848,9 +1916,10 @@ async def check_geo_reviews(
          прямой сигнал кассового разрыва, увольнения ключевого персонала или сбоя логистики.
        - Триггер для предложения: внедрение CRM, контроль качества, автоматизация логистики, обучение персонала.
     """
-    clean_inn = inn.strip().replace(" ", "").replace("-", "")
+    parsed_inn, auto_name = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     target_addr = address
-    target_name = None
+    target_name = auto_name
 
     if not target_addr or not target_name:
         ctx_res = await _build_context(clean_inn, _source, _checko)
@@ -1945,8 +2014,9 @@ async def check_reputation_fiascos(
     - Не увольняется ли команда посреди проекта?
     Все находки помещаются в SQLite-карантин (quarantine.db) со статусом 'pending' и категорией риска.
     """
-    clean_inn = inn.strip().replace(" ", "").replace("-", "")
-    target_name = company_name
+    parsed_inn, auto_name = _extract_inn_and_name(inn)
+    clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    target_name = company_name or auto_name
     target_domain = domain
     brand_candidate = None
 
