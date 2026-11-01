@@ -282,17 +282,45 @@ async def inspect_site_content(
     """Загрузить главную страницу, определить самоназвание и технологический стек."""
     if not url:
         return None, None, None
+
+    clean_url = url.strip()
+    if not clean_url:
+        return None, None, None
+
+    candidates: list[str] = []
+    if clean_url.startswith(("http://", "https://")):
+        candidates.append(clean_url)
+    else:
+        candidates.append(f"https://{clean_url}")
+        candidates.append(f"http://{clean_url}")
+
     service, method = "site", "inspect"
+    resp = None
+    last_err: Exception | None = None
+
     try:
         async with httpx.AsyncClient(
-            timeout=settings.request_timeout, headers={"User-Agent": _UA},
+            timeout=settings.request_timeout,
+            headers={"User-Agent": _UA},
             follow_redirects=True,
+            verify=False,
         ) as client:
-            resp = await client.get(url)
-        resp.raise_for_status()
-    except (httpx.HTTPError, ValueError) as e:
-        ledger.record(service, method, "failed", f"{type(e).__name__}")
-        return None, None, f"сайт недоступен: {type(e).__name__}"
+            for candidate in candidates:
+                try:
+                    r = await client.get(candidate)
+                    r.raise_for_status()
+                    resp = r
+                    break
+                except (httpx.HTTPError, ValueError, ssl.SSLError, OSError) as e:
+                    last_err = e
+                    continue
+    except Exception as e:  # noqa: BLE001
+        last_err = e
+
+    if resp is None:
+        err_msg = f"{type(last_err).__name__}" if last_err else "недоступен"
+        ledger.record(service, method, "failed", err_msg)
+        return None, None, f"сайт недоступен: {err_msg}"
 
     tree = HTMLParser(resp.text)
     h1 = tree.css_first("h1")

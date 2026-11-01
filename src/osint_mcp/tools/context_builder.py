@@ -203,11 +203,12 @@ async def build_company_context(
                     f"({fallback.reason}). Данных в карточке минимум — "
                     f"масштаб, финансы и связи НЕ ПРОВЕРЕНЫ."
                 )
-            elif fallback.status == "unavailable":
+            else:
                 base_reason = (
                     f"DaData: {base_reason}; Checko: {fallback.reason}; "
                     f"ЕГРЮЛ: {egrul_failure}"
                 )
+                return ContextResult(status="unavailable", reason=base_reason)
         elif fallback.status == "ok":
             # Оба ответили «не найдено» — DaData тоже не нашла либо её не было.
             return ContextResult(

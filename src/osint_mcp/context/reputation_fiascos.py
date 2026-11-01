@@ -609,7 +609,7 @@ def evaluate_fiascos_findings(
     company_name: str,
     raw_hits: list[dict[str, Any]],
     brand: str | None = None,
-    fetch_fallback: bool = True,
+    fetch_fallback: bool = False,
 ) -> ReputationFiascosProfile:
     """Агрегирует сырые поисковые находки в профиль инцидентов с фильтрацией релевантности."""
     incidents: list[FiascoIncident] = []

@@ -17,7 +17,11 @@ async def test_generate_full_dossier_query_guard():
 
     with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
-         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])):
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
+         patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(None, None))), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
         
         # Передаем несоответствующее название через expected_name
         res = await generate_full_dossier(
@@ -86,6 +90,10 @@ async def test_generate_full_dossier_hr_hub():
     with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
+         patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(None, None))), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))), \
          patch("osint_mcp.tools.hr_hub.detect_corporate_hr_hub", AsyncMock(return_value=mock_hub)):
         
         res = await generate_full_dossier(inn="7743001840", detail="full")
@@ -202,7 +210,11 @@ async def test_get_company_report_clean_user_mode():
 
     with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
-         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])):
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
+         patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(None, None))), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
 
         # В обычном пользовательском режиме (debug=False по умолчанию)
         user_rep = await get_company_report(inn="7707083893", detail="full", debug=False)
@@ -302,7 +314,11 @@ async def test_get_company_report_fiascos_in_warnings():
 
     with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
-         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[fiasco])):
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[fiasco])), \
+         patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(None, None))), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
 
         res = await get_company_report(inn="7736207543")
         assert "warnings" in res

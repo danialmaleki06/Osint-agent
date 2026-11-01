@@ -478,7 +478,9 @@ async def test_brand_falls_back_to_trademark():
 
 
 @respx.mock
-async def test_brand_falls_back_to_web_search():
+async def test_brand_falls_back_to_web_search(monkeypatch):
+    monkeypatch.setattr("osint_mcp.context.site._query_whois", lambda d, s: "")
+    monkeypatch.setattr("osint_mcp.context.site._check_ssl_sync", lambda h: None)
     """Без знаков и с мёртвым реестровым сайтом бренд ищется веб-поиском.
 
     Сайт из реестра не отвечает → DDG находит официальный сайт по имени →

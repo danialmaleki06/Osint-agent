@@ -25,8 +25,8 @@ async def test_generate_full_dossier_direct_inn():
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
          patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(None, None))), \
-         patch("osint_mcp.context.customs.build_customs_facts", return_value=[]), \
-         patch("osint_mcp.context.geo_reviews.build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
          patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
 
         res = await generate_full_dossier(inn="7707083893", detail="full")
@@ -115,8 +115,8 @@ async def test_three_detail_levels():
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
          patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(mock_graph, None))), \
-         patch("osint_mcp.context.customs.build_customs_facts", return_value=[]), \
-         patch("osint_mcp.context.geo_reviews.build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.server._build_customs_facts", return_value=[]), \
+         patch("osint_mcp.server._build_geo_reviews_facts", return_value=[]), \
          patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
 
         # 1. Уровень "кратко" (brief)
