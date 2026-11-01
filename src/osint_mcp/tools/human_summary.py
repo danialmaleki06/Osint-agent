@@ -58,6 +58,7 @@ def build_human_summary(
     ctx: "CompanyContext | None",
     risk: "RiskCollection | None",
     score: "ScoreResult",
+    media_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Сформировать человекочитаемое резюме и ответы на 3 ключевых вопроса."""
     is_ip = False
@@ -276,6 +277,30 @@ def build_human_summary(
         if hiring.leadership_roles and not getattr(hiring, "hiring_focus", None):
             hh_parts.append(f"руководящие роли: {', '.join(hiring.leadership_roles[:2])}")
         q3_lines.append(f"• Кадровый вектор (HeadHunter): {'; '.join(hh_parts)}.")
+
+    # Публичная активность, заявления руководства и презентации продуктов
+    if media_info:
+        leads = media_info.get("заявления_руководства") or []
+        if leads:
+            top_l = leads[0]
+            spk = top_l.get("спикер") or "Руководство"
+            th = top_l.get("тезис") or top_l.get("цитата_или_тезис") or top_l.get("заголовок")
+            src = top_l.get("источник")
+            src_str = f" ({src})" if src else ""
+            q3_lines.append(f"• Заявления руководства: 🎙 {spk}: {th}{src_str}.")
+
+        evs = media_info.get("презентации_и_события") or []
+        if evs:
+            top_ev = evs[0]
+            p_name = top_ev.get("событие_или_продукт") or top_ev.get("продукт_или_мероприятие") or top_ev.get("описание")
+            src = top_ev.get("источник")
+            src_str = f" ({src})" if src else ""
+            q3_lines.append(f"• Презентации и анонсы: 🚀 {p_name}{src_str}.")
+
+        brief_evs = media_info.get("главные_события") or []
+        if brief_evs and not leads and not evs:
+            for b_ev in brief_evs[:2]:
+                q3_lines.append(f"• Публичная активность: 📰 {b_ev.get('тип', 'Новость')}: {b_ev.get('тезис') or b_ev.get('суть')}.")
 
     # Происшествия, инциденты и операционные риски из СМИ (OSINT)
     if fiasco_items:

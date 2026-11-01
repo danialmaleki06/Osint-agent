@@ -75,6 +75,9 @@ from osint_mcp.context.reputation_fiascos import (
     async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
     evaluate_fiascos_findings as _evaluate_fiascos_findings,
 )
+from osint_mcp.context.news_media import (
+    fetch_company_media_presence as _fetch_company_media_presence,
+)
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
 from osint_mcp.tools.query_guard import (
     extract_inn_and_name as _extract_inn_and_name,
@@ -532,6 +535,7 @@ async def get_company_report(
     # Параллельный поиск репутационных рисков и детекция HR-хаба холдинга
     fiasco_facts = []
     hr_hub_info = None
+    news_media_info = None
     if context_result.context:
         ctx = context_result.context
         from osint_mcp.tools.names import core_name
@@ -676,6 +680,22 @@ async def get_company_report(
                 log.warning("get_company_report_analytics_error", error=str(exc))
                 return None
 
+        async def _fetch_news_media():
+            if not include_reputation:
+                return None
+            try:
+                dir_fio = getattr(ctx, "director_fio", None) or getattr(ctx, "director", None)
+                return await _fetch_company_media_presence(
+                    inn=clean_inn,
+                    company_name=target_name or clean_inn,
+                    brand=brand_to_use,
+                    director_fio=dir_fio,
+                    detail=detail_norm,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_news_media_error", error=str(exc))
+                return None
+
         (
             fiasco_facts,
             hr_hub_info,
@@ -683,6 +703,7 @@ async def get_company_report(
             customs_info,
             geo_info,
             analytics_info,
+            news_media_info,
         ) = await asyncio.gather(
             _fetch_fiascos(),
             _fetch_hr_hub(),
@@ -690,6 +711,7 @@ async def get_company_report(
             _fetch_customs(),
             _fetch_geo(),
             _fetch_analytics(),
+            _fetch_news_media(),
         )
 
     if context_result.context:
@@ -728,7 +750,7 @@ async def get_company_report(
 # detail_norm already normalized at function start
     is_debug = debug or getattr(settings, "osint_debug", False)
     is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
-    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human)
+    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=news_media_info)
 
     # Прикрепляем расхождение запроса (если обнаружено)
     if query_discrepancy:
@@ -749,6 +771,8 @@ async def get_company_report(
         result["гео_и_отзывы"] = geo_info
     if analytics_info:
         result["веб_аналитика_и_сеть"] = analytics_info
+    if news_media_info:
+        result["медиа_и_публичная_активность"] = news_media_info
 
     # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
     if fiasco_facts:

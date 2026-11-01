@@ -958,6 +958,7 @@ def build_report(
     score: ScoreResult,
     debug: bool = False,
     human_mode: bool | None = None,
+    media_info: dict | None = None,
 ) -> dict:
     """Собрать отчёт нужного объёма из уже собранных сведений.
 
@@ -1064,16 +1065,18 @@ def build_report(
             report["_диагностика_разработчика"] = diagnostic
         if is_human:
             from osint_mcp.tools.human_summary import build_human_summary, build_human_court_cases
-            report["резюме_для_человека"] = build_human_summary(ctx, risk, score)
+            report["резюме_для_человека"] = build_human_summary(ctx, risk, score, media_info=media_info)
             court_cases = build_human_court_cases(risk)
             if court_cases:
                 report["судебные_дела_сюжеты"] = court_cases
+        if media_info:
+            report["медиа_и_публичная_активность"] = media_info
         report["детализация"] = "кратко"
         report["scored_at"] = score.scored_at.isoformat()
         return report
 
     # full: краткое ядро плюс всё остальное
-    report = build_report("brief", context_result, risk, score, debug=is_debug, human_mode=is_human)
+    report = build_report("brief", context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=media_info)
     report.pop("scored_at", None)
 
     if ctx is not None:
@@ -1220,6 +1223,8 @@ def build_report(
     report["pending"] = [p.model_dump(mode="json") for p in score.pending]
     if is_debug and score.unmatched_fact_kinds:
         report["факты_без_критерия"] = score.unmatched_fact_kinds
+    if media_info:
+        report["медиа_и_публичная_активность"] = media_info
     report["детализация"] = "средне" if detail_norm == "standard" else "полно"
     report["scored_at"] = score.scored_at.isoformat()
     return report
