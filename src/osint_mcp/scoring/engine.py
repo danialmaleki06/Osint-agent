@@ -44,6 +44,10 @@ class Threshold(BaseModel):
     below: float | None = None
     score: float
     label: str = Field(default="", description="Подпись ступени для {label} в reason")
+    warn: bool | None = Field(
+        default=None,
+        description="Выносить ли в warnings при срабатывании этой ступени (None — наследовать критерий)",
+    )
 
 
 class Decay(BaseModel):
@@ -63,6 +67,14 @@ class CriterionSpec(BaseModel):
     match: Match
     aggregate: str = Field(default="count")  # count|sum|max|age_days
     field: str | None = None
+    relative_to: str | None = Field(
+        default=None,
+        description="База для относительного расчета (например, 'revenue' — годовая выручка)",
+    )
+    relative_thresholds: list[Threshold] = Field(
+        default_factory=list,
+        description="Пороги для относительного показателя (доли от выручки/базы: 0.15 = 15%)",
+    )
     score: float | None = Field(
         default=None,
         description=(
@@ -117,9 +129,9 @@ class ScoringConfig(BaseModel):
                     f"Критерий «{name}» ссылается на несуществующую группу "
                     f"«{c.group}» (есть: {list(self.groups)})"
                 )
-            if c.score is None and not c.thresholds:
+            if c.score is None and not c.thresholds and not c.relative_thresholds:
                 raise ValueError(
-                    f"Критерий «{name}»: нет ни score, ни thresholds"
+                    f"Критерий «{name}»: нет ни score, ни thresholds, ни relative_thresholds"
                 )
             if c.aggregate in ("sum", "max") and not c.field:
                 raise ValueError(
@@ -271,16 +283,56 @@ def _fmt_num(value: float) -> str:
     return f"{value:,.1f}".replace(",", " ")
 
 
+def _get_context_metric(context: CompanyContext | None, metric_name: str | None) -> float | None:
+    """Извлечь базовую метрику (выручку, активы) из контекста организации для относительного анализа."""
+    if context is None or not metric_name:
+        return None
+    if metric_name == "revenue":
+        if context.revenue_latest is not None and context.revenue_latest > 0:
+            return float(context.revenue_latest)
+        if context.fin_history:
+            for fy in context.fin_history:
+                if fy.revenue is not None and fy.revenue > 0:
+                    return float(fy.revenue)
+        return None
+    if metric_name == "assets":
+        if context.fin_history:
+            for fy in context.fin_history:
+                if fy.assets is not None and fy.assets > 0:
+                    return float(fy.assets)
+        return None
+    return None
+
+
 def _render_reason(
-    template: str, value: float | None, count: int,
-    total: float | None, fact: Fact | None,
+    template: str,
+    value: float | None,
+    count: int,
+    total: float | None,
+    fact: Fact | None,
+    ratio_pct: float | None = None,
+    compare_amount: float | None = None,
+    label: str = "",
 ) -> str:
     out = template
+    ratio_str = ""
+    ratio_info = ""
+    if ratio_pct is not None:
+        ratio_str = f"{ratio_pct:.1f}%" if ratio_pct >= 0.1 else f"{ratio_pct:.2f}%"
+        amt = compare_amount if compare_amount is not None else total
+        if amt is not None and any(w in template.lower() for w in ("арбитраж", "ответчик", "иск")):
+            ratio_info = f" (иски {_fmt_num(amt)} ₽ — {ratio_str} от выручки)"
+        else:
+            ratio_info = f" ({ratio_str} от выручки)"
+
     for placeholder, replacement in (
         ("{value}", _fmt_num(value) if value is not None else "—"),
         ("{sum}", _fmt_num(total) if total is not None else "—"),
         ("{count}", str(count)),
         ("{statement}", fact.statement if fact else "—"),
+        ("{label}", label),
+        ("{ratio_pct}", ratio_str or "—"),
+        ("{ratio_info}", ratio_info),
     ):
         out = out.replace(placeholder, replacement)
     return out
@@ -350,21 +402,50 @@ def _score_criterion(
         return None
 
     # 2. Агрегация (+затухание по event_date, если задано).
+    total_amount: float | None = None
     if spec.aggregate == "age_days":
         if context is None or context.registered_at is None:
             return None
         raw_value = float((today - context.registered_at).days)
     elif spec.aggregate == "count":
         raw_value = float(len(matched))
+        if spec.field:
+            amt_vals = [float(_get_value(f, spec.field) or 0.0) for f in matched]
+            total_amount = sum(amt_vals)
     else:  # sum / max
         values = [float(_get_value(f, spec.field) or 0.0) for f in matched]
-        raw_value = sum(values) if spec.aggregate == "sum" else max(values)
+        total_amount = sum(values)
+        raw_value = total_amount if spec.aggregate == "sum" else max(values)
 
-    # 3. Балл: фиксированный или по ступеням; затухание — множителем.
-    if spec.score is not None:
+    # Относительный расчет (доля от выручки / базы)
+    revenue = _get_context_metric(context, spec.relative_to) if spec.relative_to else None
+    compare_amount = total_amount if (total_amount is not None and total_amount > 0) else (raw_value if spec.aggregate == "sum" else None)
+
+    ratio_pct: float | None = None
+    hit_thresh: Threshold | None = None
+    base_score: float = 0.0
+    warn_override: bool | None = None
+
+    if (
+        spec.relative_to
+        and revenue is not None
+        and revenue > 0
+        and compare_amount is not None
+        and compare_amount > 0
+        and spec.relative_thresholds
+    ):
+        ratio = compare_amount / revenue
+        ratio_pct = ratio * 100.0
+        base_score, hit_thresh = _pick_threshold_score(spec.relative_thresholds, ratio)
+    elif spec.score is not None:
         base_score = spec.score
     else:
-        base_score, _ = _pick_threshold_score(spec.thresholds, raw_value)
+        base_score, hit_thresh = _pick_threshold_score(spec.thresholds, raw_value)
+
+    if hit_thresh is not None and hit_thresh.warn is not None:
+        warn_override = hit_thresh.warn
+
+    # 3. Балл: затухание множителем.
     if spec.decay is not None:
         # Множитель по «свежайшему» событию: старые пачки долгов не должны
         # тянуть так же, как вчерашние. Для sum считаем средний множитель.
@@ -386,17 +467,17 @@ def _score_criterion(
     fact_ids = [f.fact_id for f in matched]
     source_urls = sorted({f.source_url for f in matched})
     if spec.reason:
-        # {label} подставляется из сработавшей ступени порога.
-        if "{label}" in spec.reason and spec.thresholds:
-            _, hit = _pick_threshold_score(spec.thresholds, raw_value)
-            label = getattr(hit, "label", None) or ""
-            reason = spec.reason.replace("{label}", label)
-        else:
-            reason = _render_reason(
-                spec.reason, raw_value, len(matched),
-                raw_value if spec.aggregate == "sum" else None,
-                matched[0],
-            )
+        thresh_label = getattr(hit_thresh, "label", None) or ""
+        reason = _render_reason(
+            spec.reason,
+            raw_value,
+            len(matched),
+            raw_value if spec.aggregate == "sum" else (compare_amount if compare_amount is not None else None),
+            matched[0],
+            ratio_pct=ratio_pct,
+            compare_amount=compare_amount,
+            label=thresh_label,
+        )
     else:
         reason = ""
     return MatchedCriterion(
@@ -405,6 +486,7 @@ def _score_criterion(
         score=round(weighted, 1),
         raw_value=raw_value if spec.aggregate != "count" else len(matched),
         fact_ids=fact_ids, source_urls=source_urls, reason=reason,
+        warn=warn_override,
     )
 
 
@@ -514,7 +596,9 @@ def score_company(
     warnings = [
         m.reason or m.description
         for m in sorted(matched, key=lambda m: m.score)
-        if m.score < 0 and cfg.criteria[m.criterion].warn_always
+        if m.score < 0 and (
+            m.warn if m.warn is not None else cfg.criteria[m.criterion].warn_always
+        )
     ]
 
     return ScoreResult(

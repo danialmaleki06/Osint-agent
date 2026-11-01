@@ -98,6 +98,7 @@ def build_human_summary(
     # Финансовые показатели
     fin_years = ctx.fin_history if ctx else None
     latest_fin = fin_years[0] if fin_years else None
+    rev_num = (ctx.revenue_latest if (ctx and ctx.revenue_latest) else None) or (latest_fin.revenue if latest_fin else None)
     profit = latest_fin.profit if latest_fin else None
     equity = latest_fin.equity if latest_fin else None
     tax_debt = (ctx.extras.tax_debt if (ctx and ctx.extras) else 0.0) or 0.0
@@ -236,12 +237,28 @@ def build_human_summary(
         q2_lines.append("• Налоговая дисциплина: 🟢 долгов перед ФНС нет, налоги уплачиваются вовремя.")
 
     if enforce_count > 0:
-        q2_lines.append(f"• Взыскания приставов (ФССП): ⚠️ {enforce_count} производств на {_fmt_rub(enforce_amount)}.")
+        enf_rel = ""
+        if rev_num and rev_num > 0:
+            enf_pct = (enforce_amount / rev_num) * 100.0
+            if enf_pct < 1.0:
+                enf_rel = f" ({enf_pct:.1f}% от выручки — незначительный уровень)"
+            else:
+                enf_rel = f" ({enf_pct:.1f}% от годовой выручки)"
+        is_minor_enf = enf_rel.endswith("незначительный уровень)")
+        icon_enf = "•" if is_minor_enf else "⚠️"
+        q2_lines.append(f"• Взыскания приставов (ФССП): {icon_enf} {enforce_count} производств на {_fmt_rub(enforce_amount)}{enf_rel}.")
     else:
         q2_lines.append("• Взыскания приставов (ФССП): 🟢 исполнительных производств нет, аресты на счета не накладывались.")
 
     if def_count > 0:
-        q2_lines.append(f"• Судебная нагрузка: выступает ответчиком в арбитраже по искам на {_fmt_rub(def_amount)}.")
+        def_rel = ""
+        if rev_num and rev_num > 0 and def_amount > 0:
+            def_pct = (def_amount / rev_num) * 100.0
+            if def_pct < 1.0:
+                def_rel = f" ({def_pct:.1f}% от выручки — незначительный уровень для масштаба бизнеса)"
+            else:
+                def_rel = f" ({def_pct:.1f}% от годовой выручки)"
+        q2_lines.append(f"• Судебная нагрузка: выступает ответчиком в арбитраже по искам на {_fmt_rub(def_amount)}{def_rel}.")
     else:
         q2_lines.append("• Судебная нагрузка: 🟢 крупных судебных споров с контрагентами не зафиксировано.")
 

@@ -163,15 +163,21 @@ criteria:
       field: amount
     aggregate: sum
     field: amount
+    relative_to: revenue
+    relative_thresholds:
+      - { above: 0.15, score: -35, warn: true,  label: "критический долг ФССП (>15% годовой выручки)" }
+      - { above: 0.05, score: -20, warn: true,  label: "существенный долг ФССП (>5% годовой выручки)" }
+      - { above: 0.01, score: -8,  warn: false, label: "умеренный долг ФССП (>1% годовой выручки)" }
+      - { above: 0.00, score: -1,  warn: false, label: "незначительный долг ФССП (<1% годовой выручки)" }
     thresholds:
-      - { above: 10000000, score: -35 }
-      - { above: 1000000,  score: -20 }
-      - { above: 100000,   score: -8 }
-      - { above: 0,        score: -3 }
+      - { above: 10000000, score: -35, warn: true }
+      - { above: 1000000,  score: -20, warn: true }
+      - { above: 100000,   score: -8,  warn: false }
+      - { above: 0,        score: -3,  warn: false }
     decay:
       half_life_days: 365
     warn_always: true
-    reason: "Долги ФССП: {sum} ₽ по {count} производствам"
+    reason: "Долги ФССП: {sum} ₽{ratio_info} по {count} производствам"
 
   defendant_cases:
     group: litigation
@@ -182,14 +188,21 @@ criteria:
       op: eq
       values: ["ответчик"]
     aggregate: count
+    field: amount
+    relative_to: revenue
+    relative_thresholds:
+      - { above: 0.15, score: -30, warn: true,  label: "критический объем исков (>15% годовой выручки)" }
+      - { above: 0.05, score: -15, warn: true,  label: "существенный объем исков (>5% годовой выручки)" }
+      - { above: 0.01, score: -6,  warn: false, label: "умеренный объем исков (>1% годовой выручки)" }
+      - { above: 0.00, score: -1,  warn: false, label: "незначительный объем исков (<1% годовой выручки)" }
     thresholds:
-      - { above: 20, score: -25 }
-      - { above: 5,  score: -12 }
-      - { above: 0,  score: -5 }
+      - { above: 20, score: -25, warn: true }
+      - { above: 5,  score: -12, warn: true }
+      - { above: 0,  score: -5,  warn: false }
     decay:
       half_life_days: 730
     warn_always: true
-    reason: "Ответчик в {count} арбитражных делах"
+    reason: "Ответчик в {count} арбитражных делах{ratio_info}"
 
   reputation_fiasco_criminal_investigation:
     group: litigation

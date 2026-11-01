@@ -37,6 +37,10 @@ class MatchedCriterion(BaseModel):
         default="",
         description="Краткая причина по шаблону из критерия",
     )
+    warn: bool | None = Field(
+        default=None,
+        description="Флаг вынесения в warnings: None — наследовать warn_always критерия; True/False — переопределить",
+    )
 
 
 class GroupScore(BaseModel):

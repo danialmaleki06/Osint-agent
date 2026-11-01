@@ -249,7 +249,7 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
     if ctx.extras and ctx.extras.tax_debt and ctx.extras.tax_debt >= 300_000:
         debt = ctx.extras.tax_debt
         latest = ctx.fin_history[0] if ctx.fin_history else None
-        revenue = latest.revenue if latest else None
+        revenue = (latest.revenue if latest else None) or ctx.revenue_latest
         profit = latest.profit if latest else None
 
         scale_risk = False
@@ -263,7 +263,7 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
         elif revenue is not None and revenue > 0 and (debt / revenue) > 0.05:
             scale_risk = True
             ratio_desc = f"составляет {(debt / revenue):.1%} от годовой выручки"
-        elif debt >= 10_000_000:
+        elif (revenue is None or revenue == 0) and debt >= 10_000_000:
             scale_risk = True
             ratio_desc = "крупная сумма недоимки перед бюджетом"
 

@@ -395,3 +395,80 @@ def test_warnings_sorted_worst_first():
                 event=date.today())
     r = score_company([bank, debt])
     assert r.warnings[0].startswith("Процедура банкротства")  # -90 раньше -35
+
+
+# ── Относительный расчет долгов и судов к выручке ───────────────────
+
+def test_relative_debt_and_litigation_negligible_with_huge_revenue():
+    """Случай пользователя: суд 8 млн и долг 8 млн при выручке 2 млрд руб.
+    
+    Отношение 8 млн / 2 млрд = 0.4% (< 1% выручки) — незначительно.
+    Оценка практически не страдает (-1 балл за долг, -1 за суд = -2 балла),
+    вердикт остается «хорошо» (58 баллов), а в блоке warnings пусто.
+    """
+    ctx = CompanyContext(
+        inn="7700000000",
+        name_legal='ООО "КРУПНЫЙ БИЗНЕС"',
+        country="RU",
+        revenue_latest=2_000_000_000.0,  # 2 млрд руб выручки
+    )
+    debt = fact("ENF-1", "enforcement", {"amount": 8_000_000}, event=date.today())
+    lawsuit = fact("ARB-1", "arbitration", {"role": "ответчик", "amount": 8_000_000}, event=date.today())
+
+    r = score_company([debt, lawsuit], context=ctx)
+
+    # 1. Проверяем баллы сработавших критериев
+    crit_debt = next(m for m in r.matched if m.criterion == "enforcement_debt")
+    crit_law = next(m for m in r.matched if m.criterion == "defendant_cases")
+
+    assert crit_debt.score == -1.0  # Незначительная ступень вместо -20
+    assert crit_law.score == -1.0   # Незначительная ступень вместо -15
+    assert r.verdict.total_score == 60.0 - 2.0  # 58.0 баллов
+    assert r.verdict.label == "хорошо"
+
+    # 2. Незначительные суммы НЕ должны попадать в критические warnings
+    assert r.warnings == []
+
+    # 3. В причинах указано точное соотношение к выручке
+    assert "0.4% от выручки" in crit_debt.reason
+    assert "0.4% от выручки" in crit_law.reason
+
+
+def test_relative_debt_and_litigation_critical_with_small_revenue():
+    """Критический риск: долг 8 млн и суд 8 млн при выручке всего 10 млн руб (80% выручки!).
+    
+    Для малого бизнеса 8 млн — это угроза банкротства.
+    Должны сработать максимальные штрафы (-35 и -30) и предупреждения в warnings.
+    """
+    ctx = CompanyContext(
+        inn="7700000000",
+        name_legal='ООО "МАЛЫЙ БИЗНЕС"',
+        country="RU",
+        revenue_latest=10_000_000.0,  # 10 млн руб выручки
+    )
+    debt = fact("ENF-1", "enforcement", {"amount": 8_000_000}, event=date.today())
+    lawsuit = fact("ARB-1", "arbitration", {"role": "ответчик", "amount": 8_000_000}, event=date.today())
+
+    r = score_company([debt, lawsuit], context=ctx)
+
+    crit_debt = next(m for m in r.matched if m.criterion == "enforcement_debt")
+    crit_law = next(m for m in r.matched if m.criterion == "defendant_cases")
+
+    assert crit_debt.score == -35.0  # Ступень > 15% выручки
+    assert crit_law.score == -30.0   # Ступень > 15% выручки
+    assert r.verdict.total_score <= 0.0
+    assert r.verdict.label in ("рискованно", "не рекомендуется")
+
+    # Тяжёлые риски обязательно выносятся в warnings
+    assert len(r.warnings) == 2
+    assert any("80.0% от выручки" in w for w in r.warnings)
+
+
+def test_relative_calculation_fallback_when_revenue_absent():
+    """Когда выручка в контексте неизвестна (None), движок использует абсолютные пороги."""
+    debt = fact("ENF-1", "enforcement", {"amount": 8_000_000}, event=date.today())
+    r = score_company([debt])  # context=None
+
+    crit_debt = next(m for m in r.matched if m.criterion == "enforcement_debt")
+    assert crit_debt.score == -20.0  # Абсолютная ступень > 1 млн руб
+    assert r.warnings  # Выносится в warnings по абсолютному порогу
