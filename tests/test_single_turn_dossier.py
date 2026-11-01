@@ -1,7 +1,9 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from osint_mcp.models import Candidate, CompanyContext, ContextResult, RiskCollection, ResolveResult
+from osint_mcp.models import (
+    AffiliationGraph, Candidate, CompanyContext, ContextResult, FinancialYear, RiskCollection, ResolveResult
+)
 from osint_mcp.server import generate_full_dossier, mcp, resolve_company, PRIMARY_TOOLS, GRANULAR_TOOLS
 
 
@@ -33,6 +35,7 @@ async def test_generate_full_dossier_direct_inn():
         assert "карточка" in res
         assert "вердикт" in res
         assert "score" in res
+        assert res["детализация"] == "полно"
 
 
 @pytest.mark.asyncio
@@ -65,6 +68,7 @@ async def test_generate_full_dossier_name_auto_resolution():
 
         assert res["inn"] == "7721546864"
         assert res["карточка"]["наименование"] == "ООО ВАЙЛДБЕРРИЗ"
+        assert res["детализация"] == "кратко"
 
 
 @pytest.mark.asyncio
@@ -87,6 +91,65 @@ async def test_generate_full_dossier_ambiguous_name_returns_candidates():
         assert res["status"] == "multiple_candidates"
         assert len(res["candidates"]) == 2
         assert "Уточните" in res["hint"]
+
+
+@pytest.mark.asyncio
+async def test_three_detail_levels():
+    """Проверка 3 уровней подробности: кратко (brief), средне (standard), полно (full)."""
+    ctx = CompanyContext(
+        inn="7707083893",
+        name_legal="ПАО СБЕРБАНК",
+        name_short="СБЕРБАНК",
+        brand="Сбер",
+        brand_domain="sberbank.ru",
+        address_full="г. Москва, ул. Вавилова, д. 19",
+        fin_history=[
+            FinancialYear(year=2024, revenue=1_000_000_000.0, profit=300_000_000.0)
+        ],
+    )
+    ctx_res = ContextResult(status="ok", context=ctx)
+    risk_col = RiskCollection(inn="7707083893", results=[], facts=[])
+    mock_graph = AffiliationGraph(inn="7707083893", people=[], related_companies=[])
+
+    with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
+         patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
+         patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
+         patch("osint_mcp.server._checko.check_affiliations", AsyncMock(return_value=(mock_graph, None))), \
+         patch("osint_mcp.context.customs.build_customs_facts", return_value=[]), \
+         patch("osint_mcp.context.geo_reviews.build_geo_reviews_facts", return_value=[]), \
+         patch("osint_mcp.context.site.inspect_site_content", AsyncMock(return_value=(None, None, "no site"))):
+
+        # 1. Уровень "кратко" (brief)
+        brief_res = await generate_full_dossier(inn="7707083893", detail="кратко")
+        assert brief_res["детализация"] == "кратко"
+        assert "карточка" in brief_res
+        assert "вердикт" in brief_res
+        assert "разбор" not in brief_res
+        assert "связи_и_аффилированность" not in brief_res
+
+        # 2. Уровень "средне" (standard) — по умолчанию
+        standard_res = await generate_full_dossier(inn="7707083893", detail="средне")
+        assert standard_res["детализация"] == "средне"
+        assert "карточка" in standard_res
+        assert "разбор" in standard_res
+        assert "финансовая_матрица" in standard_res
+        assert "коммерческий_срез" in standard_res
+        # Тяжелые глубокие OSINT-модули отключены в стандартном режиме для скорости
+        assert "связи_и_аффилированность" not in standard_res
+        assert "вэд_и_таможня" not in standard_res
+
+        # Дефолтный вызов без аргументов также должен давать уровень "средне"
+        default_res = await generate_full_dossier(inn="7707083893")
+        assert default_res["детализация"] == "средне"
+
+        # 3. Уровень "полно" (full) — глубокий Due Diligence
+        full_res = await generate_full_dossier(inn="7707083893", detail="полно")
+        assert full_res["детализация"] == "полно"
+        assert "карточка" in full_res
+        assert "разбор" in full_res
+        assert "финансовая_матрица" in full_res
+        # В полном режиме присутствуют глубокие связи и OSINT
+        assert "связи_и_аффилированность" in full_res
 
 
 def test_tool_exposure_control():

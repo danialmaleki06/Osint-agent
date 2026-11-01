@@ -970,7 +970,15 @@ def build_report(
     ctx = context_result.context if context_result else None
     traffic = _get_traffic_light(score.verdict.label)
 
-    if detail == "brief":
+    d_raw = str(detail or "").strip().lower()
+    if d_raw in ("brief", "кратко", "коротко", "short", "1"):
+        detail_norm = "brief"
+    elif d_raw in ("standard", "средне", "medium", "стандарт", "обычно", "2"):
+        detail_norm = "standard"
+    else:
+        detail_norm = "full"
+
+    if detail_norm == "brief":
         report: dict = {
             "inn": score.inn or (ctx.inn if ctx else ""),
             "карточка": {},
@@ -1044,6 +1052,7 @@ def build_report(
             court_cases = build_human_court_cases(risk)
             if court_cases:
                 report["судебные_дела_сюжеты"] = court_cases
+        report["детализация"] = "кратко"
         report["scored_at"] = score.scored_at.isoformat()
         return report
 
@@ -1071,13 +1080,14 @@ def build_report(
         fin_matrix = _build_financial_health_matrix(ctx)
         if fin_matrix:
             report["финансовая_матрица"] = fin_matrix
-        if ctx.extras and ctx.extras.licenses:
+        if detail_norm == "full" and ctx.extras and ctx.extras.licenses:
             lic_breakdown = _build_license_breakdown(ctx.extras.licenses)
             if lic_breakdown:
                 report["лицензии_расшифровка"] = lic_breakdown
-        digital_fp = _build_digital_footprint(ctx)
-        if digital_fp:
-            report["цифровой_контур"] = digital_fp
+        if detail_norm == "full":
+            digital_fp = _build_digital_footprint(ctx)
+            if digital_fp:
+                report["цифровой_контур"] = digital_fp
         stat_hr = _build_statutory_hr(ctx)
         if stat_hr:
             report["кадровый_потенциал_документы"] = stat_hr
@@ -1096,6 +1106,7 @@ def build_report(
     report["pending"] = [p.model_dump(mode="json") for p in score.pending]
     if is_debug and score.unmatched_fact_kinds:
         report["факты_без_критерия"] = score.unmatched_fact_kinds
+    report["детализация"] = "средне" if detail_norm == "standard" else "полно"
     report["scored_at"] = score.scored_at.isoformat()
     return report
 

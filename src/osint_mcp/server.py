@@ -405,6 +405,17 @@ def check_coverage(
     return result
 
 
+def _normalize_detail_level(val: str | None) -> str:
+    s = str(val or "").strip().lower()
+    if s in ("brief", "кратко", "коротко", "short", "1"):
+        return "brief"
+    if s in ("standard", "средне", "medium", "стандарт", "обычно", "2"):
+        return "standard"
+    if s in ("full", "полно", "детально", "detailed", "максимум", "3"):
+        return "full"
+    return "standard"
+
+
 async def get_company_report(
     inn: Annotated[
         str,
@@ -417,13 +428,14 @@ async def get_company_report(
         str,
         Field(
             description=(
-                'Объём отчёта: "full" (по умолчанию) — всё собранное, включая карточку, финансы с таблицей, '
-                'налоги, лицензии, реестры, суды, СМИ, сбои и риски; '
-                '"brief" — краткая выжимка (карточка + вердикт + ключевые риски)'
+                'Уровень подробности отчёта (3 уровня):\n'
+                '- "brief" ("кратко") — экспресс-скрининг (светофор, вердикт, баллы, базовая карточка, главные риски, TL;DR);\n'
+                '- "standard" ("средне", по умолчанию) — стандартный аудит (полная карточка, разбор судов, ФССП, налогов, лицензий, кадров, СМИ и первоисточники);\n'
+                '- "full" ("полно") — глубокий Due Diligence (включает глубокие связи/бенефициаров, таможню/ВЭД, гео-отзывы и сети веб-аналитики).'
             ),
-            examples=["brief", "full"],
+            examples=["brief", "standard", "full", "кратко", "средне", "полно"],
         ),
-    ] = "full",
+    ] = "standard",
     include_reputation: Annotated[
         bool,
         Field(
@@ -483,9 +495,7 @@ async def get_company_report(
     )
     from osint_mcp.tools.hr_hub import detect_corporate_hr_hub
 
-    detail_norm = detail.strip().lower() if detail else "brief"
-    if detail_norm not in ("brief", "full"):
-        detail_norm = "brief"
+    detail_norm = _normalize_detail_level(detail)
 
     parsed_inn, parsed_name = extract_inn_and_name(inn)
     clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
@@ -756,10 +766,10 @@ async def get_company_report(
             if is_human:
                 item["сюжет_простыми_словами"] = clean_stmt
             incidents_list.append(item)
-        if detail_norm == "full":
-            result["инциденты_и_сми"] = incidents_list
-        else:
+        if detail_norm == "brief":
             result["инциденты_и_сми"] = incidents_list[:2]
+        else:
+            result["инциденты_и_сми"] = incidents_list
 
         # Выносим ключевые репутационные инциденты и публикации СМИ в warnings,
         # чтобы прямо под оценкой у пользователя не возникало ложного впечатления «золотой репутации»
@@ -786,18 +796,21 @@ async def get_company_report(
             detail=detail_norm,
         )
         if sales_intel:
-            if detail_norm == "full":
-                result["коммерческий_срез"] = sales_intel
-            else:
+            if detail_norm == "brief":
                 result["коммерческий_срез"] = {
                     "формула_бизнеса": sales_intel.get("формула_бизнеса"),
                     "целевой_сегмент": sales_intel.get("целевой_сегмент"),
                     "крючок_для_контакта": sales_intel.get("крючок_для_контакта"),
                 }
+            else:
+                result["коммерческий_срез"] = sales_intel
 
     # Добавляем кликабельные первоисточники для компактного цитирования агентом в markdown
     if context_result.context and context_result.context.source_links:
         result["ссылки"] = [l.model_dump() for l in context_result.context.source_links]
+
+    detail_labels = {"brief": "кратко", "standard": "средне", "full": "полно"}
+    result["детализация"] = detail_labels.get(detail_norm, detail_norm)
     log.info("tool_call", tool="get_company_report", inn=clean_inn,
              detail=detail_norm, verdict=score.verdict.label,
              fiascos=len(fiasco_facts))
@@ -822,13 +835,14 @@ async def generate_full_dossier(
         str,
         Field(
             description=(
-                'Объём досье: "full" (по умолчанию) — полное детальное досье '
-                '(реестры, финансы, суды, связи, таможня, гео, аналитика, СМИ, сбои, риски), '
-                '"brief" — краткая выжимка со светофором и ключевыми риск-факторами'
+                'Уровень подробности досье (3 уровня):\n'
+                '- "brief" ("кратко") — экспресс-скрининг (светофор, вердикт, баллы, базовая карточка, главные риски, TL;DR);\n'
+                '- "standard" ("средне", по умолчанию) — стандартный аудит (полная карточка, разбор судов, ФССП, налогов, лицензий, кадров, СМИ и первоисточники);\n'
+                '- "full" ("полно") — глубокий Due Diligence (включает глубокие связи/бенефициаров, таможню/ВЭД, гео-отзывы и сети веб-аналитики).'
             ),
-            examples=["brief", "full"],
+            examples=["brief", "standard", "full", "кратко", "средне", "полно"],
         ),
-    ] = "full",
+    ] = "standard",
     expected_name: Annotated[
         str | None,
         Field(
