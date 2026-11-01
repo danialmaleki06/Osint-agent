@@ -127,15 +127,38 @@ log = structlog.get_logger()
 
 mcp = MCPServer(SERVER_NAME, version=VERSION)
 
-TOOLS = ["health_check", "validate_inn", "resolve_company",
-         "get_company_context", "collect_risk_facts", "check_affiliations",
-         "check_coverage", "get_company_report", "generate_full_dossier", "check_companies_batch",
-         "get_company_links", "get_verdict", "search_unverified",
-         "review_pending", "check_provider_limits",
-         "list_catalog_sources", "scan_catalog_source",
-         "register_custom_source", "scan_catalog_batch",
-         "check_shared_analytics", "check_customs_ved",
-         "check_geo_reviews", "check_reputation_fiascos"]
+PRIMARY_TOOLS = [
+    "health_check",
+    "generate_full_dossier",
+    "resolve_company",
+    "check_companies_batch",
+    "check_provider_limits",
+    "list_catalog_sources",
+    "scan_catalog_source",
+    "register_custom_source",
+    "scan_catalog_batch",
+    "search_unverified",
+    "review_pending",
+]
+
+GRANULAR_TOOLS = [
+    "validate_inn",
+    "get_company_context",
+    "collect_risk_facts",
+    "check_affiliations",
+    "check_coverage",
+    "get_company_report",
+    "get_company_links",
+    "get_verdict",
+    "check_shared_analytics",
+    "check_customs_ved",
+    "check_geo_reviews",
+    "check_reputation_fiascos",
+]
+
+TOOLS = list(PRIMARY_TOOLS)
+if settings.expose_granular_tools:
+    TOOLS.extend(GRANULAR_TOOLS)
 
 
 
@@ -162,7 +185,6 @@ def health_check() -> ServerHealth:
     )
 
 
-@mcp.tool()
 def validate_inn(
     inn: Annotated[
         str,
@@ -196,13 +218,19 @@ async def resolve_company(
     query: Annotated[
         str,
         Field(
-            description="ИНН, ОГРН или название компании. Например: "
-                        '"7707083893" либо "Ромашка"',
-            examples=["7707083893", "ООО Ромашка", "Сбербанк"],
+            description="Наименование организации для поиска кандидатов и их ИНН. "
+                        'Например: "Ромашка" либо "Сбербанк"',
+            examples=["ООО Ромашка", "Сбербанк"],
         ),
     ],
 ) -> ResolveResult:
-    """Определить организацию по наименованию, ИНН или ОГРН.
+    """Уточнить кандидатов и ИНН по наименованию организации.
+
+    ВНИМАНИЕ ДЛЯ LLM-АГЕНТА:
+    - Вызывай этот инструмент ТОЛЬКО если пользователь дал неточное/неоднозначное НАЗВАНИЕ компании БЕЗ ИНН,
+      и нужно найти список кандидатов, чтобы выбрать правильный ИНН.
+    - ЕСЛИ ИНН ОРГАНИЗАЦИИ УЖЕ ИЗВЕСТЕН — ЗАПРЕЩЕНО ВЫЗЫВАТЬ resolve_company!
+      Сразу вызывай единый инструмент generate_full_dossier(inn=...), он за один вызов вернёт все данные.
 
     Возвращает структуру ResolveResult:
       status: "ok", "multiple", "not_found", "unavailable"
@@ -246,7 +274,6 @@ async def resolve_company(
     return result
 
 
-@mcp.tool()
 async def get_company_context(
     inn: Annotated[
         str,
@@ -278,7 +305,6 @@ async def get_company_context(
     return result
 
 
-@mcp.tool()
 async def check_affiliations(
     inn: Annotated[
         str,
@@ -326,7 +352,6 @@ async def check_affiliations(
     return graph
 
 
-@mcp.tool()
 async def collect_risk_facts(
     inn: Annotated[
         str,
@@ -355,7 +380,6 @@ async def collect_risk_facts(
     return result
 
 
-@mcp.tool()
 def check_coverage(
     inn: Annotated[
         str,
@@ -381,7 +405,6 @@ def check_coverage(
     return result
 
 
-@mcp.tool()
 async def get_company_report(
     inn: Annotated[
         str,
@@ -460,6 +483,10 @@ async def get_company_report(
     )
     from osint_mcp.tools.hr_hub import detect_corporate_hr_hub
 
+    detail_norm = detail.strip().lower() if detail else "brief"
+    if detail_norm not in ("brief", "full"):
+        detail_norm = "brief"
+
     parsed_inn, parsed_name = extract_inn_and_name(inn)
     clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     target_expected_name = expected_name or parsed_name
@@ -536,7 +563,122 @@ async def get_company_report(
                 log.debug("get_company_report_hr_hub_error", error=str(exc))
                 return None
 
-        fiasco_facts, hr_hub_info = await asyncio.gather(_fetch_fiascos(), _fetch_hr_hub())
+        async def _fetch_affiliations():
+            if detail_norm != "full":
+                return None
+            try:
+                graph, _ = await _checko.check_affiliations(clean_inn, deep=True)
+                if graph:
+                    return {
+                        "shareholders_undisclosed": graph.shareholders_undisclosed,
+                        "suspicious_count": graph.suspicious_count,
+                        "owner_organizations": [o.model_dump() for o in graph.owner_organizations],
+                        "people": [p.model_dump() for p in graph.people],
+                        "related_companies": [r.model_dump() for r in graph.related_companies],
+                        "predecessors": [pr.model_dump() for pr in graph.predecessors],
+                    }
+                return None
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_affiliations_error", error=str(exc))
+                return None
+
+        async def _fetch_customs():
+            if not include_reputation or detail_norm != "full":
+                return None
+            try:
+                facts = await asyncio.to_thread(_build_customs_facts, inn=clean_inn, company_name=target_name)
+                if facts:
+                    _quarantine.add(clean_inn, facts)
+                profile = _evaluate_customs_findings(clean_inn, [])
+                interpretation = facts[0].statement if facts else profile.interpretation
+                return {
+                    "has_ved_activity": bool(facts),
+                    "facts_count": len(facts),
+                    "interpretation": interpretation,
+                    "facts": [f.statement for f in facts] if facts else [],
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_customs_error", error=str(exc))
+                return None
+
+        async def _fetch_geo():
+            target_addr = ctx.address_full if ctx else None
+            if not include_reputation or detail_norm != "full" or not target_addr:
+                return None
+            try:
+                facts = await asyncio.to_thread(
+                    _build_geo_reviews_facts,
+                    inn=clean_inn,
+                    company_name=target_name or clean_inn,
+                    address=target_addr,
+                )
+                if facts:
+                    _quarantine.add(clean_inn, facts)
+                interpretation = (
+                    facts[0].statement
+                    if facts
+                    else "Физическое присутствие подтверждено, критических сигналов не выявлено."
+                )
+                return {
+                    "address": target_addr,
+                    "facts_count": len(facts),
+                    "interpretation": interpretation,
+                    "facts": [f.statement for f in facts] if facts else [],
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_geo_error", error=str(exc))
+                return None
+
+        async def _fetch_analytics():
+            if not include_reputation or detail_norm != "full" or not target_domain:
+                return None
+            try:
+                _, tech, err = await _inspect_site_content(target_domain)
+                tracker_ids = tech.tracker_ids if tech else {}
+                if not tracker_ids:
+                    return None
+                facts = await asyncio.to_thread(
+                    _build_analytics_affiliation_facts,
+                    domain=target_domain,
+                    tracker_ids=tracker_ids,
+                    subject_inn=clean_inn,
+                )
+                if facts:
+                    _quarantine.add(clean_inn, facts)
+                networks = []
+                for f in facts:
+                    networks.append({
+                        "tracker_type": f.payload.get("tracker_type"),
+                        "tracker_id": f.payload.get("tracker_id"),
+                        "shared_domains": f.payload.get("shared_domains"),
+                        "is_probable_holding": f.payload.get("is_probable_holding"),
+                        "interpretation": f.payload.get("interpretation"),
+                        "statement": f.statement,
+                    })
+                return {
+                    "site": target_domain,
+                    "tracker_ids": tracker_ids,
+                    "shared_networks": networks,
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_analytics_error", error=str(exc))
+                return None
+
+        (
+            fiasco_facts,
+            hr_hub_info,
+            affiliations_info,
+            customs_info,
+            geo_info,
+            analytics_info,
+        ) = await asyncio.gather(
+            _fetch_fiascos(),
+            _fetch_hr_hub(),
+            _fetch_affiliations(),
+            _fetch_customs(),
+            _fetch_geo(),
+            _fetch_analytics(),
+        )
 
     if context_result.context:
         risk.facts.extend(_extract_financial_risk_facts(context_result.context))
@@ -571,9 +713,7 @@ async def get_company_report(
         for f in fiasco_facts:
             if f not in score.pending:
                 score.pending.append(f)
-    detail_norm = detail.strip().lower()
-    if detail_norm not in ("brief", "full"):
-        detail_norm = "brief"
+# detail_norm already normalized at function start
     is_debug = debug or getattr(settings, "osint_debug", False)
     is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
     result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human)
@@ -587,6 +727,16 @@ async def get_company_report(
         result["кадровый_хаб_холдинга"] = hr_hub_info
         if "кадровый_потенциал_документы" in result:
             result["кадровый_потенциал_документы"]["кадровый_хаб_холдинга"] = hr_hub_info
+
+    # Прикрепляем корпоративные связи, таможню, гео и аналитику
+    if affiliations_info:
+        result["связи_и_аффилированность"] = affiliations_info
+    if customs_info:
+        result["вэд_и_таможня"] = customs_info
+    if geo_info:
+        result["гео_и_отзывы"] = geo_info
+    if analytics_info:
+        result["веб_аналитика_и_сеть"] = analytics_info
 
     # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
     if fiasco_facts:
@@ -659,15 +809,21 @@ async def generate_full_dossier(
     inn: Annotated[
         str,
         Field(
-            description="ИНН организации (10 или 12 цифр)",
-            examples=["7724744134"],
+            description=(
+                "ИНН организации (10 или 12 цифр) либо наименование компании. "
+                "ЕДИНЫЙ ГЛАВНЫЙ ИНСТРУМЕНТ ПРОВЕРКИ КОНТРАГЕНТА. "
+                "Если передан ИНН — сразу формирует полное досье за 1 вызов. "
+                "Если передано название — автоматически определяет организацию и формирует досье."
+            ),
+            examples=["7724744134", "7707083893", "ООО Вайлдберриз"],
         ),
     ],
     detail: Annotated[
         str,
         Field(
             description=(
-                'Объём досье: "full" (по умолчанию) — полное детальное досье (карточка, финансы, суды, СМИ, сбои, риски), '
+                'Объём досье: "full" (по умолчанию) — полное детальное досье '
+                '(реестры, финансы, суды, связи, таможня, гео, аналитика, СМИ, сбои, риски), '
                 '"brief" — краткая выжимка со светофором и ключевыми риск-факторами'
             ),
             examples=["brief", "full"],
@@ -699,30 +855,66 @@ async def generate_full_dossier(
         ),
     ] = None,
 ) -> dict:
-    """Единый фасад для мгновенного сбора полного OSINT-досье на контрагента за 1 вызов.
+    """ГЛАВНЫЙ ЕДИНЫЙ ИНСТРУМЕНТ ПРОВЕРКИ КОНТРАГЕНТА. ВСЕГДА ВЫЗЫВАЙ ЕГО, ЕСЛИ ИЗВЕСТЕН ИНН.
 
-    Объединяет в один параллельный прогон:
+    Выполняет исчерпывающий OSINT-аудит организации ЗА ОДИН ВЫЗОВ:
     - Официальные реестры (ЕГРЮЛ, ФНС, ГИР БО, Реестр МСП, Минцифры)
     - Арбитраж, исполнительные производства ФССП, проверки и реестровые метки
-    - Кадровый контур и наём (HeadHunter)
-    - Инфраструктуру (WHOIS, DNS, SSL, технологии сайта)
-    - Глубокий OSINT-поиск инцидентов, ЧП, уголовных дел, сбоев и споров с подрядчиками
-      (РБК, Коммерсантъ, Ведомости, VC.ru, Хабр, Пикабу, чёрные списки)
-    - Расчёт детерминированного вердикта риска со светофором (🟢/🟡/🟠/⛔).
-    - Query Guard: выявление расхождения запрошенного названия и данных реестра по ИНН.
-    - Corporate HR Hub: детекция централизованного хаба найма холдинга при 0 вакансий на основном юрлице.
+    - Корпоративные связи, учредители, бенефициары и аффилированность
+    - Таможня и внешнеэкономическая деятельность (ВЭД, импорт/экспорт)
+    - Картографический OSINT, фактическое присутствие и семантика отзывов
+    - Цифровая инфраструктура и общие сети веб-аналитики (Яндекс.Метрика / Google Analytics)
+    - Кадровый контур и наём (HeadHunter, HR-хаб холдинга)
+    - Глубокий OSINT-поиск инцидентов, ЧП, аварий, сбоев и публикаций в СМИ
+    - Детерминированный скоринговый вердикт со светофором (🟢/🟡/🟠/⛔) и баллами.
+
+    Возвращает исчерпывающий структурированный JSON со всеми фактами, оценками и ссылками на первоисточники.
+    Никаких дополнительных вызовов других инструментов после этого НЕ ТРЕБУЕТСЯ.
     """
+    parsed_inn, parsed_name = _extract_inn_and_name(inn)
+    raw_candidate = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
+    probe = _validate_inn(raw_candidate)
+    if not probe.valid:
+        # Запрос не является валидным ИНН — пробуем разрешить организацию по наименованию
+        resolve_res = await _source.resolve(inn)
+        if resolve_res.status == "ok" and resolve_res.confidence in ("high", "medium") and resolve_res.candidates:
+            clean_inn = resolve_res.candidates[0].inn
+            target_expected = expected_name or resolve_res.candidates[0].name or parsed_name
+        elif resolve_res.confidence == "low" and len(resolve_res.candidates) > 1:
+            return {
+                "status": "multiple_candidates",
+                "query": inn,
+                "confidence": resolve_res.confidence,
+                "total_found": resolve_res.total_found,
+                "candidates": [c.model_dump() for c in resolve_res.candidates],
+                "hint": (
+                    "По запросу найдено несколько действующих организаций. "
+                    "Уточните нужную компанию или вызовите generate_full_dossier с конкретным ИНН."
+                ),
+            }
+        elif resolve_res.status in ("not_found", "unavailable") or resolve_res.confidence == "none" or not resolve_res.candidates:
+            return {
+                "status": resolve_res.status if resolve_res.status != "ok" else "not_found",
+                "query": inn,
+                "hint": resolve_res.hint or "Организация по данному наименованию не найдена.",
+            }
+        else:
+            clean_inn = raw_candidate
+            target_expected = expected_name or parsed_name
+    else:
+        clean_inn = probe.inn
+        target_expected = expected_name or parsed_name
+
     return await get_company_report(
-        inn=inn,
+        inn=clean_inn,
         detail=detail,
         include_reputation=True,
-        expected_name=expected_name,
+        expected_name=target_expected,
         debug=debug,
         human_mode=human_mode,
     )
 
 
-@mcp.tool()
 async def get_company_links(
     inn: Annotated[
         str,
@@ -873,7 +1065,6 @@ async def check_companies_batch(
     }
 
 
-@mcp.tool()
 async def get_verdict(
     inn: Annotated[
         str,
@@ -1398,7 +1589,6 @@ async def scan_catalog_batch(
     }
 
 
-@mcp.tool()
 async def check_shared_analytics(
     inn: Annotated[
         str,
@@ -1496,7 +1686,6 @@ async def check_shared_analytics(
     }
 
 
-@mcp.tool()
 async def check_customs_ved(
     inn: Annotated[
         str,
@@ -1555,7 +1744,6 @@ async def check_customs_ved(
     }
 
 
-@mcp.tool()
 async def check_geo_reviews(
     inn: Annotated[
         str,
@@ -1623,7 +1811,6 @@ async def check_geo_reviews(
     }
 
 
-@mcp.tool()
 async def check_reputation_fiascos(
     inn: Annotated[
         str,
@@ -1740,6 +1927,24 @@ async def check_reputation_fiascos(
         "added_to_quarantine": added_to_quarantine,
         "incidents": incidents_summary,
     }
+
+
+if settings.expose_granular_tools:
+    for _fn in (
+        validate_inn,
+        get_company_context,
+        check_affiliations,
+        collect_risk_facts,
+        check_coverage,
+        get_company_report,
+        get_company_links,
+        get_verdict,
+        check_shared_analytics,
+        check_customs_ved,
+        check_geo_reviews,
+        check_reputation_fiascos,
+    ):
+        mcp.tool()(_fn)
 
 
 def _serve_http() -> None:

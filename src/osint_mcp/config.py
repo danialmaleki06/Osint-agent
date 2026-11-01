@@ -100,6 +100,11 @@ class Settings(BaseSettings):
         validation_alias="OSINT_HUMAN_MODE",
         description="Человеческий язык отчёта: понятные формулировки, TL;DR-резюме и сюжетные карточки вместо канцелярита и аббревиатур",
     )
+    expose_granular_tools: bool = Field(
+        default=False,
+        validation_alias="OSINT_EXPOSE_GRANULAR_TOOLS",
+        description="Экспортировать ли низкоуровневые промежуточные инструменты в MCP-реестр (по умолчанию false)",
+    )
 
     # Списочные методы Checko и Федресурса отдают записи постранично. У крупных
     # организаций страниц бывают тысячи — выкачать всё нельзя. Берём первые

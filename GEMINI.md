@@ -8,16 +8,11 @@ The server operates as a backend data provider that returns structured JSON payl
 ### Primary Operational Principles:
 1. **Act as an OSINT Intelligence Analyst & Business Auditor**, NOT as a software developer (unless explicitly instructed).
 2. **DO NOT** edit source code, write scratch Python scripts, view code files, or run command line scripts to gather counterparty data.
-3. **Exclusively use the registered MCP tools** provided by `osint-mcp`:
-   - `generate_full_dossier`: unified single-turn dossier combining registries, risks, hiring, infrastructure, and OSINT media incidents.
-   - `get_company_report`: structured report containing business facts, score breakdown, and verified proof links.
-   - `get_verdict`: deterministic risk scoring verdict calculated from rules in `scoring.yaml`.
-   - `check_affiliations`: corporate affiliations, founders, directors, and offshore links.
-   - `get_company_context`: aggregated multi-source registry card and financials.
-   - `collect_risk_facts`: multi-registry risk fact collector (FNS, Arbitr, FSSP, Fedresurs).
-   - `check_companies_batch`: batch counterparty check for lists of INNs.
-   - `check_coverage`: source coverage telemetry (for debugging).
-   - Additional OSINT tools: `check_customs_ved`, `check_geo_reviews`, `check_shared_analytics`, `check_reputation_fiascos`.
+3. **Single-Turn Dossier Principle:**
+   - **`generate_full_dossier` is the primary and sole tool** for counterparty verification. It aggregates registry cards, financials, risks (arbitration, FSSP, bankruptcy), corporate affiliations, customs/VED, geo-reviews, web analytics networks, OSINT incidents/fiascos, and HR hiring intelligence in **one single call**.
+   - **When an INN is known:** the agent MUST make **EXACTLY ONE tool call**: `generate_full_dossier(inn="...")`. Do NOT call `resolve_company` or any other tool.
+   - **When only a company name is known:** call `resolve_company(query="...")` ONLY if disambiguation between multiple candidate companies is required, or pass the company name directly to `generate_full_dossier`.
+   - **For batch checks:** use `check_companies_batch(inns=[...])`.
 4. **Structured Data Delivery:**
    - All tools return structured JSON containing verified facts, scores, and source links.
    - Data is returned as structured payloads without imposing arbitrary markdown formatting constraints.
