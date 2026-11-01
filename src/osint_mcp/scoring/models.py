@@ -140,7 +140,7 @@ class SearchUnverifiedResult(BaseModel):
     hits: list[PendingFact] = Field(
         description="Сами находки — каждая с source_url",
     )
-    note: str = Field(description="Как агенту показывать находки пользователю")
+    note: str = Field(description="Пояснение к результатам поиска")
 
 
 class ScoreResult(BaseModel):
@@ -158,19 +158,13 @@ class ScoreResult(BaseModel):
     pending: list[PendingFact] = Field(
         default_factory=list,
         description=(
-            "Карантин: находки из нереестровых источников. В verdict НЕ "
-            "входят. Каждая с ссылкой. Агент обязан показать их пользователю "
-            "отдельным блоком «не проверено» — показать и предложить проверить"
+            "Карантин: находки из нереестровых источников со ссылками. В verdict не входят."
         ),
     )
     warnings: list[str] = Field(
         default_factory=list,
         description=(
-            "Тяжёлые негативные факторы, о которых нужно предупредить "
-            "НЕЗАВИСИМО от вердикта. Заполняется критериями с "
-            "warn_always: true. Даже при оценке «отлично» этот список "
-            "обязан быть доведён до пользователя — иначе положительный "
-            "вердикт скроет существенный риск"
+            "Критические негативные факторы безусловного оповещения (warn_always: true)."
         ),
     )
     unmatched_fact_kinds: list[str] = Field(
