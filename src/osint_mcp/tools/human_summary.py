@@ -59,6 +59,7 @@ def build_human_summary(
     risk: "RiskCollection | None",
     score: "ScoreResult",
     media_info: dict[str, Any] | None = None,
+    competitors_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Сформировать человекочитаемое резюме и ответы на 3 ключевых вопроса."""
     is_ip = False
@@ -212,6 +213,12 @@ def build_human_summary(
         q1_lines.append(f"• Масштаб деятельности: {', '.join(scale_facts)} ({size_desc}).")
     if ctx and ctx.city:
         q1_lines.append(f"• География: {ctx.city}.")
+    if competitors_info:
+        comp_list = competitors_info.get("конкуренты") or []
+        if comp_list:
+            comp_names = [c.get("конкурент") or c.get("бренд") for c in comp_list if c.get("конкурент") or c.get("бренд")]
+            if comp_names:
+                q1_lines.append(f"• Конкурентное окружение: ключевые соперники на рынке — {', '.join(comp_names[:3])}.")
 
     if profit is not None:
         profit_str = f"чистая прибыль {_fmt_rub(profit)}" if profit >= 0 else f"чистый убыток {_fmt_rub(abs(profit))}"

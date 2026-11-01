@@ -78,6 +78,9 @@ from osint_mcp.context.reputation_fiascos import (
 from osint_mcp.context.news_media import (
     fetch_company_media_presence as _fetch_company_media_presence,
 )
+from osint_mcp.context.competitors import (
+    fetch_company_competitors as _fetch_company_competitors,
+)
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
 from osint_mcp.tools.query_guard import (
     extract_inn_and_name as _extract_inn_and_name,
@@ -536,6 +539,7 @@ async def get_company_report(
     fiasco_facts = []
     hr_hub_info = None
     news_media_info = None
+    competitors_info = None
     if context_result.context:
         ctx = context_result.context
         from osint_mcp.tools.names import core_name
@@ -696,6 +700,21 @@ async def get_company_report(
                 log.warning("get_company_report_news_media_error", error=str(exc))
                 return None
 
+        async def _fetch_competitors():
+            try:
+                products = [p.name for p in (ctx.software_products or [])]
+                return await _fetch_company_competitors(
+                    company_name=target_name or clean_inn,
+                    brand=brand_to_use,
+                    okved_text=ctx.okved_text,
+                    okved_code=ctx.okved_code,
+                    products=products,
+                    detail=detail_norm,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_company_report_competitors_error", error=str(exc))
+                return None
+
         (
             fiasco_facts,
             hr_hub_info,
@@ -704,6 +723,7 @@ async def get_company_report(
             geo_info,
             analytics_info,
             news_media_info,
+            competitors_info,
         ) = await asyncio.gather(
             _fetch_fiascos(),
             _fetch_hr_hub(),
@@ -712,6 +732,7 @@ async def get_company_report(
             _fetch_geo(),
             _fetch_analytics(),
             _fetch_news_media(),
+            _fetch_competitors(),
         )
 
     if context_result.context:
@@ -750,7 +771,7 @@ async def get_company_report(
 # detail_norm already normalized at function start
     is_debug = debug or getattr(settings, "osint_debug", False)
     is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
-    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=news_media_info)
+    result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=news_media_info, competitors_info=competitors_info)
 
     # Прикрепляем расхождение запроса (если обнаружено)
     if query_discrepancy:
@@ -773,6 +794,8 @@ async def get_company_report(
         result["веб_аналитика_и_сеть"] = analytics_info
     if news_media_info:
         result["медиа_и_публичная_активность"] = news_media_info
+    if competitors_info:
+        result["конкуренты_и_рынок"] = competitors_info
 
     # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
     if fiasco_facts:
