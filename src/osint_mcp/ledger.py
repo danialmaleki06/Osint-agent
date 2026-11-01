@@ -17,9 +17,11 @@
 параллельные проверки записываются правильно.
 """
 
-from contextvars import ContextVar
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Iterator
 from typing import Literal
 
 Outcome = Literal["ok", "empty", "failed"]
@@ -52,9 +54,24 @@ _session: dict[str, int] = {}
 _daily_seen: dict[str, int] = {}
 
 
-def set_subject(inn: str | None) -> None:
-    """Указать, ради какой организации идут дальнейшие обращения."""
-    _subject.set(inn)
+def set_subject(inn: str | None) -> Token[str | None]:
+    """Установить организацию и вернуть токен для последующего сброса.
+
+    Предпочтительно использовать ``subject_scope``: он гарантирует сброс
+    контекста даже при исключении. Возвращаемый токен оставлен для кода,
+    которому нужен ручной контроль жизненного цикла.
+    """
+    return _subject.set(inn)
+
+
+@contextmanager
+def subject_scope(inn: str | None) -> Iterator[None]:
+    """Временно привязать обращения к организации в текущем async-контексте."""
+    token = _subject.set(inn)
+    try:
+        yield
+    finally:
+        _subject.reset(token)
 
 
 def record(

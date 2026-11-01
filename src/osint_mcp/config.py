@@ -30,13 +30,20 @@ class Settings(BaseSettings):
     def _allow_list(cls, v: str) -> str:
         """Принять и формат с несколькими ключами, и JSON-список."""
         s = (v or "").strip()
-        if s.startswith("[") and s.endswith("]"):
+        if s.startswith("["):
             import json
 
             try:
-                return ",".join(str(x) for x in json.loads(s))
-            except ValueError:
-                return s
+                parsed = json.loads(s)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Ожидается корректный JSON-массив строк") from exc
+
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, str) for item in parsed
+            ):
+                raise ValueError("Список API-ключей должен быть JSON-массивом строк")
+
+            return ",".join(item.strip() for item in parsed if item.strip())
         return s
 
     def dadata_key_pool(self) -> list[str]:

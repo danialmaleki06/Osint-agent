@@ -19,6 +19,10 @@
 """
 
 import time
+from collections.abc import Callable, Iterable
+from functools import wraps
+from threading import RLock
+from typing import Any
 
 import structlog
 
@@ -40,16 +44,32 @@ class QuotaExhausted(RuntimeError):
 EXHAUST_TTL = 20 * 3600
 
 
+def _synchronized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Сериализовать операции над состоянием одного пула ключей."""
+    @wraps(method)
+    def wrapper(self: "KeyPool", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class KeyPool:
     """Ключи одного сервиса с автоматической ротацией."""
 
-    def __init__(self, service: str, getter, ttl: float = EXHAUST_TTL) -> None:
+    def __init__(
+        self,
+        service: str,
+        getter: Callable[[], Iterable[str | None]],
+        ttl: float = EXHAUST_TTL,
+    ) -> None:
         self._service = service
         self._getter = getter
         self._ttl = ttl
         self._cursor: str | None = None
         self._exhausted_until: dict[str, float] = {}
         self._log = structlog.get_logger()
+        self._lock = RLock()
 
     # ─────────────────────────  чтение ключей  ─────────────────────────
 
@@ -82,6 +102,7 @@ class KeyPool:
     def has_keys(self) -> bool:
         return bool(self.keys())
 
+    @_synchronized
     def current(self) -> str:
         """Ключ для следующего запроса. Без ключей — внятная ошибка.
 
@@ -98,7 +119,7 @@ class KeyPool:
                 f"Не задан ключ {name}: заполните {name}_API_KEY "
                 f"или {name}_API_KEYS в .env."
             )
-        now = time.time()
+        now = time.monotonic()
         usable = [k for k in keys if self._exhausted_until.get(k, 0) <= now]
         if usable:
             candidates = usable
@@ -114,12 +135,14 @@ class KeyPool:
 
     # ─────────────────────────  ротация  ───────────────────────────────
 
+    @_synchronized
     def mark_exhausted(self, key: str, reason: str | None = None) -> None:
         """Считать ключ израсходованным до конца суточного окна."""
-        self._exhausted_until[key] = time.time() + self._ttl
+        self._exhausted_until[key] = time.monotonic() + self._ttl
         self._log.info("key_exhausted", service=self._service,
                        key=f"…{key[-4:]}", reason=reason)
 
+    @_synchronized
     def rotate(self, reason: str | None = None) -> bool:
         """Пометить текущий негодным и перейти к следующему.
 
@@ -134,7 +157,7 @@ class KeyPool:
             # первый ключ и есть текущий.
             self._cursor = keys[0]
         self.mark_exhausted(self._cursor, reason)
-        now = time.time()
+        now = time.monotonic()
         nxt = next(
             (k for k in keys
              if k != self._cursor and self._exhausted_until.get(k, 0) <= now),
@@ -150,15 +173,17 @@ class KeyPool:
 
     # ─────────────────────────  диагностика  ───────────────────────────
 
-    def status(self) -> list[dict]:
+    @_synchronized
+    def status(self) -> list[dict[str, str]]:
         """Состав пула для логов и отчёта: без самих ключей, только хвосты."""
-        now = time.time()
+        now = time.monotonic()
         return [
             {"key": f"…{k[-4:]}",
              "state": "exhausted" if self._exhausted_until.get(k, 0) > now else "ok"}
             for k in self.keys()
         ]
 
+    @_synchronized
     def reset(self) -> None:
         """Только для тестов: забыть курсор и пометки об исчерпании."""
         self._cursor = None

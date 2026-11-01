@@ -83,10 +83,33 @@ from osint_mcp.tools.query_guard import (
 )
 
 
-# Карантин переживает перезапуски сервера: SQLite рядом с конфигом.
-_QUARANTINE_PATH = Path(__file__).parent / "config_data" / "quarantine.db"
-_QUARANTINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-_quarantine = QuarantineStore(_QUARANTINE_PATH)
+class _LazyQuarantineStore:
+    """Создаёт SQLite-хранилище при первом обращении, а не при импорте.
+
+    Это позволяет импортировать модуль для introspection и тестов без
+    побочных эффектов на файловой системе.
+    """
+
+    def __init__(self) -> None:
+        from threading import RLock
+
+        self._lock = RLock()
+        self._store: QuarantineStore | None = None
+
+    def _get_store(self) -> QuarantineStore:
+        if self._store is None:
+            with self._lock:
+                if self._store is None:
+                    path = Path(__file__).parent / "config_data" / "quarantine.db"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    self._store = QuarantineStore(path)
+        return self._store
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_store(), name)
+
+
+_quarantine = _LazyQuarantineStore()
 
 SERVER_NAME = "osint-mcp"
 VERSION = "0.4.0"
