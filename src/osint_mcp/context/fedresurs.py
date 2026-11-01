@@ -64,6 +64,25 @@ _TITLE_KINDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("факторинг", "уступка денежного требования"), "factoring"),
     (("независимая гарантия", "независимых гарантий", "независимой гарантии"), "guarantee"),
     (("членство в сро", "саморегулируемой организаци", "саморегулируемая организация"), "sro_membership"),
+    (
+        (
+            "конкурсн",
+            "введение наблюдения",
+            "признание должника банкротом",
+            "признании должника банкротом",
+            "ходе конкурсного производства",
+            "арбитражн управляющ",
+            "требований кредитора",
+            "собрания кредиторов",
+            "комитета кредиторов",
+            "имущества должника",
+            "оспаривании сделок",
+            "результатах торгов",
+            "объявлении торгов",
+        ),
+        "bankruptcy",
+    ),
+    (("недостоверност",), "registry_flag"),
 )
 
 # Классификация только по заголовку: в тексте сообщения слова «залог»
@@ -76,6 +95,8 @@ _KIND_TITLES: dict[str, str] = {
     "factoring": "Договор факторинга",
     "guarantee": "Независимая гарантия",
     "sro_membership": "Членство в СРО",
+    "bankruptcy": "Банкротство (сообщение ЕФРСБ)",
+    "registry_flag": "Недостоверность сведений",
 }
 
 
@@ -84,6 +105,11 @@ def _classify(title: str | None) -> str | None:
     if not title:
         return None
     lowered = title.lower()
+    # Уведомления о намерениях («Намерение кредитора/должника обратиться в суд»)
+    # являются обязательным информационным шагом по ст. 7.1 127-ФЗ, но НЕ
+    # означают открытую процедуру банкротства.
+    if "намерени" in lowered:
+        return "fedresurs_publication"
     for needles, kind in _TITLE_KINDS:
         if any(n in lowered for n in needles):
             return kind
@@ -219,13 +245,13 @@ class FedresursSource:
         for i, rec in enumerate(records[:MAX_PUBLICATIONS], 1):
             if not isinstance(rec, dict):
                 continue
-            title = rec.get("title") or None
+            if rec.get("isAnnuled") or rec.get("isRefuted"):
+                continue
+            title = rec.get("title") or rec.get("type") or None
             kind = _classify(title)
             pub_guid = rec.get("guid") or ""
             message_type = rec.get("type") or ""
             if not kind and message_type not in ("SfactMessage",):
-                # Банкротные сообщения и торги приходят с Checko; здесь
-                # интересны только существенные факты и опознанные виды.
                 continue
             if not kind and message_type == "SfactMessage":
                 # Существенный факт без опознанного вида — сохраняем как есть
@@ -245,6 +271,9 @@ class FedresursSource:
                 payload={
                     "kind": kind or "publication",
                     "title": title,
+                    "flag": title or "Недостоверность",
+                    "status": title or "",
+                    "Тип": title or "банкротство",
                     "message_type": message_type,
                     "publisher": rec.get("publisherName"),
                     "published_at": rec.get("datePublish"),

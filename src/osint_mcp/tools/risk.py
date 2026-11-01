@@ -228,6 +228,36 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
             return f"{val / 1_000:.0f} тыс. ₽"
         return f"{val:,.0f} ₽".replace(",", " ")
 
+    # 0. Статус правоспособности в ЕГРЮЛ (ликвидация, прекращение, реорганизация, банкротство)
+    if ctx.status:
+        st_lower = ctx.status.lower()
+        if any(w in st_lower for w in ("ликвид", "прекращ", "реорганиз", "исключ")):
+            facts.append(
+                ExtFact(
+                    fact_id="CTX-STATUS-LIQUIDATED",
+                    kind="registry_flag",
+                    statement=f"Организация не действует: статус ЕГРЮЛ «{ctx.status}»",
+                    source_url=f"https://egrul.nalog.ru/",
+                    source_type="registry_api",
+                    trust="registry",
+                    retrieved_at=datetime.now(timezone.utc),
+                    payload={"status": ctx.status, "flag": "ликвидация"},
+                )
+            )
+        elif "банкрот" in st_lower:
+            facts.append(
+                ExtFact(
+                    fact_id="CTX-STATUS-BANKRUPT",
+                    kind="bankruptcy",
+                    statement=f"Процедура банкротства: статус ЕГРЮЛ «{ctx.status}»",
+                    source_url=f"https://fedresurs.ru/",
+                    source_type="registry_api",
+                    trust="registry",
+                    retrieved_at=datetime.now(timezone.utc),
+                    payload={"status": ctx.status, "Тип": "банкротство"},
+                )
+            )
+
     # 1. Отрицательные чистые активы (ст. 20 14-ФЗ)
     if ctx.fin_history:
         latest = ctx.fin_history[0]
