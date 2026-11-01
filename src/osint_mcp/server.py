@@ -580,6 +580,8 @@ async def get_company_report(
                 graph, _ = await _checko.check_affiliations(clean_inn, deep=True)
                 if graph:
                     return {
+                        "subject_inn": clean_inn,
+                        "deep": True,
                         "shareholders_undisclosed": graph.shareholders_undisclosed,
                         "suspicious_count": graph.suspicious_count,
                         "owner_organizations": [o.model_dump() for o in graph.owner_organizations],
@@ -808,6 +810,32 @@ async def get_company_report(
     # Добавляем кликабельные первоисточники для компактного цитирования агентом в markdown
     if context_result.context and context_result.context.source_links:
         result["ссылки"] = [l.model_dump() for l in context_result.context.source_links]
+
+    # Прикрепляем атомные факты проверки (Fact)
+    if detail_norm == "full" and risk and risk.facts:
+        result["факты_проверки"] = [
+            {
+                "fact_id": f.fact_id,
+                "kind": f.kind,
+                "statement": f.statement,
+                "source_url": f.source_url,
+                "source_type": f.source_type,
+                "event_date": f.event_date.isoformat() if f.event_date else None,
+            }
+            for f in risk.facts
+        ]
+
+    # Прикрепляем сводку полноты проверки (CoverageReport)
+    if detail_norm in ("standard", "full") or is_debug:
+        coverage_rep = _build_coverage(clean_inn)
+        if coverage_rep and coverage_rep.checked:
+            result["охват_проверки"] = {
+                "всего_запросов": coverage_rep.total_requests,
+                "методы_успешно": coverage_rep.methods_ok,
+                "методы_не_ответили": coverage_rep.methods_failed,
+                "собранные_сведения": coverage_rep.obtained,
+                "пробелы_в_данных": [g.model_dump() for g in coverage_rep.gaps] if coverage_rep.gaps else [],
+            }
 
     detail_labels = {"brief": "кратко", "standard": "средне", "full": "полно"}
     result["детализация"] = detail_labels.get(detail_norm, detail_norm)

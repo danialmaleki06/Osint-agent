@@ -433,6 +433,7 @@ class CompanyContext(BaseModel):
         ),
     )
     ogrn: str | None = Field(default=None, description="ОГРН")
+    kpp: str | None = Field(default=None, description="КПП организации")
     name_legal: str = Field(description="Полное наименование по ЕГРЮЛ")
     name_short: str | None = Field(default=None, description="Краткое наименование")
     status: str | None = Field(default=None, description="Статус организации")
@@ -451,6 +452,7 @@ class CompanyContext(BaseModel):
         description="ФИО руководителя. Используется и как якорь, и как отрицательный признак",
     )
     director_post: str | None = Field(default=None, description="Должность руководителя")
+    director_inn: str | None = Field(default=None, description="ИНН руководителя")
     founders: list[str] = Field(default_factory=list, description="Учредители")
     okved_code: str | None = Field(default=None, description="Основной код ОКВЭД")
     okved_text: str | None = Field(default=None, description="Расшифровка ОКВЭД")

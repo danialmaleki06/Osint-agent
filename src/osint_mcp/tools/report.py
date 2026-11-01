@@ -991,23 +991,39 @@ def build_report(
         }
         if ctx is not None:
             is_ip = len(str(ctx.inn or "")) == 12 or getattr(ctx, "entity_type", "") == "individual_entrepreneur"
-            card_data = {
+            raw_card = {
                 "наименование": ctx.name_legal,
+                "краткое_наименование": ctx.name_short,
                 "ИНН": ctx.inn,
+                "КПП": getattr(ctx, "kpp", None),
                 "ОГРН": ctx.ogrn,
                 "тип_субъекта": "Индивидуальный предприниматель (ИП)" if is_ip else "Юридическое лицо",
-                **{k: v for k, v in {
-                    "город": ctx.city,
-                    "статус": (ctx.status + " (зарегистрирован в ЕГРИП)") if (is_ip and ctx.status == "Действует") else ctx.status,
-                    "деятельность": ctx.okved_text or ctx.okved_code,
-                    "выручка_последний_год": ctx.revenue_latest,
-                    "численность": ctx.employees,
-                    "руководитель": ctx.director_fio or (ctx.name_legal if is_ip else None),
-                }.items() if v is not None},
+                "статус": (ctx.status + " (зарегистрирован в ЕГРИП)") if (is_ip and ctx.status == "Действует") else ctx.status,
+                "дата_регистрации": _fmt_date(ctx.registered_at),
+                "уставный_капитал": ctx.capital,
+                "город": ctx.city,
+                "регион": ctx.region,
+                "адрес": ctx.address_full,
+                "страна": ctx.country if ctx.country and ctx.country != "RU" else None,
+                "деятельность": ctx.okved_text or ctx.okved_code,
+                "оквэд_код": ctx.okved_code,
+                "оквэд_текст": ctx.okved_text,
+                "выручка_последний_год": ctx.revenue_latest,
+                "численность": ctx.employees,
+                "руководитель": ctx.director_fio or (ctx.name_legal if is_ip else None),
+                "должность_руководителя": ctx.director_post,
+                "инн_руководителя": getattr(ctx, "director_inn", None),
+                "учредители": ctx.founders,
+                "филиалы": ctx.branches,
+                "представительства": ctx.representative_offices,
+                "прежние_наименования": ctx.former_names,
             }
             if is_ip and ctx.ogrn:
-                card_data["ОГРНИП"] = ctx.ogrn
-            report["карточка"] = card_data
+                raw_card["ОГРНИП"] = ctx.ogrn
+            report["карточка"] = {
+                k: v for k, v in raw_card.items()
+                if v is not None and v != [] and v != ""
+            }
         report["риски_кратко"] = _summary_lines(risk, score, debug=is_debug)
         if ctx is not None:
             fin_matrix = _build_financial_health_matrix(ctx)
@@ -1060,9 +1076,11 @@ def build_report(
     report = build_report("brief", context_result, risk, score, debug=is_debug, human_mode=is_human)
     report.pop("scored_at", None)
 
-    report["карточка"]["адрес"] = ctx.address_full if ctx else None
     if ctx is not None:
-        report["карточка"]["учредители"] = ctx.founders
+        if ctx.address_full and "адрес" not in report["карточка"]:
+            report["карточка"]["адрес"] = ctx.address_full
+        if ctx.founders and "учредители" not in report["карточка"]:
+            report["карточка"]["учредители"] = ctx.founders
         if ctx.brand_resolved:
             report["карточка"]["рыночное_наименование"] = ctx.brand
             report["карточка"]["сайт"] = ctx.brand_domain or (
@@ -1074,6 +1092,102 @@ def build_report(
                 report["карточка"]["описание"] = ctx.brand_summary
         if ctx.size_category != "unknown":
             report["карточка"]["масштаб"] = ctx.size_category
+
+        # ── Финансовая история по годам (структурированная) ──
+        if ctx.fin_history:
+            fin_hist = []
+            for y in ctx.fin_history:
+                yd = y.model_dump(exclude={"report_url"})
+                fin_hist.append({k: v for k, v in yd.items() if v is not None})
+            if fin_hist:
+                report["финансовая_история"] = fin_hist
+
+        # ── События ЕГРЮЛ ──
+        if ctx.events:
+            ev_list = [
+                {"дата": _fmt_date(ev.event_date), "событие": ev.event}
+                for ev in ctx.events if ev.event
+            ]
+            if ev_list:
+                report["события_егрюл"] = ev_list
+
+        # ── Реестр МСП ──
+        if ctx.msp and ctx.msp.in_registry:
+            msp_data = {
+                k: v for k, v in {
+                    "в_реестре": ctx.msp.in_registry,
+                    "категория": ctx.msp.category,
+                    "численность": ctx.msp.employees,
+                    "дата_включения": _fmt_date(ctx.msp.included_at),
+                    "действует": ctx.msp.is_active,
+                }.items() if v is not None
+            }
+            if msp_data:
+                report["реестр_мсп"] = msp_data
+
+        # ── Реестровые дополнения: налоги, контакты, товарные знаки ──
+        if ctx.extras:
+            e = ctx.extras
+            extras_dict = {}
+            if e.tax_debt is not None:
+                extras_dict["задолженность_по_налогам"] = e.tax_debt
+            if e.tax_paid_total is not None:
+                extras_dict["уплачено_налогов"] = e.tax_paid_total
+                extras_dict["отчётный_год_налогов"] = e.tax_year
+            if e.tax_mode:
+                extras_dict["налоговые_режимы"] = e.tax_mode
+            if e.okved_extra:
+                extras_dict["дополнительные_оквэд"] = e.okved_extra
+            if e.trademarks:
+                extras_dict["товарные_знаки"] = e.trademarks
+            if e.address_unreliable:
+                extras_dict["адрес_недостоверен"] = True
+            if e.mass_address_orgs:
+                extras_dict["организаций_по_адресу"] = len(e.mass_address_orgs)
+            if e.contacts:
+                c_dict = {
+                    k: v for k, v in {
+                        "телефоны": e.contacts.phones,
+                        "почта": e.contacts.emails,
+                        "сайт": e.contacts.website,
+                    }.items() if v
+                }
+                if c_dict:
+                    extras_dict["контакты"] = c_dict
+            if extras_dict:
+                report["реестровые_дополнения"] = extras_dict
+
+        # ── Реестр отечественного ПО (Минцифры) ──
+        if ctx.software_products:
+            report["реестр_отечественного_по"] = [
+                p.model_dump(exclude_none=True) for p in ctx.software_products
+            ]
+
+    # ── Структурированные сводки рисков (арбитраж, ФССП, проверки, закупки) ──
+    if risk is not None:
+        risk_summaries = {}
+        for res in risk.results:
+            arb = getattr(res, "arbitration", None)
+            if arb and (arb.total > 0 or arb.total_claim_amount > 0):
+                risk_summaries["арбитраж"] = arb.model_dump()
+            enf = getattr(res, "enforcement", None)
+            if enf and (enf.total > 0 or enf.total_amount > 0):
+                risk_summaries["фссп"] = enf.model_dump()
+            insp = getattr(res, "inspections", None)
+            if insp and insp.total > 0:
+                risk_summaries["проверки"] = insp.model_dump()
+            proc = getattr(res, "procurement", None)
+            if proc and (
+                proc.contracts_44 > 0
+                or proc.contracts_223 > 0
+                or proc.total_amount > 0
+            ):
+                risk_summaries["госзакупки"] = proc.model_dump()
+            flg = getattr(res, "flags", None) or getattr(res, "registry_flags", None)
+            if flg:
+                risk_summaries["реестровые_метки"] = flg
+        if risk_summaries:
+            report["реестры_рисков_сводка"] = risk_summaries
 
     report["разбор"] = _full_sections(ctx, risk, human_mode=is_human)
     if ctx is not None:

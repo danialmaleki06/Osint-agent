@@ -1601,6 +1601,7 @@ class CheckoSource:
         ctx = CompanyContext(
             inn=data.get("ИНН") or inn,
             ogrn=data.get("ОГРН"),
+            kpp=data.get("КПП"),
             name_legal=legal,
             name_short=short,
             status=(data.get("Статус") or {}).get("Наим"),

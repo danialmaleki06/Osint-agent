@@ -176,6 +176,7 @@ class DaDataSource:
 
         return Candidate(
             inn=data.get("inn") or "",
+            kpp=data.get("kpp"),
             ogrn=data.get("ogrn"),
             name=names.get("full_with_opf") or item.get("value") or "",
             short_name=names.get("short_with_opf"),
@@ -227,6 +228,7 @@ class DaDataSource:
 
         return CompanyContext(
             inn=data.get("inn") or "",
+            kpp=data.get("kpp"),
             ogrn=data.get("ogrn"),
             name_legal=legal,
             name_short=short,
@@ -237,6 +239,7 @@ class DaDataSource:
             region=addr_data.get("region_with_type"),
             director_fio=director_fio,
             director_post=director_post,
+            director_inn=management.get("inn"),
             founders=founders,
             okved_code=okved_code,
             okved_text=okved_text,

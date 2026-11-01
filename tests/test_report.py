@@ -614,3 +614,210 @@ def test_report_includes_statutory_hr_and_affiliations_lite():
     assert "корпоративные_связи_lite" in report
     assert report["корпоративные_связи_lite"]["руководитель"]["фио"] == "Директоров Дмитрий Петрович"
     assert report["корпоративные_связи_lite"]["учредители"][0]["наименование"] == "ООО «ЛАНИТ ВЕНЧУРС»"
+
+
+def test_main_version_data_parity():
+    """Проверяет, что все структурированные поля и данные из версии main сохранены и возвращаются в отчёте."""
+    from osint_mcp.models import (
+        CardExtras,
+        ContactInfo,
+        EnforcementSummary,
+        FinancialYear,
+        InspectionSummary,
+        LicenseInfo,
+        MspInfo,
+        ProcurementSummary,
+        RoleCounts,
+        SoftwareProduct,
+        SourceResult,
+        TimelineEvent,
+    )
+
+    ctx = make_context(
+        kpp="772401001",
+        address_full="115280, г. Москва, ул. Ленинская Слобода, д. 19",
+        region="г. Москва",
+        director_post="Генеральный директор",
+        director_inn="771234567890",
+        capital=50000.0,
+        branches=2,
+        representative_offices=1,
+        former_names=['ООО "СТАРЫЙ БПМСОФТ"'],
+        founders=['ООО "ЛАНИТ"'],
+        fin_history=[
+            FinancialYear(
+                year=2024,
+                revenue=2_700_000_000.0,
+                profit=300_000_000.0,
+                assets=1_500_000_000.0,
+                balance=1_500_000_000.0,
+                capital=50_000.0,
+                cash=200_000_000.0,
+                receivables=500_000_000.0,
+                short_debt=400_000_000.0,
+                loans=100_000_000.0,
+                equity=800_000_000.0,
+            ),
+            FinancialYear(year=2023, revenue=2_000_000_000.0, profit=200_000_000.0),
+        ],
+        events=[
+            TimelineEvent(event_date=date(2023, 5, 20), event="Внесение изменений в устав"),
+            TimelineEvent(event_date=date(2021, 2, 10), event="Смена наименования"),
+        ],
+        msp=MspInfo(
+            in_registry=True,
+            category="medium",
+            employees=240,
+            included_at=date(2016, 8, 1),
+            is_active=True,
+        ),
+        extras=CardExtras(
+            tax_debt=125000.0,
+            tax_paid_total=85000000.0,
+            tax_year=2024,
+            tax_mode=["Общий режим налогообложения (ОСНО)"],
+            okved_extra=["62.02 — Консультации в области компьютерных технологий"],
+            trademarks=["BPMSoft", "Ланит"],
+            address_unreliable=False,
+            mass_address_orgs=["1027700000001", "1027700000002"],
+            contacts=ContactInfo(
+                phones=["+7 (495) 123-45-67"],
+                emails=["info@bpmsoft.ru"],
+                website="https://bpmsoft.ru",
+            ),
+            licenses=[
+                LicenseInfo(
+                    number="Л050-00107-77/00642316",
+                    issuer="ФСТЭК России",
+                    issued_at=date(2023, 1, 1),
+                    activity="Техническая защита конфиденциальной информации",
+                )
+            ],
+        ),
+        software_products=[
+            SoftwareProduct(
+                name="Платформа BPMSoft",
+                reg_number="12345",
+                reg_date="2022-04-12",
+                status="В реестре",
+            )
+        ],
+    )
+
+    risk = RiskCollection(
+        inn="7724744134",
+        results=[
+            SourceResult(
+                source="checko.arbitration",
+                status="ok",
+                arbitration=ArbitrationSummary(
+                    total=5,
+                    total_claim_amount=15_000_000.0,
+                    as_defendant=RoleCounts(count=2, total_amount=4_000_000.0),
+                    as_plaintiff=RoleCounts(count=3, total_amount=11_000_000.0),
+                ),
+            ),
+            SourceResult(
+                source="checko.enforcement",
+                status="ok",
+                enforcement=EnforcementSummary(total=1, total_amount=50000.0, outstanding=0.0),
+            ),
+            SourceResult(
+                source="checko.inspections",
+                status="ok",
+                inspections=InspectionSummary(total=3, with_violations=1),
+            ),
+            SourceResult(
+                source="checko.procurement",
+                status="ok",
+                procurement=ProcurementSummary(
+                    contracts_44=4,
+                    as_supplier=RoleCounts(count=4, total_amount=25_000_000.0),
+                    total_amount=25_000_000.0,
+                ),
+            ),
+            SourceResult(
+                source="checko.registry_flags",
+                status="ok",
+                flags={"disqualified_persons": False, "mass_founders": False},
+            ),
+        ],
+        facts=[],
+    )
+
+    score = make_score()
+
+    # 1. Проверяем карточку в brief
+    report_brief = build_report("brief", make_context_result(ctx), risk, score)
+    card_brief = report_brief["карточка"]
+    assert card_brief["наименование"] == 'ООО "БПМСОФТ"'
+    assert card_brief["краткое_наименование"] == 'ООО "БПМСОФТ"'
+    assert card_brief["ИНН"] == "7724744134"
+    assert card_brief["КПП"] == "772401001"
+    assert card_brief["дата_регистрации"] == "2010-04-15"
+    assert card_brief["уставный_капитал"] == 50000.0
+    assert card_brief["город"] == "Москва"
+    assert card_brief["регион"] == "г. Москва"
+    assert card_brief["адрес"] == "115280, г. Москва, ул. Ленинская Слобода, д. 19"
+    assert card_brief["руководитель"] == "Директоров Дмитрий Петрович"
+    assert card_brief["должность_руководителя"] == "Генеральный директор"
+    assert card_brief["инн_руководителя"] == "771234567890"
+    assert card_brief["оквэд_код"] == "62.01"
+    assert card_brief["оквэд_текст"] == "Разработка компьютерного программного обеспечения"
+    assert card_brief["филиалы"] == 2
+    assert card_brief["представительства"] == 1
+    assert card_brief["прежние_наименования"] == ['ООО "СТАРЫЙ БПМСОФТ"']
+    assert card_brief["учредители"] == ['ООО "ЛАНИТ"']
+
+    # 2. Проверяем полное досье (full) со всеми структурированными данными
+    report_full = build_report("full", make_context_result(ctx), risk, score)
+
+    # Финансовая история
+    assert "финансовая_история" in report_full
+    assert len(report_full["финансовая_история"]) == 2
+    f2024 = report_full["финансовая_история"][0]
+    assert f2024["year"] == 2024
+    assert f2024["revenue"] == 2_700_000_000.0
+    assert f2024["profit"] == 300_000_000.0
+    assert f2024["equity"] == 800_000_000.0
+    assert f2024["short_debt"] == 400_000_000.0
+
+    # Сводка рисков
+    assert "реестры_рисков_сводка" in report_full
+    risk_summary = report_full["реестры_рисков_сводка"]
+    assert risk_summary["арбитраж"]["total"] == 5
+    assert risk_summary["арбитраж"]["as_defendant"]["count"] == 2
+    assert risk_summary["арбитраж"]["as_plaintiff"]["count"] == 3
+    assert risk_summary["фссп"]["total"] == 1
+    assert risk_summary["проверки"]["total"] == 3
+    assert risk_summary["проверки"]["with_violations"] == 1
+    assert risk_summary["госзакупки"]["contracts_44"] == 4
+    assert risk_summary["госзакупки"]["as_supplier"]["total_amount"] == 25_000_000.0
+    assert "реестровые_метки" in risk_summary
+
+    # События ЕГРЮЛ
+    assert "события_егрюл" in report_full
+    assert len(report_full["события_егрюл"]) == 2
+    assert report_full["события_егрюл"][0]["событие"] == "Внесение изменений в устав"
+
+    # Реестр МСП
+    assert "реестр_мсп" in report_full
+    assert report_full["реестр_мсп"]["в_реестре"] is True
+    assert report_full["реестр_мсп"]["категория"] == "medium"
+    assert report_full["реестр_мсп"]["численность"] == 240
+
+    # Реестровые дополнения
+    assert "реестровые_дополнения" in report_full
+    rd = report_full["реестровые_дополнения"]
+    assert rd["задолженность_по_налогам"] == 125000.0
+    assert rd["уплачено_налогов"] == 85000000.0
+    assert rd["отчётный_год_налогов"] == 2024
+    assert rd["налоговые_режимы"] == ["Общий режим налогообложения (ОСНО)"]
+    assert "62.02" in rd["дополнительные_оквэд"][0]
+    assert "BPMSoft" in rd["товарные_знаки"]
+    assert rd["организаций_по_адресу"] == 2
+    assert rd["контакты"]["сайт"] == "https://bpmsoft.ru"
+
+    # Реестр отечественного ПО
+    assert "реестр_отечественного_по" in report_full
+    assert report_full["реестр_отечественного_по"][0]["name"] == "Платформа BPMSoft"

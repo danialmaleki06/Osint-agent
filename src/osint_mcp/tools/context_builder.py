@@ -61,6 +61,7 @@ def _context_from_egrul(inn: str, row: dict) -> CompanyContext:
     return CompanyContext(
         inn=inn,
         ogrn=brief["ogrn"],
+        kpp=brief.get("kpp"),
         name_legal=brief["name_legal"] or inn,
         name_short=brief["name_short"],
         registered_at=brief["registered_at"],
