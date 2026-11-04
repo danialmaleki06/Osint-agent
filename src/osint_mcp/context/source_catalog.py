@@ -12,15 +12,14 @@
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field
 
-from osint_mcp.models import ExtFact
 from osint_mcp.scoring.models import PendingFact
 from osint_mcp.tools.web_search_source import search_web
 
@@ -59,7 +58,7 @@ class GlobalDatasetStore:
         source_name: str,
         entries: list[dict],
     ) -> int:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         rows = [
             (
                 source_name,
@@ -275,7 +274,7 @@ def execute_catalog_source(
                     source_url=url,
                     found_by=f"catalog:{source_name}",
                     trust=spec.trust if spec.trust in ("reference", "mention") else "mention",
-                    found_at=datetime.now(timezone.utc),
+                    found_at=datetime.now(UTC),
                 )
             )
 

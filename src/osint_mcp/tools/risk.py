@@ -10,6 +10,7 @@
 """
 
 import asyncio
+from datetime import UTC
 
 import structlog
 
@@ -212,7 +213,7 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
     """Генерация риск-фактов по финансовым показателям карточки организации (отрицательные активы, налоговый долг)."""
     if ctx is None:
         return []
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     facts: list[Fact] = []
 
@@ -237,10 +238,10 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
                     fact_id="CTX-STATUS-LIQUIDATED",
                     kind="registry_flag",
                     statement=f"Организация не действует: статус ЕГРЮЛ «{ctx.status}»",
-                    source_url=f"https://egrul.nalog.ru/",
+                    source_url="https://egrul.nalog.ru/",
                     source_type="registry_api",
                     trust="registry",
-                    retrieved_at=datetime.now(timezone.utc),
+                    retrieved_at=datetime.now(UTC),
                     payload={"status": ctx.status, "flag": "ликвидация"},
                 )
             )
@@ -250,10 +251,10 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
                     fact_id="CTX-STATUS-BANKRUPT",
                     kind="bankruptcy",
                     statement=f"Процедура банкротства: статус ЕГРЮЛ «{ctx.status}»",
-                    source_url=f"https://fedresurs.ru/",
+                    source_url="https://fedresurs.ru/",
                     source_type="registry_api",
                     trust="registry",
-                    retrieved_at=datetime.now(timezone.utc),
+                    retrieved_at=datetime.now(UTC),
                     payload={"status": ctx.status, "Тип": "банкротство"},
                 )
             )
@@ -270,7 +271,7 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
                     source_url=latest.report_url or f"https://bo.nalog.gov.ru/organizations-card/{ctx.inn}",
                     source_type="registry_api",
                     trust="registry",
-                    retrieved_at=datetime.now(timezone.utc),
+                    retrieved_at=datetime.now(UTC),
                     payload={"equity": latest.equity, "year": latest.year},
                 )
             )
@@ -306,7 +307,7 @@ def extract_context_financial_risk_facts(ctx: "CompanyContext | None") -> list[F
                     source_url=f"https://service.nalog.ru/zd.do?inn={ctx.inn}",
                     source_type="registry_api",
                     trust="registry",
-                    retrieved_at=datetime.now(timezone.utc),
+                    retrieved_at=datetime.now(UTC),
                     payload={"tax_debt": debt, "revenue": revenue, "profit": profit},
                 )
             )

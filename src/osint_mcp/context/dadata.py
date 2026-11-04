@@ -9,7 +9,7 @@
   suggest/party  — поиск с частичным совпадением, для запроса по названию.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -54,7 +54,7 @@ def _ms_to_date(value: Any) -> date | None:
     if not isinstance(value, (int, float)):
         return None
     try:
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date()
+        return datetime.fromtimestamp(value / 1000, tz=UTC).date()
     except (ValueError, OSError, OverflowError):
         return None
 
@@ -254,7 +254,7 @@ class DaDataSource:
             industry_terms=industry_terms(okved_code),
             brand_resolved=False,   # рыночное имя устанавливается позже, по вебу
             source="dadata",
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=datetime.now(UTC),
         )
 
     # ─────────────────────────  публичные методы  ─────────────────────────
@@ -594,7 +594,7 @@ class DaDataSource:
             country="BY",
             name_variants=name_variants(legal, short, trade),
             source="dadata.by",
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=datetime.now(UTC),
         )
 
     @staticmethod
@@ -613,7 +613,7 @@ class DaDataSource:
             country="KZ",
             name_variants=name_variants(legal, d.get("name_kz")),
             source="dadata.kz",
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=datetime.now(UTC),
         )
 
     async def get_context_foreign(self, guess) -> ContextResult:

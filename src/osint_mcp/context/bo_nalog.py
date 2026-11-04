@@ -18,8 +18,6 @@
   * поиск только по ИНН; точное соответствие обязательно.
 """
 
-import asyncio
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -121,7 +119,6 @@ class BoNalogSource:
         if not isinstance(reports, list):
             return None, "ГИР БО вернул неожиданный формат отчётности"
 
-        now = datetime.now(timezone.utc)
         years: list[FinancialYear] = []
         for rep in reports:
             period = str(rep.get("period") or "")
@@ -131,7 +128,6 @@ class BoNalogSource:
             actives = rep.get("actives")
             years.append(FinancialYear(
                 year=int(period),
-                # Суммы приходят в тысячах рублей — переводим сразу
                 revenue=float(gain) * _THOUSANDS if gain is not None else None,
                 assets=float(actives) * _THOUSANDS if actives is not None else None,
                 report_url=_report_url(rep),
@@ -177,26 +173,3 @@ def merge_financial_years(
             report_url=fy.report_url if fy.report_url is not None else base.report_url,
         )
     return sorted(merged.values(), key=lambda y: y.year, reverse=True)[:5]
-
-
-async def fetch_finances_with_fallback(
-    checko_get_finances, inn: str
-) -> tuple[list[FinancialYear], str | None]:
-    """Финансы с автоматическим переходом на ГИР БО.
-
-    checko_get_finances — awaitable-фабрика (обычно связанный метод
-    CheckoSource.get_finances). ГИР БО вызывается, только когда платный
-    источник не дал данных: бесплатный эшелон расходуем экономно, резерв
-    вообще не трогаем.
-    """
-    summary, failure = await checko_get_finances(inn)
-    if summary and summary.years:
-        return summary.years, None
-
-    bo = BoNalogSource()
-    bo_years, bo_failure = await bo.get_finances(inn)
-    if bo_years:
-        return bo_years, failure or None
-
-    # Оба молчат: причина последнего отказа важнее
-    return [], bo_failure or failure

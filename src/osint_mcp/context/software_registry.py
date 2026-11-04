@@ -11,7 +11,7 @@
 используется ежедневная выгрузка через открытый интерфейс proreestr.ru.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import httpx
 import structlog
@@ -75,7 +75,7 @@ class SoftwareRegistrySource:
         doc = HTMLParser(html)
         products: list[SoftwareProduct] = []
         facts: list[Fact] = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for i, card in enumerate(doc.css("article"), 1):
             title_el = card.css_first("h3")

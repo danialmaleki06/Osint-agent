@@ -16,12 +16,12 @@
 коммерческих инцидентов компании, влияющих на её надежность и непрерывность бизнеса.
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
 import re
-import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
+
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
@@ -812,7 +812,7 @@ async def async_build_reputation_fiasco_facts(
     """Асинхронный параллельный сбор и генерация фактов инцидентов и новостных событий."""
     import asyncio
     facts: list[PendingFact] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     queries_map = build_fiasco_queries(company_name, brand, domain, inn=inn)
 

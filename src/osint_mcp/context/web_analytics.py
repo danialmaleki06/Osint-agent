@@ -17,11 +17,9 @@ OSINT-логика и интерпретация для аналитика:
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-import httpx
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
@@ -164,7 +162,7 @@ def build_analytics_affiliation_facts(
             )
             if hit.shared_domains and hit.is_probable_holding:
                 domains_str = ", ".join(hit.shared_domains[:5])
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 source_url = hit.sample_urls[0] if hit.sample_urls else (f"https://{domain}" if domain else "https://osint.local/analytics")
                 facts.append(
                     PendingFact(

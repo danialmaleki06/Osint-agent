@@ -6,7 +6,7 @@
 - OSINT веб-разведка (СМИ и инциденты, гео-отзывы, сетевая инфраструктура сайтов).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 
@@ -412,5 +412,5 @@ async def check_all_limits(dadata_source: DaDataSource | None = None) -> Provide
         summary=summary,
         providers=providers,
         alerts=alerts,
-        checked_at=datetime.now(timezone.utc),
+        checked_at=datetime.now(UTC),
     )

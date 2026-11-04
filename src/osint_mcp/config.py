@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     )
 
     dadata_api_key: str = Field(default="", description="Ключ DaData")
-    # Список ключей через запятую — пул на случай суточного лимита.
     dadata_api_keys: str = Field(
         default="", description="Список ключей DaData через запятую (пул)"
     )
@@ -20,7 +19,6 @@ class Settings(BaseSettings):
         default="", description="Секретный ключ DaData — нужен только для метода бренда"
     )
     checko_api_key: str = Field(default="", description="Ключ Checko")
-    # Список ключей через запятую — пул на случай суточного лимита.
     checko_api_keys: str = Field(
         default="", description="Список ключей Checko через запятую (пул)"
     )
@@ -159,16 +157,6 @@ class Settings(BaseSettings):
 
     def allowed_hosts(self) -> list[str]:
         return [h.strip() for h in self.mcp_allowed_hosts.split(",") if h.strip()]
-
-    def require(self, name: str) -> str:
-        """Достать ключ или упасть с внятным сообщением, а не с пустой строкой."""
-        value = getattr(self, name, "")
-        if not value:
-            raise RuntimeError(
-                f"Не задан {name.upper()}. Скопируйте .env.example в .env "
-                f"и впишите ключ."
-            )
-        return value
 
 
 settings = Settings()

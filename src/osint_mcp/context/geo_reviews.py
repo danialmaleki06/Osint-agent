@@ -16,8 +16,7 @@ OSINT-логика и интерпретация для аналитика и LL
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import structlog
 
@@ -118,7 +117,7 @@ def build_geo_reviews_facts(
 ) -> list[PendingFact]:
     """Сбор и генерация фактов картографического OSINT для шины фактов."""
     facts: list[PendingFact] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     collected_reviews = list(reviews) if reviews else []
 

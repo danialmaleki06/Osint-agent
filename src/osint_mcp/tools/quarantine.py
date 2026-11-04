@@ -6,7 +6,7 @@ ExtFact с заданным весом и попадает в скоринг н�
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from osint_mcp.models import ExtFact
@@ -47,7 +47,6 @@ class QuarantineStore:
     def add(self, subject: str, facts: list[PendingFact]) -> int:
         """Добавить находки в карантин. Дубликаты (subject+url) молча
         пропускаются: одна и та же страница не должна появляться дважды."""
-        now = datetime.now(timezone.utc).isoformat()
         rows = [
             (subject, f.fact_id, f.kind, f.statement, f.source_url,
              f.found_by, f.trust, f.found_at.isoformat(), "pending")
@@ -99,7 +98,7 @@ class QuarantineStore:
         self._conn.execute(
             "UPDATE pending_facts SET status='confirmed', weight=?, "
             "reviewed_at=? WHERE subject=? AND fact_id=?",
-            (weight, datetime.now(timezone.utc).isoformat(), subject, fact_id),
+            (weight, datetime.now(UTC).isoformat(), subject, fact_id),
         )
         self._conn.commit()
         return {
@@ -111,7 +110,7 @@ class QuarantineStore:
 
     def reject(self, subject: str, fact_id: str) -> bool:
         """Отклонить находку как мусор."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "UPDATE pending_facts SET status='rejected', reviewed_at=? "
             "WHERE subject=? AND fact_id=? AND status='pending'",

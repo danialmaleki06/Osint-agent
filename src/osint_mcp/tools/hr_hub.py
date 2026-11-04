@@ -5,9 +5,10 @@
 через консолидированный профиль или специализированную кадровою компанию.
 """
 
+from typing import Any
+
 import httpx
 import structlog
-from typing import Any
 
 from osint_mcp.config import settings
 from osint_mcp.context.hh import _HEADERS, _find_best_employer

@@ -8,10 +8,10 @@
 import hashlib
 import json
 import math
-from datetime import date, datetime, timezone
-from functools import lru_cache
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -532,7 +532,7 @@ def score_company(
         combined_criteria.update(extra_criteria)
         cfg = cfg.model_copy(update={"criteria": combined_criteria})
     today = date.today()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Группа -> вес, нормированный на 100.
     total_weight = sum(g.weight for g in cfg.groups.values()) or 1.0

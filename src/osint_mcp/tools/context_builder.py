@@ -21,13 +21,13 @@ from osint_mcp.context.checko import CheckoSource
 from osint_mcp.context.dadata import DaDataSource
 from osint_mcp.context.egrul import EgrulSource, brief_from_egrul
 from osint_mcp.context.hh import HhSource
+from osint_mcp.context.rmsp import RmspSource
 from osint_mcp.context.site import (
     domain_age,
     inspect_site_content,
     site_self_description,
     ssl_info,
 )
-from osint_mcp.context.rmsp import RmspSource
 from osint_mcp.context.software_registry import SoftwareRegistrySource
 from osint_mcp.models import CompanyContext, ContextResult, SourceLink, TimelineEvent
 from osint_mcp.tools.web_search_source import search_web
@@ -81,7 +81,6 @@ def _apply_profile_heuristics(ctx: CompanyContext) -> None:
     аутсорс — потоком заказов, розница — лояльностью. Задаются только
     тогда, когда данных достаточно: None честнее догадки.
     """
-    # ── модель бизнеса ──
     okved = ctx.okved_code or ""
     trademarks = bool(ctx.extras and ctx.extras.trademarks)
     if okved.startswith("47.") or okved.startswith("56.") or okved.startswith("96."):
@@ -93,9 +92,7 @@ def _apply_profile_heuristics(ctx: CompanyContext) -> None:
     elif okved in ("62.02", "62.03", "62.09"):
         # разработка/ремонт по заказу клиентов без своих знаков — подряд
         ctx.business_model = "outsourced"
-    # иначе None: данных не хватило — догадку не пишем
 
-    # ── стадия ──
     age = None
     if ctx.registered_at:
         age = (date.today() - ctx.registered_at).days / 365.25
@@ -271,7 +268,6 @@ async def build_company_context(
             elif sw_failure:
                 gaps.append(f"Реестр ПО Минцифры: {sw_failure}.")
 
-    # Рыночное наименование — необязательное обогащение
     if not isinstance(brand, BaseException) and brand.resolved:
         ctx.brand_resolved = True
         ctx.brand = brand.brand
@@ -540,8 +536,6 @@ async def build_company_context(
     # на hh), при его отсутствии — по краткому юридическому. Источник
     # бесплатен, исключений наружу не бросает: отказ приходит в reason.
     search_name = ctx.name_short or ctx.brand or ctx.name_legal
-
-    # Найм и проверка сайта запускаются параллельно в фоне
     site_url = ctx.brand_domain or registry_site
 
     async def _fetch_hiring():

@@ -16,7 +16,6 @@
 запрос честно помечается недоступным, никакой обход не применяется.
 """
 
-import asyncio
 import time
 
 import httpx

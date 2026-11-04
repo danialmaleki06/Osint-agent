@@ -12,18 +12,55 @@
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import structlog
-from pydantic import Field
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
-from osint_mcp.config import settings
 from osint_mcp import ledger
+from osint_mcp.config import settings
 from osint_mcp.context.checko import CheckoSource
+from osint_mcp.context.competitors import (
+    fetch_company_competitors as _fetch_company_competitors,
+)
+from osint_mcp.context.customs import (
+    build_customs_facts as _build_customs_facts,
+)
+from osint_mcp.context.customs import (
+    evaluate_customs_findings as _evaluate_customs_findings,
+)
 from osint_mcp.context.dadata import DaDataSource
+from osint_mcp.context.geo_reviews import (
+    build_geo_reviews_facts as _build_geo_reviews_facts,
+)
+from osint_mcp.context.news_media import (
+    fetch_company_media_presence as _fetch_company_media_presence,
+)
+from osint_mcp.context.reputation_fiascos import (
+    async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
+)
+from osint_mcp.context.site import inspect_site_content as _inspect_site_content
+from osint_mcp.context.source_catalog import (
+    SourceSpec as _SourceSpec,
+)
+from osint_mcp.context.source_catalog import (
+    execute_catalog_batch as _execute_catalog_batch,
+)
+from osint_mcp.context.source_catalog import (
+    execute_catalog_source as _execute_catalog_source,
+)
+from osint_mcp.context.source_catalog import (
+    load_source_catalog as _load_source_catalog,
+)
+from osint_mcp.context.source_catalog import (
+    save_source_to_catalog as _save_source_to_catalog,
+)
+from osint_mcp.context.web_analytics import (
+    build_analytics_affiliation_facts as _build_analytics_affiliation_facts,
+)
 from osint_mcp.models import (
     AffiliationGraph,
     ContextResult,
@@ -34,59 +71,36 @@ from osint_mcp.models import (
     RiskCollection,
     ServerHealth,
 )
+from osint_mcp.scoring import score_company as _score_company
+from osint_mcp.scoring.engine import load_config as _load_scoring_config
+from osint_mcp.scoring.models import (
+    ScoreResult,
+    SearchUnverifiedResult,
+    Verdict,
+)
 from osint_mcp.tools.context_builder import build_company_context as _build_context
 from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
+from osint_mcp.tools.quarantine import QuarantineStore
+from osint_mcp.tools.query_guard import (
+    build_discrepancy_fact as _build_discrepancy_fact,
+)
+from osint_mcp.tools.query_guard import (
+    check_query_inn_consistency as _check_query_inn_consistency,
+)
+from osint_mcp.tools.query_guard import (
+    extract_inn_and_name as _extract_inn_and_name,
+)
 from osint_mcp.tools.quota import check_all_limits as _check_all_limits
 from osint_mcp.tools.report import build_batch_entry as _build_batch_entry
 from osint_mcp.tools.report import build_report as _build_report
 from osint_mcp.tools.risk import (
     collect_risk_facts as _collect_risk_facts,
+)
+from osint_mcp.tools.risk import (
     extract_context_financial_risk_facts as _extract_financial_risk_facts,
 )
-from osint_mcp.scoring import score_company as _score_company
-from osint_mcp.scoring.engine import load_config as _load_scoring_config
-from osint_mcp.scoring.models import (
-    PendingFact, ScoreResult, SearchUnverifiedResult, Verdict,
-)
-from osint_mcp.tools.quarantine import QuarantineStore
 from osint_mcp.tools.web_search_source import search_pending as _search_pending
-from osint_mcp.context.source_catalog import (
-    load_source_catalog as _load_source_catalog,
-    execute_catalog_source as _execute_catalog_source,
-    execute_catalog_batch as _execute_catalog_batch,
-    save_source_to_catalog as _save_source_to_catalog,
-    SourceSpec as _SourceSpec,
-)
-from osint_mcp.context.web_analytics import (
-    search_domains_sharing_tracker as _search_domains_sharing_tracker,
-    build_analytics_affiliation_facts as _build_analytics_affiliation_facts,
-)
-from osint_mcp.context.customs import (
-    build_customs_facts as _build_customs_facts,
-    evaluate_customs_findings as _evaluate_customs_findings,
-)
-from osint_mcp.context.geo_reviews import (
-    build_geo_reviews_facts as _build_geo_reviews_facts,
-    evaluate_geo_findings as _evaluate_geo_findings,
-)
-from osint_mcp.context.reputation_fiascos import (
-    build_reputation_fiasco_facts as _build_reputation_fiasco_facts,
-    async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
-    evaluate_fiascos_findings as _evaluate_fiascos_findings,
-)
-from osint_mcp.context.news_media import (
-    fetch_company_media_presence as _fetch_company_media_presence,
-)
-from osint_mcp.context.competitors import (
-    fetch_company_competitors as _fetch_company_competitors,
-)
-from osint_mcp.context.site import inspect_site_content as _inspect_site_content
-from osint_mcp.tools.query_guard import (
-    extract_inn_and_name as _extract_inn_and_name,
-    check_query_inn_consistency as _check_query_inn_consistency,
-    build_discrepancy_fact as _build_discrepancy_fact,
-)
 
 
 class _LazyQuarantineStore:
@@ -186,7 +200,7 @@ def health_check() -> ServerHealth:
     return ServerHealth(
         server=SERVER_NAME,
         version=VERSION,
-        checked_at=datetime.now(timezone.utc),
+        checked_at=datetime.now(UTC),
         tools=TOOLS,
     )
 
@@ -261,7 +275,8 @@ async def resolve_company(
             fallback = await _checko.get_context(probe.inn)
             if fallback.status == "ok" and fallback.context:
                 ctx = fallback.context
-                from osint_mcp.models import Candidate, ResolveResult as _RR
+                from osint_mcp.models import Candidate
+                from osint_mcp.models import ResolveResult as _RR
                 result = _RR(
                     query=query, status="ok", confidence="high",
                     total_found=1,
@@ -494,12 +509,13 @@ async def get_company_report(
       коммерческий_срез, кадровый_потенциал_документы, ссылки.
     """
     import asyncio
-    from osint_mcp.tools.query_guard import (
-        extract_inn_and_name,
-        check_query_inn_consistency,
-        build_discrepancy_fact,
-    )
+
     from osint_mcp.tools.hr_hub import detect_corporate_hr_hub
+    from osint_mcp.tools.query_guard import (
+        build_discrepancy_fact,
+        check_query_inn_consistency,
+        extract_inn_and_name,
+    )
 
     detail_norm = _normalize_detail_level(detail)
 
@@ -768,22 +784,18 @@ async def get_company_report(
         for f in fiasco_facts:
             if f not in score.pending:
                 score.pending.append(f)
-# detail_norm already normalized at function start
     is_debug = debug or getattr(settings, "osint_debug", False)
     is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
     result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=news_media_info, competitors_info=competitors_info)
 
-    # Прикрепляем расхождение запроса (если обнаружено)
     if query_discrepancy:
         result["расхождение_запроса"] = query_discrepancy
 
-    # Прикрепляем кадровый хаб (если обнаружен)
     if hr_hub_info:
         result["кадровый_хаб_холдинга"] = hr_hub_info
         if "кадровый_потенциал_документы" in result:
             result["кадровый_потенциал_документы"]["кадровый_хаб_холдинга"] = hr_hub_info
 
-    # Прикрепляем корпоративные связи, таможню, гео и аналитику
     if affiliations_info:
         result["связи_и_аффилированность"] = affiliations_info
     if customs_info:
@@ -797,7 +809,6 @@ async def get_company_report(
     if competitors_info:
         result["конкуренты_и_рынок"] = competitors_info
 
-    # Прикрепляем инциденты и публикации в СМИ с датами и пруфами
     if fiasco_facts:
         incidents_list = []
         for f in fiasco_facts:
@@ -837,7 +848,9 @@ async def get_company_report(
 
     # Обогащаем коммерческий срез репутационными фактами и инцидентами
     if context_result.context:
-        from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intel
+        from osint_mcp.tools.sales_intelligence import (
+            build_sales_intelligence as _build_sales_intel,
+        )
         sales_intel = _build_sales_intel(
             context_result.context,
             risk=risk,
@@ -858,7 +871,6 @@ async def get_company_report(
     if context_result.context and context_result.context.source_links:
         result["ссылки"] = [l.model_dump() for l in context_result.context.source_links]
 
-    # Прикрепляем атомные факты проверки (Fact)
     if detail_norm == "full" and risk and risk.facts:
         result["факты_проверки"] = [
             {
@@ -872,7 +884,6 @@ async def get_company_report(
             for f in risk.facts
         ]
 
-    # Прикрепляем сводку полноты проверки (CoverageReport)
     if detail_norm in ("standard", "full") or is_debug:
         coverage_rep = _build_coverage(clean_inn)
         if coverage_rep and coverage_rep.checked:
@@ -1238,7 +1249,7 @@ async def get_verdict(
                       "с этим вердиктом как с реальной оценкой."],
             pending=[],
             criteria_version=_load_scoring_config().criteria_version,
-            scored_at=datetime.now(timezone.utc),
+            scored_at=datetime.now(UTC),
         )
 
     # Проверка расхождения запроса «Имя ↔ ИНН»
@@ -1723,7 +1734,6 @@ async def check_shared_analytics(
             "shared_networks": [],
         }
 
-    # Инспектируем сайт и извлекаем идентификаторы счетчиков
     _, tech, err = await _inspect_site_content(target_site)
     tracker_ids = tech.tracker_ids if tech else {}
 

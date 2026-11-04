@@ -22,7 +22,7 @@
 данным детального запроса.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import httpx
 import structlog
@@ -156,7 +156,7 @@ class FsaSource:
         service, method = self.name, "declarations"
         facts: list[Fact] = []
         total = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for url, label, view in (
             (_DECL_SEARCH_URL, "декларация о соответствии",

@@ -19,7 +19,7 @@ OSINT-логика и интерпретация для аналитика и LL
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -131,7 +131,7 @@ def build_customs_facts(
 ) -> list[PendingFact]:
     """Сбор и генерация таможенных фактов в шину фактов/карантин."""
     facts: list[PendingFact] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Если декларации не переданы напрямую, выполняем целевой поиск по таможенным базам
     collected_declarations = list(declarations) if declarations else []

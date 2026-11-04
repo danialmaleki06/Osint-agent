@@ -37,8 +37,7 @@
 не должны ронять проверку рисков в целом.
 """
 
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -121,7 +120,7 @@ def _fact_kind(kind: str | None) -> str:
 
 
 def _statement(kind: str | None, title: str | None, publisher: str | None) -> str:
-    label = _KIND_TITLES.get(kind or "", None)
+    label = _KIND_TITLES.get(kind or "")
     if label:
         text = title or "без заголовка"
         return f"{label}: {text}" + (f" (публикатор: {publisher})" if publisher else "")
@@ -239,7 +238,7 @@ class FedresursSource:
 
         records = data.get("pageData") or []
         total = int(data.get("found") or 0)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         facts: list[Fact] = []
         for i, rec in enumerate(records[:MAX_PUBLICATIONS], 1):
@@ -299,10 +298,3 @@ class FedresursSource:
 def classify_publication(title: str | None) -> str | None:
     """Публичная обёртка классификатора — для тестов и переиспользования."""
     return _classify(title)
-
-
-# ── Отложенный импорт для тяжёлого разбора: не нужен на горячем пути ──
-
-async def fetch_commercial_facts(inn: str) -> SourceResult:
-    """Удобная обёртка: сбор фактов Федресурса одним вызовом."""
-    return await FedresursSource().check_commercial_facts(inn)

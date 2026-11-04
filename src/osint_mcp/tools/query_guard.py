@@ -6,8 +6,9 @@
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
+
 from osint_mcp.models import CompanyContext, Fact
 
 # Стоп-слова: правовые формы и общие организационные токены
@@ -144,6 +145,6 @@ def build_discrepancy_fact(discrepancy: dict[str, Any]) -> Fact:
         statement=discrepancy["предупреждение"],
         source_url="https://egrul.nalog.ru/",
         source_type="egrul",
-        retrieved_at=datetime.now(timezone.utc),
+        retrieved_at=datetime.now(UTC),
         payload=discrepancy,
     )

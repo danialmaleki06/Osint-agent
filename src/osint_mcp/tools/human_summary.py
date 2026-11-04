@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -55,9 +55,9 @@ def _clean_profile_text(text: str | None) -> str:
 
 
 def build_human_summary(
-    ctx: "CompanyContext | None",
-    risk: "RiskCollection | None",
-    score: "ScoreResult",
+    ctx: CompanyContext | None,
+    risk: RiskCollection | None,
+    score: ScoreResult,
     media_info: dict[str, Any] | None = None,
     competitors_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -362,7 +362,7 @@ def build_human_summary(
     }
 
 
-def build_human_court_cases(risk: "RiskCollection | None") -> list[dict[str, Any]]:
+def build_human_court_cases(risk: RiskCollection | None) -> list[dict[str, Any]]:
     """Преобразует арбитражные дела в понятные сюжетные карточки."""
     if risk is None:
         return []

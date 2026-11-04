@@ -8,6 +8,7 @@
 """
 
 from typing import Any
+
 from osint_mcp.models import CompanyContext
 
 # Список распространенных офшорных и зарубежных юрисдикций
@@ -76,13 +77,11 @@ def build_affiliations_lite(
             is_org = bool(f.get("ОГРН") or f.get("Наим") or (f_inn and len(str(f_inn)) == 10))
             country = f.get("Страна") or ("RU" if not is_org else None)
 
-            # Проверка на иностранный элемент
             f_text = f"{name} {country or ''}".lower()
             f_foreign = any(w in f_text for w in _OFFSHORE_KEYWORDS) or (country and country not in ("RU", "Россия"))
             if f_foreign:
                 has_foreign = True
 
-            # Проверка на госучастие
             if any(w in f_text for w in ("муниципальн", "министерство", "департамент", "субъект рф", "российская федерация", "росимущество")):
                 has_state = True
 

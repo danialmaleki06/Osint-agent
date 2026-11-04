@@ -6,7 +6,7 @@
 Тон официально-деловой, без упрощений и без «продающих» формулировок.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 
 from osint_mcp.models import CompanyContext, RiskCollection
 from osint_mcp.scoring import ScoreResult
@@ -113,7 +113,7 @@ def build_profile(
     Каждый тезис сохраняет связь с fact_id/источниками через исходные
     структуры, которые агент прикладывает к ответу.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # ── 1. Субъект ──
     if context is not None:

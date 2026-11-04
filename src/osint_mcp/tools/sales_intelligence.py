@@ -14,7 +14,6 @@ import re
 from typing import Any
 
 from osint_mcp.models import CompanyContext, RiskCollection
-from osint_mcp.scoring.models import PendingFact
 
 
 def _detect_business_formula(ctx: CompanyContext) -> tuple[str, str]:

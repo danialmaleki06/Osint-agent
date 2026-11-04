@@ -17,11 +17,11 @@
 параллельные проверки записываются правильно.
 """
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Literal
 
 Outcome = Literal["ok", "empty", "failed"]
@@ -41,7 +41,7 @@ class Call:
     method: str
     outcome: Outcome
     reason: str | None = None
-    at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 # Обращения по организациям и общий счётчик за время жизни процесса.

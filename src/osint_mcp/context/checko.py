@@ -15,7 +15,7 @@
 
 import asyncio
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -31,12 +31,12 @@ from osint_mcp import ledger
 from osint_mcp.config import settings
 from osint_mcp.keys import ROTATE_STATUS_CODES, QuotaExhausted
 from osint_mcp.keys import checko as checko_pool
-from osint_mcp.tools.country import detect_country
 from osint_mcp.models import (
     AffiliationGraph,
     ArbitrationSummary,
     CardExtras,
     ContactInfo,
+    ContextResult,
     EnforcementSummary,
     Fact,
     FinancialSummary,
@@ -50,6 +50,7 @@ from osint_mcp.models import (
     RoleCounts,
     SourceResult,
 )
+from osint_mcp.tools.country import detect_country
 
 log = structlog.get_logger()
 
@@ -309,7 +310,7 @@ class CheckoSource:
         if failure:
             return failure
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         defendant = RoleCounts()
         plaintiff = RoleCounts()
@@ -431,7 +432,7 @@ class CheckoSource:
         if failure:
             return failure
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         total = int(data.get("ЗапВсего") or len(records))
         complete = len(records) >= total
 
@@ -528,7 +529,7 @@ class CheckoSource:
         Опыт исполнения госзаказа. Сам по себе риском не является — скорее
         наоборот; значимо в сочетании с реестром недобросовестных поставщиков.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         counts: dict[str, int] = {}
         amount = 0.0
         seen = 0
@@ -643,7 +644,7 @@ class CheckoSource:
             return failure
 
         records = data.get("Записи") or []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         facts = []
         for i, rec in enumerate(records[:MAX_CASES_IN_FACTS], 1):
@@ -701,7 +702,7 @@ class CheckoSource:
         if failure:
             return failure
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         card_url = f"https://focus.kontur.ru/entity?query={inn}"
         flags: dict[str, bool] = {}
         facts: list[Fact] = []
@@ -1103,7 +1104,7 @@ class CheckoSource:
         if failure:
             return None, failure
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         notes: list[str] = []
         seeds: dict[str, RelatedCompany] = {}
 
@@ -1620,18 +1621,8 @@ class CheckoSource:
             industry_terms=industry_terms(okved_code),
             brand_resolved=False,
             source="checko",
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=datetime.now(UTC),
         )
         log.info("context_checko_fallback", inn=ctx.inn, name=ctx.name_legal,
                  variants=len(ctx.name_variants))
         return ContextResult(status="ok", context=ctx)
-
-    async def resolve_inn(self, inn: str) -> "ContextResult":
-        """Резервное определение организации по ИНН/ОГРН/ОКПО через карточку.
-
-        Checko не умеет полнотекстовый поиск по названию, поэтому резервный
-        resolve работает только по идентификатору. Для имён остаётся только
-        DaData — при её недоступности агенту честно сообщается, что по
-        названию найти не выйдет, а по номеру — можно.
-        """
-        return await self.get_context(inn)

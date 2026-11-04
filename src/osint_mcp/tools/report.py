@@ -18,14 +18,14 @@ get_company_links — иначе отчёт разбухает там, где п
 ссылки отдельно.
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
-from osint_mcp.models import CompanyContext, FinancialYear, RiskCollection
 from osint_mcp.config import settings
+from osint_mcp.models import CompanyContext, FinancialYear, RiskCollection
 from osint_mcp.scoring.models import ScoreResult
+from osint_mcp.tools.affiliations_lite import build_affiliations_lite as _build_affiliations_lite
 from osint_mcp.tools.sales_intelligence import build_sales_intelligence as _build_sales_intelligence
 from osint_mcp.tools.statutory_hr import build_statutory_hr_profile as _build_statutory_hr
-from osint_mcp.tools.affiliations_lite import build_affiliations_lite as _build_affiliations_lite
 
 # Порог «крупная компания» для массового адреса: у крупного бизнеса
 # регистрация по адресу с другими организациями — норма (бизнес-центры),
@@ -200,7 +200,7 @@ def _build_license_breakdown(licenses: list) -> dict | None:
     summary_lines = [f"{cat}: {len(items)}" for cat, items in groups.items()]
     explanations = [
         f"{cat} — {_CATEGORY_DESCRIPTIONS.get(cat, 'Отраслевое лицензирование')}"
-        for cat in groups.keys()
+        for cat in groups
     ]
     return {
         "всего": len(licenses),
@@ -709,30 +709,6 @@ def _full_sections(ctx: CompanyContext | None, risk: RiskCollection | None, huma
     return sections
 
 
-def _context_lines(ctx: CompanyContext) -> list[str]:
-    """Общая часть краткого и полного отчёта: карточка по-человечески."""
-    lines: list[str] = []
-    if ctx.status and ctx.status != "Действует":
-        lines.append(f"статус: {ctx.status}")
-    okved = ctx.okved_text or (ctx.okved_code and f"ОКВЭД {ctx.okved_code}")
-    if okved:
-        lines.append(f"деятельность: {okved}")
-    bits = []
-    if ctx.employees is not None:
-        bits.append(f"{ctx.employees} чел.")
-    if ctx.revenue_latest is not None:
-        bits.append(f"выручка {_fmt_amount(ctx.revenue_latest)}")
-    if bits:
-        lines.append("масштаб: " + ", ".join(bits))
-    if ctx.registered_at:
-        lines.append(f"зарегистрирована {_fmt_date(ctx.registered_at)}")
-    if ctx.director_fio:
-        lines.append(f"руководитель: {ctx.director_fio}")
-    if ctx.former_names:
-        lines.append("прежние наименования: " + "; ".join(ctx.former_names))
-    return lines
-
-
 _MODEL_LABEL = {
     "product": "продуктовая компания (свой продукт и товарные знаки)",
     "outsourced": "подряд/аутсорс (работы по заказу клиентов)",
@@ -1065,7 +1041,7 @@ def build_report(
                 diagnostic["факты_без_критерия"] = score.unmatched_fact_kinds
             report["_диагностика_разработчика"] = diagnostic
         if is_human:
-            from osint_mcp.tools.human_summary import build_human_summary, build_human_court_cases
+            from osint_mcp.tools.human_summary import build_human_court_cases, build_human_summary
             report["резюме_для_человека"] = build_human_summary(ctx, risk, score, media_info=media_info, competitors_info=competitors_info)
             court_cases = build_human_court_cases(risk)
             if court_cases:

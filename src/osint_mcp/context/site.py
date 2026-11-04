@@ -10,10 +10,10 @@
 """
 
 import asyncio
-from datetime import date, datetime, timezone
 import re
 import socket
 import ssl
+from datetime import UTC, date, datetime
 
 import httpx
 import structlog
@@ -117,7 +117,7 @@ def _check_ssl_sync(hostname: str) -> SslInfo:
             not_after = cert.get("notAfter")
             if not_after:
                 exp_ts = ssl.cert_time_to_seconds(not_after)
-                exp_date = datetime.fromtimestamp(exp_ts, tz=timezone.utc).date()
+                exp_date = datetime.fromtimestamp(exp_ts, tz=UTC).date()
                 days_left = (exp_date - date.today()).days
             else:
                 exp_date = None
