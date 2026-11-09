@@ -112,7 +112,8 @@ def build_coverage(inn: str) -> CoverageReport:
                          daily_spent=daily.get(call.service)),
         )
         usage.requests += 1
-        setattr(usage, call.outcome, getattr(usage, call.outcome) + 1)
+        if hasattr(usage, call.outcome):
+            setattr(usage, call.outcome, getattr(usage, call.outcome) + 1)
 
     # ── что получили и что не ответило ───────────────────────────────
     # Направление считается полученным, если хотя бы одно обращение к нему

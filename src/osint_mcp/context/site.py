@@ -73,7 +73,6 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
         return None, f"WHOIS для зоны .{tld} не настроен"
 
     service, method = "whois", "domain_age"
-    ledger.record(service, method, "started")
 
     try:
         text = await asyncio.to_thread(_query_whois, domain, server)
