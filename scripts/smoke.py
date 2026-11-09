@@ -11,6 +11,9 @@ import json
 import os
 import sys
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -40,15 +43,9 @@ async def main() -> int:
             r = await session.call_tool("health_check", {})
             print(f"[ok] health_check -> {r.content[0].text[:90]}...")
 
-            for inn, note in [
-                ("7707083893", "действующий ИНН"),
-                ("7707083899", "битая контрольная сумма"),
-                ("12345", "неверная длина"),
-            ]:
-                r = await session.call_tool("validate_inn", {"inn": inn})
-                data = json.loads(r.content[0].text)
-                mark = "valid" if data["valid"] else f"invalid: {data['reason']}"
-                print(f"[ok] validate_inn({inn}) [{note}] -> {mark}")
+            r = await session.call_tool("generate_full_dossier", {"inn": "7724744134", "detail": "brief"})
+            data = json.loads(r.content[0].text)
+            print(f"[ok] generate_full_dossier -> светофор: {data.get('светофор')}, вердикт: {data.get('вердикт')}")
 
     print("\nВСЁ ПРОШЛО")
     return 0

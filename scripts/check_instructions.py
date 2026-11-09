@@ -21,13 +21,21 @@ import os
 import re
 import sys
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-TOOL_NAMES = {"health_check", "validate_inn", "resolve_company",
-              "get_company_context", "collect_risk_facts", "check_affiliations",
-              "check_coverage", "get_verdict", "search_unverified",
-              "review_pending", "get_company_report", "get_company_links", "check_companies_batch"}
+TOOL_NAMES = {
+    "health_check", "validate_inn", "resolve_company",
+    "get_company_context", "collect_risk_facts", "check_affiliations",
+    "check_coverage", "get_verdict", "search_unverified",
+    "review_pending", "get_company_report", "get_company_links",
+    "check_companies_batch", "generate_full_dossier",
+    "check_provider_limits", "list_catalog_sources",
+    "scan_catalog_source", "register_custom_source", "scan_catalog_batch",
+}
 
 # Общеупотребительные имена полей, которые пишутся без подчёркивания
 # и потому не ловятся по змеиному регистру.
@@ -39,9 +47,11 @@ NUMBER_WORDS = {"ДВА": 2, "ТРИ": 3, "ЧЕТЫРЕ": 4, "ПЯТЬ": 5,
 
 # Значения полей, а не имена: встречаются в тексте в кавычках
 # и не должны считаться ссылками на несуществующие поля.
-KNOWN_VALUES = {"not_checked", "legal_entity", "streamable_http",
-                "source_failed", "not_requested", "no_data",
-                "not_implemented"}
+KNOWN_VALUES = {
+    "not_checked", "legal_entity", "streamable_http",
+    "source_failed", "not_requested", "no_data",
+    "not_implemented", "not_found", "disambiguation_required",
+}
 
 
 def collect_fields(schema: dict, defs: dict) -> set[str]:

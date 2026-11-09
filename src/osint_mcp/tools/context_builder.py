@@ -473,7 +473,7 @@ async def build_company_context(
             # Эшелон 2: сайт из реестра, если он живой — домен и есть рыночное имя
             candidate = None
             if registry_site:
-                desc, fail = await site_self_description(registry_site)
+                desc, _ = await site_self_description(registry_site)
                 if desc:
                     parsed = urlparse(registry_site)
                     candidate = f"{parsed.scheme}://{parsed.netloc}"
@@ -507,7 +507,7 @@ async def build_company_context(
                     haystack = f"{host} {hit.get('title') or ''}".lower()
                     if not any(tok in haystack for tok in tokens):
                         continue
-                    desc, fail = await site_self_description(url)
+                    desc, _ = await site_self_description(url)
                     if desc:
                         # Храним корень: возраст домена и самоназвание смотрят
                         # на главную, а не на найденную глубинную страницу

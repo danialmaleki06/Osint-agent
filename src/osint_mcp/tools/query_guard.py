@@ -115,7 +115,7 @@ def check_query_inn_consistency(
     if not expected_name:
         expected_name = query_or_expected.strip()
     
-    similarity, expected_toks, resolved_toks = calculate_name_similarity(expected_name, ctx)
+    similarity, expected_toks, _ = calculate_name_similarity(expected_name, ctx)
     
     # Если сходство < 0.35 и было указано хотя бы одно значимое слово
     if similarity < 0.35 and expected_toks:

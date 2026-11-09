@@ -39,22 +39,22 @@ async def main() -> None:
                        "params": {}})
     names = [t["name"] for t in tools["result"]["tools"]]
     print(f"tools/list ok: {len(names)} инструментов")
-    assert "get_company_report" in names
+    assert "generate_full_dossier" in names
     assert "check_companies_batch" in names
 
     call = await rpc({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                       "params": {
-                          "name": "get_company_report",
+                          "name": "generate_full_dossier",
                           "arguments": {"inn": "7724744134",
                                         "detail": "brief"}}})
     data = json.loads(call["result"]["content"][0]["text"])
-    print("get_company_report ok. Ключи ответа:", list(data.keys()))
+    print("generate_full_dossier ok. Ключи ответа:", list(data.keys()))
     print("  вердикт:", json.dumps(data.get("вердикт"), ensure_ascii=False)[:200])
     card = data.get("карточка") or {}
     if isinstance(card, dict):
         print("  карточка:",
               {k: str(v)[:60] for k, v in list(card.items())[:6]})
-    assert any(k in data for k in ("что_не_собралось", "охват", "вердикт")), data.keys()
+    assert any(k in data for k in ("светофор", "score", "вердикт")), data.keys()
 
     proc.stdin.close()
     await proc.wait()

@@ -85,8 +85,13 @@ def _management_line(ctx: CompanyContext) -> str:
         parts.append(f"руководитель — {ctx.director_fio}{post}")
     if ctx.founders:
         n = len(ctx.founders)
-        pl = "" if n == 1 else "а" if n < 5 else "ей" if False else "а" if n % 10 == 1 and n % 100 != 11 else "ов"
-        parts.append(f"учредител{pl}: {n}")
+        if n % 10 == 1 and n % 100 != 11:
+            word = "учредитель"
+        elif 2 <= n % 10 <= 4 and not (11 <= n % 100 <= 14):
+            word = "учредителя"
+        else:
+            word = "учредителей"
+        parts.append(f"{word}: {n}")
     return "; ".join(parts)
 
 

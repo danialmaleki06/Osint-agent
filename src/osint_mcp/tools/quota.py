@@ -118,12 +118,10 @@ async def check_all_limits(dadata_source: DaDataSource | None = None) -> Provide
     else:
         try:
             quota = await source.get_quota()
-            total_rem = 0
             for method_name, q in quota.items():
                 used = q.get("used", 0)
                 remaining = q.get("remaining", 0)
                 methods[method_name] = ServiceQuota(used=used, remaining=remaining)
-                total_rem += remaining
                 if 0 < remaining <= 10:
                     alerts.append(
                         f"DaData ({method_name}): критически мало запросов (осталось {remaining})."

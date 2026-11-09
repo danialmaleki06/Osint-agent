@@ -177,6 +177,7 @@ def build_analytics_affiliation_facts(
                         found_at=now,
                         trust="reference",
                         payload={
+                            "subject_inn": subject_inn,
                             "tracker_type": tracker_type,
                             "tracker_id": tid,
                             "shared_domains": hit.shared_domains,
