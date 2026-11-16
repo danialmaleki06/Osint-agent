@@ -127,3 +127,39 @@ async def test_generate_full_dossier_with_widget_option():
         assert "таблица_markdown" in w
         assert len(w["пункты"]) == 7
         assert "62.01" in w["таблица_markdown"]
+
+
+def test_build_summary_widget_multiple_media_paragraphs():
+    """Проверка формирования нескольких абзацев/тезисов в пункте СМИ и руководство."""
+    mock_dossier = {
+        "inn": "7724744134",
+        "карточка": {"наименование": "ООО БПМСОФТ", "ИНН": "7724744134", "статус": "действующая"},
+        "светофор": "🟢 Низкий риск",
+        "медиа_и_публичная_активность": {
+            "заявления_руководства": [
+                {
+                    "спикер": "Юрий Востриков",
+                    "тезис": "Цель занять 40% рынка CRM/BPM и гибкие тарифы",
+                    "источник": "TAdviser",
+                }
+            ],
+            "презентации_и_события": [
+                {
+                    "событие_или_продукт": "Презентация концепции AI-driven low-code и ИИ-агентов",
+                    "источник": "CNews",
+                },
+                {
+                    "событие_или_продукт": "Открытие Технологического центра BPMSoft в Москве",
+                    "источник": "TAdviser",
+                },
+            ],
+        },
+    }
+
+    widget = build_summary_widget(mock_dossier)
+    media_item = [it for it in widget["пункты"] if it["номер"] == 7][0]
+    assert len(media_item["тезисы"]) == 3
+    assert "<br>" in media_item["значение"]
+    assert "AI-driven low-code" in media_item["значение"]
+    assert "Технологического центра" in media_item["значение"]
+

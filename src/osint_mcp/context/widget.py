@@ -176,48 +176,88 @@ def _extract_hh_pulse(dossier: dict[str, Any]) -> tuple[str, str]:
     return text, icon
 
 
-def _extract_media_statements(dossier: dict[str, Any]) -> tuple[str, str]:
-    """Возвращает информацию по CNews, TAdviser и заявлениям руководства."""
+def _extract_media_statements(dossier: dict[str, Any]) -> tuple[str, str, list[str]]:
+    """Возвращает информацию по CNews, TAdviser и заявлениям руководства (до 3 ключевых тезисов/абзацев)."""
     media = dossier.get("медиа_и_публичная_активность") or {}
     leaders = media.get("заявления_руководства") or []
     events = media.get("презентации_и_события") or []
     corp = media.get("корпоративные_новости") or []
     key_events = media.get("главные_события") or []
 
-    if leaders:
-        it = leaders[0]
+    paragraphs: list[str] = []
+    seen_texts: set[str] = set()
+
+    def _add(text: str):
+        cleaned = re.sub(r"\s+", " ", text).strip().rstrip(".")
+        norm_key = re.sub(r"[^\w\s]", "", cleaned.lower())[:40]
+        if norm_key and norm_key not in seen_texts:
+            seen_texts.add(norm_key)
+            paragraphs.append(cleaned)
+
+    # 1. Заявления руководства (интервью, цитаты, позиция)
+    for it in leaders:
         spk = it.get("спикер") or "Руководство"
         quote = it.get("тезис") or it.get("цитата_или_тезис") or it.get("заголовок") or ""
         src = it.get("источник") or "СМИ"
-        text = f"{src}: {spk} — {quote}"
-        return text, "🎙️"
+        if quote:
+            _add(f"{src}: {spk} — {quote}")
+        if len(paragraphs) >= 2:
+            break
 
-    if key_events:
-        it = key_events[0]
-        spk = it.get("спикер")
-        thesis = it.get("тезис") or it.get("суть") or ""
+    # 2. Презентации и технологические события (ИИ, low-code, техноцентры, форумы)
+    for it in events:
+        name = (
+            it.get("детали_презентации")
+            or it.get("событие_или_продукт")
+            or it.get("продукт_или_мероприятие")
+            or it.get("описание")
+            or it.get("заголовок")
+            or ""
+        )
         src = it.get("источник") or "СМИ"
-        if spk:
-            text = f"{src}: {spk} — {thesis}"
-        else:
-            text = f"{src}: {thesis}"
-        return text, "🎙️"
+        if name:
+            _add(f"{src}: {name}")
+        if len(paragraphs) >= 3:
+            break
 
-    if events:
-        it = events[0]
-        name = it.get("событие_или_продукт") or it.get("продукт_или_мероприятие") or ""
-        src = it.get("источник") or "СМИ"
-        text = f"{src}: {name}"
-        return text, "📰"
+    # 3. Главные события (если уровень brief)
+    if not paragraphs:
+        for it in key_events:
+            spk = it.get("спикер")
+            thesis = it.get("тезис") or it.get("суть") or ""
+            src = it.get("источник") or "СМИ"
+            if spk and thesis:
+                _add(f"{src}: {spk} — {thesis}")
+            elif thesis:
+                _add(f"{src}: {thesis}")
+            if len(paragraphs) >= 3:
+                break
 
-    if corp:
-        it = corp[0]
-        name = it.get("новость") or it.get("заголовок") or ""
-        src = it.get("источник") or "СМИ"
-        text = f"{src}: {name}"
-        return text, "📰"
+    # 4. Корпоративные соглашения, партнерства
+    if len(paragraphs) < 3:
+        for it in corp:
+            name = it.get("новость") or it.get("заголовок") or it.get("суть") or ""
+            src = it.get("источник") or "СМИ"
+            if name:
+                _add(f"{src}: {name}")
+            if len(paragraphs) >= 3:
+                break
 
-    return "Громких заявлений руководства и инцидентов в ведущих деловых СМИ не зафиксировано", "ℹ️"
+    if not paragraphs:
+        return (
+            "Громких заявлений руководства и инцидентов в ведущих деловых СМИ не зафиксировано",
+            "ℹ️",
+            [],
+        )
+
+    # Формируем многострочный текст для таблицы через <br>
+    if len(paragraphs) == 1:
+        table_text = paragraphs[0]
+    else:
+        table_text = "<br>".join([f"• {p}" for p in paragraphs])
+
+    icon = "🎙️" if leaders else "📰"
+    return table_text, icon, paragraphs
 
 
 def build_summary_widget(dossier: dict[str, Any]) -> dict[str, Any]:
@@ -228,7 +268,7 @@ def build_summary_widget(dossier: dict[str, Any]) -> dict[str, Any]:
     f_text, f_icon = _extract_finance_summary(dossier)
     l_text, l_icon = _extract_legal_risks(dossier)
     h_text, h_icon = _extract_hh_pulse(dossier)
-    m_text, m_icon = _extract_media_statements(dossier)
+    m_text, m_icon, m_paragraphs = _extract_media_statements(dossier)
 
     items = [
         {"номер": 1, "метрика": "Компания и статус", "значение": c_text, "статус": c_icon},
@@ -237,7 +277,7 @@ def build_summary_widget(dossier: dict[str, Any]) -> dict[str, Any]:
         {"номер": 4, "метрика": "Финансы", "значение": f_text, "статус": f_icon},
         {"номер": 5, "метрика": "Юр. чистота / Риски", "значение": l_text, "статус": l_icon},
         {"номер": 6, "метрика": "Кадры (HeadHunter)", "значение": h_text, "статус": h_icon},
-        {"номер": 7, "метрика": "СМИ и руководство", "значение": m_text, "статус": m_icon},
+        {"номер": 7, "метрика": "СМИ и руководство", "значение": m_text, "статус": m_icon, "тезисы": m_paragraphs},
     ]
 
     lines = [

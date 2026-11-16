@@ -238,8 +238,11 @@ def classify_news_hit(
         "конференция", "выступил", "выступила", "доклад", "стенд", "сессия",
         "ципр", "пмэф", "tadviser summit", "cnews forum", "демо", "новинка",
         "новый продукт", "новая версия", "релиз", "обновление сервиса",
+        "техноцентр", "технологический центр", "центр разработки",
+        "искусственный интеллект", "нейросеть", "нейросети", "ai-driven", "low-code", "low code",
     ]
-    if any(m in comb_low for m in presentation_markers):
+    is_presentation = any(m in comb_low for m in presentation_markers) or bool(re.search(r'\b(ии|ai)\b', comb_low))
+    if is_presentation:
         highlight = _extract_quote_or_highlight(combined)
         return MediaItem(
             category="презентация_или_событие",
