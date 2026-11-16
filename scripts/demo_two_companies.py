@@ -25,9 +25,8 @@ from osint_mcp.context.checko import CheckoSource
 from osint_mcp.tools.risk import collect_risk_facts
 from osint_mcp.scoring import score_company
 
-# Офлайн-стенд: настоящего ключа нет, сетевые вызовы перехватываются
-# respx, ключ подставляем фиктивный — как в тестах проекта.
-settings.checko_api_key = "demo-key"
+# Офлайн-стенд: если ключ не задан в окружении, подставляем фиктивный — как в тестах проекта.
+settings.checko_api_key = settings.checko_api_key or "demo-key"
 
 FIXTURES = Path(__file__).parent.parent / "tests" / "fixtures"
 NOW = datetime.now(timezone.utc)
