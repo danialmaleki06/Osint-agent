@@ -39,6 +39,9 @@ from osint_mcp.context.geo_reviews import (
 from osint_mcp.context.news_media import (
     fetch_company_media_presence as _fetch_company_media_presence,
 )
+from osint_mcp.context.widget import (
+    build_summary_widget as _build_summary_widget,
+)
 from osint_mcp.context.reputation_fiascos import (
     async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
 )
@@ -492,6 +495,16 @@ async def get_company_report(
             ),
         ),
     ] = None,
+    widget: Annotated[
+        bool,
+        Field(
+            description=(
+                "Включать ли компактный экспресс-виджет (Markdown-таблицу из 7 ключевых пунктов "
+                "без воды: компания, ОКВЭД, скоринг, финансы, риски/суды, HeadHunter, СМИ/CNews). "
+                "По умолчанию false."
+            ),
+        ),
+    ] = False,
 ) -> dict:
     """Сформировать агрегированный отчёт по организации в формате структурированного JSON.
 
@@ -897,6 +910,8 @@ async def get_company_report(
 
     detail_labels = {"brief": "кратко", "standard": "средне", "full": "полно"}
     result["детализация"] = detail_labels.get(detail_norm, detail_norm)
+    if widget:
+        result["виджет"] = _build_summary_widget(result)
     log.info("tool_call", tool="get_company_report", inn=clean_inn,
              detail=detail_norm, verdict=score.verdict.label,
              fiascos=len(fiasco_facts))
@@ -954,6 +969,16 @@ async def generate_full_dossier(
             ),
         ),
     ] = None,
+    widget: Annotated[
+        bool,
+        Field(
+            description=(
+                "Включать ли компактный экспресс-виджет (Markdown-таблицу из 7 ключевых пунктов "
+                "без воды: компания, ОКВЭД, скоринг, финансы, риски/суды, HeadHunter, СМИ/CNews). "
+                "По умолчанию false."
+            ),
+        ),
+    ] = False,
 ) -> dict:
     """ГЛАВНЫЙ ЕДИНЫЙ ИНСТРУМЕНТ ПРОВЕРКИ КОНТРАГЕНТА. ВСЕГДА ВЫЗЫВАЙ ЕГО, ЕСЛИ ИЗВЕСТЕН ИНН.
 
@@ -1012,6 +1037,7 @@ async def generate_full_dossier(
         expected_name=target_expected,
         debug=debug,
         human_mode=human_mode,
+        widget=widget,
     )
 
 
