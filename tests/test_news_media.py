@@ -32,6 +32,20 @@ def test_build_media_queries_with_director():
     assert any("представил" in q or "презентовал" in q for q in query_texts)
     assert any("конференция" in q or "форум" in q for q in query_texts)
 
+    # Проверяем целевой поиск по официальным технологическим изданиям (CNews и TAdviser)
+    assert any("cnews.ru" in q and "tadviser.ru" in q for q in query_texts)
+
+
+def test_build_media_queries_without_director():
+    """Проверка генерации запросов без ФИО руководителя — обязательно включают CNews и TAdviser."""
+    queries = build_media_queries(
+        company_name='ООО "Яндекс"',
+        brand="Yandex",
+        director_fio=None,
+    )
+    query_texts = [q[1] for q in queries]
+    assert any("cnews.ru" in q and "tadviser.ru" in q for q in query_texts)
+
 
 def test_classify_news_hit_leadership_statement():
     """Тест классификации заявлений и интервью первого лица компании."""

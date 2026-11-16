@@ -297,14 +297,20 @@ def build_media_queries(
             last, first = parts[0], parts[1]
             queries.append(("leadership", f'"{first} {last}" {brand_term} интервью OR заявил OR рассказал'))
             queries.append(("leadership", f'"{last}" {brand_term} генеральный директор OR глава'))
+            queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "{last}" OR "генеральный директор" OR "глава"'))
         elif len(parts) == 1:
             queries.append(("leadership", f'"{parts[0]}" {brand_term} генеральный директор OR интервью'))
+            queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "{parts[0]}" OR "генеральный директор"'))
+    else:
+        # Целевой поиск официальных заявлений руководства в CNews и TAdviser
+        queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "генеральный директор" OR "глава" OR интервью'))
 
-    # 2. Общие запросы на заявления руководства
+    # 2. Общие запросы на заявления руководства в ведущих деловых изданиях
     queries.append(("leadership", f'"{brand_term}" генеральный директор OR глава заявил OR сообщил'))
     queries.append(("leadership", f'"{brand_term}" интервью руководитель OR основатель'))
 
-    # 3. Презентации, новинки, запуски сервисов и релизы продуктов
+    # 3. Презентации, новинки, запуски сервисов и релизы продуктов (включая CNews и TAdviser)
+    queries.append(("presentation", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) представил OR презентовал OR анонсировал'))
     queries.append(("presentation", f'"{brand_term}" представил OR презентовал OR запустил новый'))
     queries.append(("event", f'"{brand_term}" форум OR конференция OR выставка выступление'))
 
@@ -526,7 +532,7 @@ async def fetch_company_media_presence(
             log.debug("news_search_query_error", query=q, error=str(exc))
             return []
 
-    tasks = [_search_one(hint, q) for hint, q in queries[:5]]
+    tasks = [_search_one(hint, q) for hint, q in queries[:6]]
     gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
     seen_urls: set[str] = set()
