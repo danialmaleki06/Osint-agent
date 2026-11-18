@@ -143,30 +143,30 @@ class KeyPool:
                        key=f"…{key[-4:]}", reason=reason)
 
     @_synchronized
-    def rotate(self, reason: str | None = None) -> bool:
-        """Пометить текущий негодным и перейти к следующему.
+    def rotate(self, reason: str | None = None, *, failed_key: str | None = None) -> bool:
+        """Пометить отвергнутый ключ негодным и выбрать рабочий.
 
-        False — запаса нет: вызывающий код отчитывается отказом
-        с исходной причиной, пул остаётся на текущем ключе.
+        Передавайте ключ из запроса: пока провайдер отвечал, другой
+        запрос мог уже передвинуть общий курсор.
+        False — запасных ключей нет.
         """
         keys = self.keys()
         if not keys:
             return False
-        if self._cursor not in keys:
-            # Курсор ещё не выбран (запросов не было) — выбирать нечего:
-            # первый ключ и есть текущий.
-            self._cursor = keys[0]
-        self.mark_exhausted(self._cursor, reason)
+        if failed_key is None:
+            failed_key = self._cursor if self._cursor in keys else keys[0]
+        if failed_key in keys:
+            self.mark_exhausted(failed_key, reason)
+
         now = time.monotonic()
-        nxt = next(
-            (k for k in keys
-             if k != self._cursor and self._exhausted_until.get(k, 0) <= now),
-            None,
-        )
-        if nxt is None:
+        usable = [k for k in keys if k != failed_key and self._exhausted_until.get(k, 0) <= now]
+        if self._cursor in usable:
+            return True
+        if not usable:
             self._log.warning("keys_depleted", service=self._service,
                               size=len(keys), reason=reason)
             return False
+        nxt = usable[0]
         self._cursor = nxt
         self._log.info("key_rotated", service=self._service, key=f"…{nxt[-4:]}")
         return True

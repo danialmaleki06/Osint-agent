@@ -1231,9 +1231,10 @@ class DataGap(BaseModel):
     """
 
     what: str = Field(description="Какие сведения отсутствуют")
-    kind: Literal["source_failed", "not_requested", "no_data", "not_implemented"] = Field(
+    kind: Literal["source_failed", "partial", "not_requested", "no_data", "not_implemented"] = Field(
         description=(
             "source_failed — источник не ответил, ПРОВЕРКА НЕ СОСТОЯЛАСЬ; "
+            "partial — часть запросов к источнику завершилась ошибкой; "
             "not_requested — проверку не запускали; "
             "no_data — проверка прошла, сведений действительно нет; "
             "not_implemented — направление в системе пока не реализовано"

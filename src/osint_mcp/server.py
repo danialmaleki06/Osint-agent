@@ -9,7 +9,7 @@
 Поэтому логи уходят строго в stderr — см. настройку structlog ниже.
 """
 
-import os
+import logging
 import re
 import sys
 from datetime import UTC, datetime
@@ -50,6 +50,9 @@ from osint_mcp.context.source_catalog import (
     SourceSpec as _SourceSpec,
 )
 from osint_mcp.context.source_catalog import (
+    dataset_has_entries as _dataset_has_entries,
+)
+from osint_mcp.context.source_catalog import (
     execute_catalog_batch as _execute_catalog_batch,
 )
 from osint_mcp.context.source_catalog import (
@@ -84,7 +87,7 @@ from osint_mcp.scoring.models import (
 from osint_mcp.tools.context_builder import build_company_context as _build_context
 from osint_mcp.tools.coverage import build_coverage as _build_coverage
 from osint_mcp.tools.inn import validate_inn as _validate_inn
-from osint_mcp.tools.quarantine import QuarantineStore
+from osint_mcp.tools.quarantine import AmbiguousFactId, QuarantineStore
 from osint_mcp.tools.query_guard import (
     build_discrepancy_fact as _build_discrepancy_fact,
 )
@@ -103,6 +106,7 @@ from osint_mcp.tools.risk import (
 from osint_mcp.tools.risk import (
     extract_context_financial_risk_facts as _extract_financial_risk_facts,
 )
+from osint_mcp.tools.web_search_source import SearchUnavailable
 from osint_mcp.tools.web_search_source import search_pending as _search_pending
 
 
@@ -521,6 +525,17 @@ async def get_company_report(
       карточка, статус, светофор, вердикт, score, warnings, риски,
       коммерческий_срез, кадровый_потенциал_документы, ссылки.
     """
+    with ledger.capture_calls(), ledger.subject_scope(None):
+        return await _assemble_company_report(
+            inn=inn, detail=detail, include_reputation=include_reputation,
+            expected_name=expected_name, debug=debug, human_mode=human_mode, widget=widget,
+        )
+
+
+async def _assemble_company_report(
+    inn: str, detail: str, include_reputation: bool, expected_name: str | None,
+    debug: bool, human_mode: bool | None, widget: bool,
+) -> dict:
     import asyncio
 
     from osint_mcp.tools.hr_hub import detect_corporate_hr_hub
@@ -547,7 +562,7 @@ async def get_company_report(
     if context_result.context is None and risk.sources_ok == 0:
         return {
             "inn": clean_inn,
-            "вердикт": "не рекомендуется",
+            "вердикт": None,
             "оценка_не_выставлена": (
                 "Реестровые источники недоступны"
                 + (f": {context_result.reason}" if context_result.reason else "")
@@ -666,7 +681,7 @@ async def get_company_report(
                 interpretation = (
                     facts[0].statement
                     if facts
-                    else "Физическое присутствие подтверждено, критических сигналов не выявлено."
+                    else "По данным геопоиска подтверждения физического присутствия нет."
                 )
                 return {
                     "address": target_addr,
@@ -727,7 +742,8 @@ async def get_company_report(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("get_company_report_news_media_error", error=str(exc))
-                return None
+                ledger.record("media", "search", "failed", "Ошибка при сборе публикаций")
+                return {"статус_поиска": "unavailable", "всего_найдено": 0}
 
         async def _fetch_competitors():
             try:
@@ -772,15 +788,15 @@ async def get_company_report(
         context=context_result.context,
     )
 
-    # Защита от фальшивого «отлично»: если ключевые реестры судов/рисков отказали (Checko 403 / лимиты)
+    # Ограничиваем оценку при недоступности основных реестров рисков.
     core_risk_sources = {"checko.arbitration", "checko.registry_flags", "checko.enforcement"}
     core_ok = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status in ("ok", "partial"))
     core_failed = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status not in ("ok", "partial"))
 
     if core_failed >= 2 and core_ok == 0:
-        quota_warn = "⚠️ Базовые реестры рисков (арбитраж Kad.Arbitr, приставы ФССП, отметки ЕГРЮЛ) недоступны (лимит API Checko 403). Судебные и юридические риски не проверены!"
-        if quota_warn not in score.warnings:
-            score.warnings.append(quota_warn)
+        coverage_warning = "⚠️ Базовые реестры рисков (арбитраж, ФССП и отметки ЕГРЮЛ) недоступны. Проверка судебных и юридических рисков ограничена."
+        if coverage_warning not in score.warnings:
+            score.warnings.append(coverage_warning)
         if score.verdict.total_score >= 50.0:
             from osint_mcp.scoring.models import Verdict
             score.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(score.verdict.total_score, 45.0), floored=True)
@@ -897,21 +913,27 @@ async def get_company_report(
             for f in risk.facts
         ]
 
-    if detail_norm in ("standard", "full") or is_debug:
-        coverage_rep = _build_coverage(clean_inn)
-        if coverage_rep and coverage_rep.checked:
-            result["охват_проверки"] = {
-                "всего_запросов": coverage_rep.total_requests,
+    coverage_rep = _build_coverage(clean_inn, calls=ledger.current_calls())
+    if coverage_rep.checked:
+        coverage = {
+            "всего_запросов": coverage_rep.total_requests,
+            "с_данными": sum(s.ok for s in coverage_rep.services),
+            "без_данных": sum(s.empty for s in coverage_rep.services),
+            "с_ошибкой": sum(s.failed for s in coverage_rep.services),
+        }
+        if detail_norm in ("standard", "full") or is_debug:
+            coverage.update({
                 "методы_успешно": coverage_rep.methods_ok,
                 "методы_не_ответили": coverage_rep.methods_failed,
                 "собранные_сведения": coverage_rep.obtained,
-                "пробелы_в_данных": [g.model_dump() for g in coverage_rep.gaps] if coverage_rep.gaps else [],
-            }
+                "пробелы_в_данных": [g.model_dump() for g in coverage_rep.gaps],
+            })
+        result = {"охват_проверки": coverage, **result}
 
     detail_labels = {"brief": "кратко", "standard": "средне", "full": "полно"}
     result["детализация"] = detail_labels.get(detail_norm, detail_norm)
     if widget:
-        result["виджет"] = _build_summary_widget(result)
+        result = {"виджет": _build_summary_widget(result), **result}
     log.info("tool_call", tool="get_company_report", inn=clean_inn,
              detail=detail_norm, verdict=score.verdict.label,
              fiascos=len(fiasco_facts))
@@ -994,7 +1016,9 @@ async def generate_full_dossier(
     - Детерминированный скоринговый вердикт со светофором (🟢/🟡/🟠/⛔) и баллами.
 
     Возвращает исчерпывающий структурированный JSON со всеми фактами, оценками и ссылками на первоисточники.
-    Никаких дополнительных вызовов других инструментов после этого НЕ ТРЕБУЕТСЯ.
+    При widget=true поле «виджет» находится в начале ответа. Начни ответ с готовой
+    Markdown-таблицы и продолжи по доступным данным досье. Если клиент обрезал длинный вывод,
+    укажи ограничение в ответе. После досье не вызывай другие инструменты и не запускай подагентов.
     """
     parsed_inn, parsed_name = _extract_inn_and_name(inn)
     raw_candidate = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
@@ -1136,7 +1160,7 @@ async def check_companies_batch(
             log.warning("batch_item_failed", inn=inn, error=type(e).__name__)
             entries.append({
                 "inn": inn,
-                "вердикт": "не рекомендуется",
+                "вердикт": None,
                 "оценка_не_выставлена": (
                     f"Проверка не состоялась: внутренняя ошибка {type(e).__name__}. "
                     "Это НЕ оценка компании — повторите по отдельности."
@@ -1177,16 +1201,25 @@ async def check_companies_batch(
                 f"в ЕГРЮЛ — «{query_discrepancy['фактическое_в_реестре']}»!",
             )
         is_debug = debug or getattr(settings, "osint_debug", False)
-        entries.append(_build_batch_entry(context_result, risk, score, debug=is_debug))
+        entry = _build_batch_entry(context_result, risk, score, debug=is_debug)
+        entry["источники_рисков"] = {
+            "успешно": sum(r.status == "ok" for r in risk.results),
+            "частично": sum(r.status == "partial" for r in risk.results),
+            "недоступно": sum(r.status == "unavailable" for r in risk.results),
+            "пропущено": sum(r.status == "skipped" for r in risk.results),
+        }
+        entries.append(entry)
         log.info("batch_item", inn=inn, verdict=score.verdict.label)
 
+    checked = sum("оценка_не_выставлена" not in entry for entry in entries)
     return {
         "запрошено": len(inns),
-        "проверено": len(entries),
+        "проверено": checked,
+        "не_проверено": len(entries) - checked,
         "результаты": entries,
         "note": (
             "Ответ краткий по замыслу. Для подробного разбора конкретной "
-            "компании вызовите get_company_report с detail=full"
+            "компании вызовите generate_full_dossier с detail=full"
         ),
     }
 
@@ -1306,9 +1339,9 @@ async def get_verdict(
     core_failed = sum(1 for r in (risk.results if risk else []) if r.source in core_risk_sources and r.status not in ("ok", "partial"))
 
     if core_failed >= 2 and core_ok == 0:
-        quota_warn = "⚠️ Базовые реестры рисков (арбитраж Kad.Arbitr, приставы ФССП, отметки ЕГРЮЛ) недоступны (лимит API Checko 403). Судебные и юридические риски не проверены!"
-        if quota_warn not in result.warnings:
-            result.warnings.append(quota_warn)
+        coverage_warning = "⚠️ Базовые реестры рисков (арбитраж, ФССП и отметки ЕГРЮЛ) недоступны. Проверка судебных и юридических рисков ограничена."
+        if coverage_warning not in result.warnings:
+            result.warnings.append(coverage_warning)
         if result.verdict.total_score >= 50.0:
             result.verdict = Verdict(code="FAIR", label="удовлетворительно", total_score=min(result.verdict.total_score, 45.0), floored=True)
             result.reasons.append("Оценка ограничена до «удовлетворительно»: ключевые реестры арбитража и юридических рисков не ответили")
@@ -1365,10 +1398,24 @@ async def search_unverified(
       added_to_quarantine: количество новых фактов, добавленных в карантин.
       hits: перечень находок (PendingFact) со ссылками source_url.
     """
+    import asyncio
+
     parsed_inn, _ = _extract_inn_and_name(inn)
     clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     ledger.set_subject(clean_inn)
-    found = _search_pending(query, kind, limit=min(limit, 10))
+    try:
+        found = await asyncio.to_thread(
+            _search_pending, query, kind, limit=max(0, min(limit, 10)),
+        )
+    except SearchUnavailable:
+        return SearchUnverifiedResult(
+            inn=clean_inn,
+            query=query,
+            found=0,
+            added_to_quarantine=0,
+            hits=[],
+            note="Веб-поиск недоступен: поисковые сервисы не вернули выдачу.",
+        )
     added = _quarantine.add(clean_inn, found)
     log.info("tool_call", tool="search_unverified", inn=clean_inn,
              found=len(found), added=added)
@@ -1413,6 +1460,10 @@ def review_pending(
             ),
         ),
     ] = "",
+    source_url: Annotated[
+        str | None,
+        Field(description="Ссылка из списка находок, если у нескольких находок совпал fact_id"),
+    ] = None,
 ) -> dict:
     """Управление карантином нереестровых находок: просмотр, подтверждение с весом или отклонение.
 
@@ -1437,8 +1488,11 @@ def review_pending(
                 "error": "weight обязателен: выставь оценку находки сам — "
                          "насколько она влияет на решение о сотрудничестве"
             }
-        result = _quarantine.confirm(clean_inn, fact_id or "", weight,
-                                     confirmed_by="agent", rationale=rationale)
+        try:
+            result = _quarantine.confirm(clean_inn, fact_id or "", weight,
+                                         confirmed_by="agent", rationale=rationale, source_url=source_url)
+        except AmbiguousFactId as exc:
+            return {"error": str(exc)}
         if result is None:
             return {"error": f"Находка {fact_id} не найдена в карантине"}
         log.info("tool_call", tool="review_pending", inn=clean_inn,
@@ -1452,7 +1506,10 @@ def review_pending(
         }
 
     if action == "reject":
-        ok = _quarantine.reject(clean_inn, fact_id or "")
+        try:
+            ok = _quarantine.reject(clean_inn, fact_id or "", source_url=source_url)
+        except AmbiguousFactId as exc:
+            return {"error": str(exc)}
         log.info("tool_call", tool="review_pending", inn=clean_inn,
                  action="reject", fact_id=fact_id, ok=ok)
         return {"rejected": ok}
@@ -1539,14 +1596,23 @@ async def scan_catalog_source(
             note=f"Источник '{source_name}' не найден в каталоге. См. list_catalog_sources",
         )
 
-    # Достаём название и сайт из контекста (если уже собраны)
-    context_res = await _build_context(clean_inn, _source, _checko)
-    name = (
-        context_res.context.name_short or context_res.context.name_legal
-        if context_res.context
-        else auto_name
-    )
-    domain = context_res.context.brand_domain if context_res.context else None
+    is_local_dataset = spec.scope == "global" and spec.type == "dataset_table"
+    if is_local_dataset and not _dataset_has_entries(source_name):
+        return SearchUnverifiedResult(
+            inn=clean_inn,
+            query=f"catalog:{source_name}",
+            found=0,
+            added_to_quarantine=0,
+            hits=[],
+            note="Локальный снимок источника не содержит записей. Проверка недоступна.",
+        )
+
+    name, domain = auto_name, None
+    if not is_local_dataset:
+        context_res = await _build_context(clean_inn, _source, _checko)
+        if ctx := context_res.context:
+            name = ctx.name_short or ctx.name_legal or name
+            domain = ctx.brand_domain
 
     import asyncio
     found = await asyncio.to_thread(
@@ -1680,6 +1746,17 @@ async def scan_catalog_batch(
     if spec is None:
         return {"error": f"Источник '{source_name}' не найден в каталоге"}
 
+    if spec.scope == "global" and spec.type == "dataset_table" and not _dataset_has_entries(source_name):
+        return {
+            "source": source_name,
+            "scope": spec.scope,
+            "status": "unavailable",
+            "total_requested": len(clean_inns),
+            "total_hits_added": 0,
+            "details": {inn: {"hits_count": 0, "status": "unavailable"} for inn in clean_inns},
+            "note": "Локальный снимок источника не содержит записей. Проверка недоступна.",
+        }
+
     import asyncio
     grouped_hits = await asyncio.to_thread(
         _execute_catalog_batch,
@@ -1700,7 +1777,7 @@ async def scan_catalog_batch(
                 "statements": [f.statement for f in facts],
             }
         else:
-            results_summary[inn] = {"hits_count": 0, "status": "clean_or_not_found"}
+            results_summary[inn] = {"hits_count": 0, "status": "not_found"}
 
     log.info("tool_call", tool="scan_catalog_batch", source=source_name,
              companies=len(clean_inns), total_added=total_added)
@@ -1711,7 +1788,11 @@ async def scan_catalog_batch(
         "total_requested": len(clean_inns),
         "total_hits_added": total_added,
         "details": results_summary,
-        "note": "Пакетная проверка завершена без повторного веб-поиска по каждой компании.",
+        "note": (
+            "Выполнена сверка с локальным снимком реестра."
+            if spec.scope == "global" and spec.type == "dataset_table"
+            else "Выполнен поиск совпадений по компаниям из пакета."
+        ),
     }
 
 
@@ -1767,8 +1848,8 @@ async def check_shared_analytics(
         return {
             "inn": clean_inn,
             "site": target_site,
-            "status": "no_trackers",
-            "message": f"На сайте {target_site} не обнаружено кодов Яндекс.Метрики или Google Analytics (или сайт недоступен: {err}).",
+            "status": "unavailable" if err else "no_trackers",
+            "message": err or f"На сайте {target_site} не обнаружено кодов веб-аналитики.",
             "tracker_ids": {},
             "shared_networks": [],
         }
@@ -1921,7 +2002,7 @@ async def check_geo_reviews(
     if facts:
         added_to_quarantine = _quarantine.add(clean_inn, facts)
 
-    interpretation = facts[0].statement if facts else "Физическое присутствие подтверждено, критических сигналов не выявлено."
+    interpretation = facts[0].statement if facts else "По данным геопоиска подтверждения физического присутствия нет."
 
     log.info("tool_call", tool="check_geo_reviews", inn=clean_inn,
              address=target_addr, facts_count=len(facts), quarantined=added_to_quarantine)
@@ -2111,9 +2192,13 @@ def _serve_http() -> None:
     if hosts:
         from mcp.server.transport_security import TransportSecuritySettings
 
+        local_hosts = [h for h in hosts if h in ("localhost", "127.0.0.1", "[::1]")]
+        hosts = [*hosts, *(f"{h}:{settings.http_port}" for h in local_hosts)]
         security = TransportSecuritySettings(
             allowed_hosts=hosts,
-            allowed_origins=[f"https://{h}" for h in hosts] + hosts,
+            allowed_origins=[f"https://{h}" for h in hosts]
+            + [f"http://{h}:{settings.http_port}" for h in local_hosts]
+            + hosts,
         )
 
     # stateless: удалённый сервер обслуживает нескольких агентов сразу,
@@ -2128,7 +2213,9 @@ def _serve_http() -> None:
 
 
 def main() -> None:
-    transport = os.getenv("OSINT_MCP_TRANSPORT", "stdio").lower()
+    # Checko принимает ключ в query string, которую httpx пишет в INFO.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    transport = settings.mcp_transport.strip().lower()
     log.info("server_start", server=SERVER_NAME, version=VERSION,
              transport=transport, tools=TOOLS)
 

@@ -1,5 +1,9 @@
 """OSINT MCP package for counterparty intelligence and risk scoring."""
 
-from osint_mcp.server import main
-
 __all__ = ["main"]
+
+
+def main() -> None:
+    from osint_mcp.server import main as run_server
+
+    run_server()

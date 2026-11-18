@@ -114,8 +114,18 @@ class GlobalDatasetStore:
             )
         return grouped
 
+    def has_entries(self, source_name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM global_registry_entries WHERE source_name=? LIMIT 1",
+            (source_name,),
+        ).fetchone() is not None
+
 
 _dataset_store = GlobalDatasetStore()
+
+
+def dataset_has_entries(source_name: str) -> bool:
+    return _dataset_store.has_entries(source_name)
 
 
 class SourceSpec(BaseModel):
@@ -229,9 +239,10 @@ def execute_catalog_source(
 
     if spec.type == "site_inspection" and brand_domain:
         # Инспекция конкретного домена компании
-        clean_domain = urlparse(brand_domain).netloc.lower().removeprefix("www.")
-        for kw in spec.keywords[:3]:
-            queries.append(f'site:{clean_domain} "{kw}"')
+        url = brand_domain if "://" in brand_domain else f"//{brand_domain}"
+        clean_domain = (urlparse(url).hostname or "").removeprefix("www.")
+        if clean_domain:
+            queries.extend(f'site:{clean_domain} "{kw}"' for kw in spec.keywords[:3])
     elif spec.domains:
         # Поиск по целевым доверенным доменам
         for domain in spec.domains:

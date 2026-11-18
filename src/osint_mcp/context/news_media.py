@@ -20,12 +20,26 @@ import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
+from xml.etree.ElementTree import ParseError
 
+import httpx
 import structlog
 
-from osint_mcp.tools.web_search_source import search_web
+from osint_mcp import ledger
+from osint_mcp.tools.names import core_name
+from osint_mcp.tools.web_search_source import SearchUnavailable, search_news
 
 log = structlog.get_logger()
+
+_CYRILLIC_TO_LATIN = str.maketrans(dict(zip(
+    "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+    (
+        "a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y",
+        "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f",
+        "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya",
+    ),
+    strict=True,
+)))
 
 RU_MONTHS = {
     "январь": "01", "января": "01", "январе": "01", "янв": "01",
@@ -83,10 +97,10 @@ class MediaItem:
     highlight: str | None = None
 
 
-def resolve_news_source(url: str) -> str:
+def resolve_news_source(url: str, publisher: str = "") -> str:
     """Определяет человекочитаемое наименование делового СМИ или портала."""
     if not url:
-        return "Интернет-СМИ"
+        return publisher or "Интернет-СМИ"
     try:
         host = urlparse(url).netloc.lower()
         if host.startswith("www."):
@@ -95,9 +109,9 @@ def resolve_news_source(url: str) -> str:
         for dom, name in sorted(KNOWN_MEDIA_DOMAINS.items(), key=lambda kv: len(kv[0]), reverse=True):
             if host == dom or host.endswith("." + dom):
                 return name
-        return host or "Интернет-СМИ"
+        return publisher or host or "Интернет-СМИ"
     except Exception:
-        return "Интернет-СМИ"
+        return publisher or "Интернет-СМИ"
 
 
 def extract_news_date(url: str, title: str, snippet: str) -> str | None:
@@ -214,8 +228,6 @@ def classify_news_hit(
             )
             if m_speaker:
                 speaker_name = m_speaker.group(1).strip()
-            elif director_fio:
-                speaker_name = director_fio
 
     if is_leadership:
         quote = _extract_quote_or_highlight(combined)
@@ -226,7 +238,7 @@ def classify_news_hit(
             snippet=snippet.strip(),
             source=source_name,
             date=date_str,
-            speaker=speaker_name or (director_fio if director_fio else "Руководство компании"),
+            speaker=speaker_name or "Руководство компании",
             highlight=quote or (snippet[:180] + "..." if len(snippet) > 180 else snippet),
         )
 
@@ -272,8 +284,6 @@ def build_media_queries(
     director_fio: str | None = None,
 ) -> list[tuple[str, str]]:
     """Формирует набор естественных поисковых запросов для сбора новостей и публичной активности."""
-    from osint_mcp.tools.names import core_name
-
     c_core = core_name(company_name)
     clean_name = c_core or re.sub(
         r'^(общество с ограниченной ответственностью|акционерное общество|публичное акционерное общество|непубличное акционерное общество|ооо|зао|ао|пао|ип)\s+',
@@ -293,34 +303,56 @@ def build_media_queries(
 
     queries: list[tuple[str, str]] = []
 
-    # 1. Запросы по первому лицу / главе компании (если известно ФИО)
+    if not brand_term:
+        return queries
+
+    queries.append(("corporate", f'"{brand_term}"'))
+    if clean_name and clean_name.casefold() != brand_term.casefold():
+        queries.append(("corporate", f'"{clean_name}"'))
+    if not re.search(r"[a-z]", brand_term, re.I):
+        latin_name = _latin_variant(clean_name)
+        if latin_name:
+            queries.append(("corporate", f'"{latin_name}"'))
+
     if director_fio and len(director_fio.strip()) >= 5:
         parts = [p for p in re.split(r'\s+', director_fio.strip()) if len(p) >= 3]
         if len(parts) >= 2:
             last, first = parts[0], parts[1]
-            queries.append(("leadership", f'"{first} {last}" {brand_term} интервью OR заявил OR рассказал'))
-            queries.append(("leadership", f'"{last}" {brand_term} генеральный директор OR глава'))
-            queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "{last}" OR "генеральный директор" OR "глава"'))
+            queries.append(("leadership", f'"{brand_term}" "{first} {last}"'))
+            queries.append(("leadership", f'"{brand_term}" "{last}" "генеральный директор"'))
         elif len(parts) == 1:
-            queries.append(("leadership", f'"{parts[0]}" {brand_term} генеральный директор OR интервью'))
-            queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "{parts[0]}" OR "генеральный директор"'))
-    else:
-        # Целевой поиск официальных заявлений руководства в CNews и TAdviser
-        queries.append(("leadership", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) "генеральный директор" OR "глава" OR интервью'))
+            queries.append(("leadership", f'"{brand_term}" "{parts[0]}" "генеральный директор"'))
 
-    # 2. Общие запросы на заявления руководства в ведущих деловых изданиях
-    queries.append(("leadership", f'"{brand_term}" генеральный директор OR глава заявил OR сообщил'))
-    queries.append(("leadership", f'"{brand_term}" интервью руководитель OR основатель'))
-
-    # 3. Презентации, новинки, запуски сервисов и релизы продуктов (включая CNews и TAdviser)
-    queries.append(("presentation", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) представил OR презентовал OR анонсировал'))
-    queries.append(("presentation", f'"{brand_term}" представил OR презентовал OR запустил новый'))
-    queries.append(("event", f'"{brand_term}" форум OR конференция OR выставка выступление'))
-
-    # 4. Корпоративные соглашения, партнерства
-    queries.append(("corporate", f'"{brand_term}" соглашение OR партнерство'))
+    queries.extend([
+        ("leadership", f'"{brand_term}" интервью'),
+        ("presentation", f'"{brand_term}" (site:cnews.ru OR site:tadviser.ru) (представил OR презентовал OR запустил)'),
+        ("event", f'"{brand_term}" (форум OR конференция OR выставка)'),
+        ("corporate", f'"{brand_term}" (соглашение OR партнерство)'),
+    ])
 
     return queries
+
+
+def _latin_variant(name: str) -> str | None:
+    if len(name) >= 4 and re.search(r"[а-яё]", name, re.I):
+        return name.casefold().translate(_CYRILLIC_TO_LATIN)
+    return None
+
+
+def company_mention_pattern(company_name: str, brand: str | None = None) -> re.Pattern[str] | None:
+    variants = []
+    legal_name = core_name(company_name) or ""
+    for name in (brand, legal_name, _latin_variant(legal_name)):
+        if not name:
+            continue
+        normalized = " ".join(name.casefold().replace("ё", "е").split())
+        term = re.escape(normalized)
+        # Деловые СМИ склоняют названия на согласную: «Яндекса», «Сбербанком».
+        if len(normalized) >= 4 and re.search(r"[бвгджзклмнпрстфхцчшщ]$", normalized):
+            term += r"(?:а|у|ом|е|ов|ам|ами|ах)?"
+        variants.append(term)
+
+    return re.compile(r"(?<!\w)(?:" + "|".join(variants) + r")(?!\w)") if variants else None
 
 
 def format_media_profile(
@@ -339,11 +371,11 @@ def format_media_profile(
     if not items:
         if detail_norm == "brief":
             return {
-                "сводка": "Заметной публичной медиа-активности или заявлений руководства в открытых деловых СМИ не зафиксировано.",
+                "сводка": "По выполненным запросам публикации не найдены.",
                 "всего_найдено": 0,
             }
         return {
-            "сводка": "Публичная медиа-активность низкая: заявлений руководства, презентаций продуктов или докладов на форумах в открытых источниках не обнаружено.",
+            "сводка": "По выполненным запросам публикации не найдены.",
             "заявления_руководства": [],
             "презентации_и_события": [],
             "корпоративные_новости": [],
@@ -443,7 +475,7 @@ def format_media_profile(
             summary_parts.append(f"корпоративные новости ({len(corp_list)})")
 
         summary_txt = (
-            f"Компания ведет активную медийную деятельность ({len(items)} публикаций). В открытых источниках представлены: "
+            f"Найдено публикаций в СМИ: {len(items)}. В выдаче представлены: "
             + ", ".join(summary_parts) + "."
             if summary_parts
             else f"Найдено {len(items)} публикаций в СМИ."
@@ -522,52 +554,62 @@ async def fetch_company_media_presence(
 ) -> dict[str, Any]:
     """Асинхронный параллельный сбор новостей, заявлений руководства и презентаций компании."""
     queries = build_media_queries(company_name, brand=brand, director_fio=director_fio)
-    if not queries:
-        return format_media_profile([], detail=detail)
+    mention = company_mention_pattern(company_name if company_name != inn else "", brand)
+    if not queries or mention is None:
+        result = format_media_profile([], detail=detail)
+        result["сводка"] = "Поиск по СМИ пропущен: название компании не определено."
+        result["статус_поиска"] = "skipped"
+        return result
 
-    async def _search_one(hint: str, q: str) -> list[dict[str, Any]]:
+    async def _search_one(query: str) -> list[dict[str, Any]] | None:
         try:
-            hits = await asyncio.to_thread(search_web, q, limit=3, retries=1, retry_delay=0.5)
-            for h in hits:
-                h["query_hint"] = hint
-            return hits
-        except Exception as exc:  # noqa: BLE001
-            log.debug("news_search_query_error", query=q, error=str(exc))
-            return []
+            hits = await asyncio.to_thread(search_news, query, limit=12)
+        except (httpx.HTTPError, ParseError, SearchUnavailable) as exc:
+            reason = (f"HTTP {exc.response.status_code}"
+                      if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__)
+            ledger.record("media", "search", "failed", reason)
+            log.debug("news_search_query_error", error=reason)
+            return None
+        relevant = []
+        for hit in hits:
+            text = f"{hit.get('title') or ''} {hit.get('snippet') or ''}"
+            normalized = " ".join(text.casefold().replace("ё", "е").split())
+            if mention.search(normalized):
+                relevant.append(hit)
+        ledger.record("media", "search", "ok" if relevant else "empty")
+        return relevant[:5]
 
-    tasks = [_search_one(hint, q) for hint, q in queries[:6]]
-    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    gathered = await asyncio.gather(*(_search_one(query) for _, query in queries))
 
     seen_urls: set[str] = set()
-    raw_hits: list[dict[str, Any]] = []
-
-    for res in gathered:
-        if isinstance(res, list):
-            for h in res:
-                u = (h.get("url") or "").strip()
-                if u and u not in seen_urls:
-                    seen_urls.add(u)
-                    raw_hits.append(h)
-
-    # Классифицируем и собираем объекты
     media_items: list[MediaItem] = []
-    for h in raw_hits:
-        title = h.get("title") or ""
-        snippet = h.get("snippet") or ""
-        url = h.get("url") or ""
-        if not title and not snippet:
-            continue
-        item = classify_news_hit(title, snippet, url, director_fio=director_fio)
-        media_items.append(item)
+    for hits in gathered:
+        for hit in hits or []:
+            url = (hit.get("url") or "").strip()
+            title = hit.get("title") or ""
+            snippet = hit.get("snippet") or ""
+            article_id = url.split("?", 1)[0] if urlparse(url).hostname == "news.google.com" else url
+            if not article_id or article_id in seen_urls or not (title or snippet):
+                continue
+            seen_urls.add(article_id)
+            item = classify_news_hit(title, snippet, url, director_fio=director_fio)
+            item.source = resolve_news_source(hit.get("publisher_url") or url, hit.get("publisher") or "")
+            item.date = hit.get("published_date") or item.date
+            media_items.append(item)
 
-    # Сортировка: сначала элементы с определенной датой, затем остальные
-    def _sort_key(it: MediaItem):
-        if it.date and len(it.date) >= 4:
-            # Извлекаем год для приблизительной сортировки
-            m_yr = re.search(r'\b(20\d{2})\b', it.date)
-            return int(m_yr.group(1)) if m_yr else 2000
-        return 0
+    def _sort_key(item: MediaItem) -> tuple[str, ...]:
+        return tuple(reversed(item.date.split("."))) if item.date else ()
 
     media_items.sort(key=_sort_key, reverse=True)
-
-    return format_media_profile(media_items, detail=detail)
+    result = format_media_profile(media_items, detail=detail)
+    failed = gathered.count(None)
+    if failed == len(gathered):
+        result["статус_поиска"] = "unavailable"
+        result["сводка"] = "Поиск по СМИ недоступен."
+        log.warning("news_search_unavailable", queries=failed)
+    elif failed:
+        result["статус_поиска"] = "partial"
+        result["сводка"] += " Часть поисковых запросов не выполнена."
+    else:
+        result["статус_поиска"] = "ok"
+    return result

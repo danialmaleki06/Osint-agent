@@ -123,10 +123,12 @@ async def test_generate_full_dossier_with_widget_option():
         # 2. При widget=True — ключ "виджет" присутствует с 7 пунктами и таблицей
         res_widget = await generate_full_dossier(inn="7724744134", widget=True)
         assert "виджет" in res_widget
+        assert next(iter(res_widget)) == "виджет"
         w = res_widget["виджет"]
         assert "таблица_markdown" in w
         assert len(w["пункты"]) == 7
         assert "62.01" in w["таблица_markdown"]
+        assert "ФССП: данные не подтверждены" in w["таблица_markdown"]
 
 
 def test_build_summary_widget_multiple_media_paragraphs():
@@ -162,4 +164,12 @@ def test_build_summary_widget_multiple_media_paragraphs():
     assert "<br>" in media_item["значение"]
     assert "AI-driven low-code" in media_item["значение"]
     assert "Технологического центра" in media_item["значение"]
+
+
+def test_widget_reports_unavailable_media_search():
+    dossier = {"медиа_и_публичная_активность": {"статус_поиска": "unavailable"}}
+
+    media_item = build_summary_widget(dossier)["пункты"][-1]
+
+    assert media_item["значение"] == "Поиск по СМИ недоступен"
 

@@ -16,6 +16,7 @@ OSINT-логика и интерпретация для аналитика:
    это маркер веб-студии / общего шаблона, а не корпоративной группы.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -96,9 +97,12 @@ def search_domains_sharing_tracker(
 
     domains: set[str] = set()
     sample_urls: list[str] = []
+    tracker_pattern = re.compile(rf"(?<![\w-]){re.escape(tracker_id)}(?![\w-])", re.IGNORECASE)
 
     for hit in hits:
         url = hit.get("url") or ""
+        if not any(tracker_pattern.search(hit.get(key) or "") for key in ("url", "title", "snippet")):
+            continue
         host = clean_domain(url)
         if not host:
             continue

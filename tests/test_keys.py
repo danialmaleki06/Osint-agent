@@ -5,6 +5,8 @@
 собирается целиком — вместо пяти источников со статусом unavailable.
 """
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -146,6 +148,36 @@ async def test_checko_rotates_to_second_key_on_403(monkeypatch):
     assert res.status == "ok"                        # досье собрано, а не отказано
     assert route.call_count == 2                     # первый ключ отвергнут, второй сработал
     assert route.calls.last.request.url.params["key"] == "keyB"
+
+
+async def test_checko_concurrent_403s_only_exhaust_rejected_key(monkeypatch):
+    monkeypatch.setattr(settings, "checko_api_keys", "keyA,keyB")
+    both_sent = asyncio.Event()
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        key = request.url.params["key"]
+        requests.append(key)
+        if key == "keyA":
+            if requests.count("keyA") == 2:
+                both_sent.set()
+            await asyncio.wait_for(both_sent.wait(), timeout=5)
+            return httpx.Response(
+                403,
+                json={"meta": {"message": "Превышен суточный лимит запросов"}},
+            )
+        return httpx.Response(200, json=_fixture("checko_company_bpmsoft.json"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = CheckoSource(client)
+        results = await asyncio.gather(
+            source.check_registry_flags(BPMSOFT),
+            source.check_registry_flags(BPMSOFT),
+        )
+
+    assert [result.status for result in results] == ["ok", "ok"]
+    assert requests == ["keyA", "keyA", "keyB", "keyB"]
+    assert [item["state"] for item in keys_mod.checko.status()] == ["exhausted", "ok"]
 
 
 @respx.mock

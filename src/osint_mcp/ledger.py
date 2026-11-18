@@ -44,6 +44,24 @@ class Call:
     at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+_current_calls: ContextVar[list[Call] | None] = ContextVar("osint_current_calls", default=None)
+
+
+@contextmanager
+def capture_calls() -> Iterator[None]:
+    """Изолировать учёт обращений одного вызова, включая его дочерние задачи."""
+    token = _current_calls.set([])
+    try:
+        yield
+    finally:
+        _current_calls.reset(token)
+
+
+def current_calls() -> list[Call] | None:
+    calls = _current_calls.get()
+    return list(calls) if calls is not None else None
+
+
 # Обращения по организациям и общий счётчик за время жизни процесса.
 _calls: dict[str, list[Call]] = {}
 _session: dict[str, int] = {}
@@ -87,6 +105,11 @@ def record(
     if daily_count is not None:
         _daily_seen[service] = daily_count
 
+    call = Call(service=service, method=method, outcome=outcome, reason=reason)
+    current = _current_calls.get()
+    if current is not None:
+        current.append(call)
+
     inn = _subject.get()
     if not inn:
         # Обращение вне проверки конкретной организации — например,
@@ -94,7 +117,7 @@ def record(
         return
 
     bucket = _calls.setdefault(inn, [])
-    bucket.append(Call(service=service, method=method, outcome=outcome, reason=reason))
+    bucket.append(call)
 
     if len(_calls) > MAX_SUBJECTS:
         # Вытесняем самую старую организацию: dict хранит порядок вставки

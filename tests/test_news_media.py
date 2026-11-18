@@ -1,7 +1,10 @@
 """Тесты для модуля сбора новостей, публичной активности и заявлений руководства."""
 
 from unittest.mock import patch
+
+import httpx
 import pytest
+import respx
 
 from osint_mcp.context.news_media import (
     MediaItem,
@@ -12,6 +15,7 @@ from osint_mcp.context.news_media import (
     format_media_profile,
     resolve_news_source,
 )
+from osint_mcp.tools.web_search_source import NEWS_SEARCH_URL
 
 
 def test_build_media_queries_with_director():
@@ -182,7 +186,7 @@ async def test_fetch_company_media_presence_mocked():
         },
     ]
 
-    with patch("osint_mcp.context.news_media.search_web", return_value=fake_hits):
+    with patch("osint_mcp.context.news_media.search_news", return_value=fake_hits):
         res = await fetch_company_media_presence(
             inn="7724744134",
             company_name='ООО "БПМСОФТ"',
@@ -197,6 +201,60 @@ async def test_fetch_company_media_presence_mocked():
         assert len(res["презентации_и_события"]) >= 1
         assert "CNews" in res["заявления_руководства"][0]["источник"]
         assert "TAdviser" in res["презентации_и_события"][0]["источник"]
+
+
+@respx.mock
+async def test_media_rss_keeps_publisher_and_publication_date():
+    respx.get(NEWS_SEARCH_URL).mock(return_value=httpx.Response(
+        200,
+        text="""<rss version="2.0"><channel><item>
+            <title>BPMSoft представила новую платформу - CNews.ru</title>
+            <link>https://news.google.com/rss/articles/article-id?oc=5</link>
+            <pubDate>Wed, 18 Nov 2026 10:13:02 GMT</pubDate>
+            <source url="https://www.cnews.ru">CNews.ru</source>
+        </item><item>
+            <title>Магнит запустил новую платформу</title>
+            <link>https://news.google.com/rss/articles/other-id?oc=5</link>
+            <description><![CDATA[<ol><li>Другая публикация о BPMSoft</li></ol>]]></description>
+            <pubDate>Wed, 18 Nov 2026 11:13:02 GMT</pubDate>
+            <source url="https://www.cnews.ru">CNews.ru</source>
+        </item></channel></rss>""",
+    ))
+
+    result = await fetch_company_media_presence("7724744134", 'ООО "БПМСОФТ"')
+
+    assert result["статус_поиска"] == "ok"
+    assert result["всего_найдено"] == 1
+    item, = result["презентации_и_события"]
+    assert item["источник"] == "CNews"
+    assert item["дата"] == "18.11.2026"
+    assert item["url"] == "https://news.google.com/rss/articles/article-id?oc=5"
+
+
+async def test_media_matches_inflected_company_name_at_word_boundary():
+    hits = [
+        {"url": "https://rbc.ru/1", "title": "Новое приложение Яндекса"},
+        {"url": "https://rbc.ru/2", "title": "Новости Яндексоидов"},
+    ]
+    with patch("osint_mcp.context.news_media.search_news", return_value=hits):
+        res = await fetch_company_media_presence("7736207543", 'ООО "Яндекс"', brand="Yandex")
+    assert res["всего_найдено"] == 1
+    assert res["корпоративные_новости"][0]["url"] == "https://rbc.ru/1"
+
+
+@pytest.mark.parametrize(("body", "status", "expected"), [
+    ("<rss><channel/></rss>", 200, "ok"),
+    ("<html>service unavailable</html>", 200, "unavailable"),
+    ("rate limited", 429, "unavailable"),
+])
+@respx.mock
+async def test_media_empty_rss_and_unavailable_provider_have_different_statuses(body, status, expected):
+    respx.get(NEWS_SEARCH_URL).mock(return_value=httpx.Response(status, text=body))
+
+    result = await fetch_company_media_presence("7724744134", "БПМСОФТ", brand="BPMSoft")
+
+    assert result["статус_поиска"] == expected
+    assert result["всего_найдено"] == 0
 
 
 @pytest.mark.asyncio
@@ -232,7 +290,7 @@ async def test_generate_full_dossier_includes_media_activity():
     with patch("osint_mcp.server._build_context", AsyncMock(return_value=ctx_res)), \
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
-         patch("osint_mcp.context.news_media.search_web", return_value=fake_hits):
+         patch("osint_mcp.context.news_media.search_news", return_value=fake_hits):
 
         # 1. Запрос standard
         res_std = await generate_full_dossier(inn="7724744134", detail="standard")

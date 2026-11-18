@@ -101,7 +101,13 @@ def build_human_summary(
     rev_num = (ctx.revenue_latest if (ctx and ctx.revenue_latest) else None) or (latest_fin.revenue if latest_fin else None)
     profit = latest_fin.profit if latest_fin else None
     equity = latest_fin.equity if latest_fin else None
-    tax_debt = (ctx.extras.tax_debt if (ctx and ctx.extras) else 0.0) or 0.0
+    tax_debt = ctx.extras.tax_debt if ctx and ctx.extras else None
+    results = risk.results if risk else []
+    enforcement_checked = any(res.enforcement and res.status == "ok" for res in results)
+    enforcement_partial = any(res.enforcement and res.status == "partial" for res in results)
+    arbitration_checked = any(res.arbitration and res.status == "ok" for res in results)
+    rnp_keys = {"rnp", "НедобПост"}
+    rnp_checked = any(res.status == "ok" and rnp_keys.intersection(res.flags) for res in results)
 
     # Судебные споры
     def_count = 0
@@ -168,15 +174,17 @@ def build_human_summary(
     if equity is not None and equity < 0:
         p2_parts.append(f"собственный капитал отрицательный ({_fmt_rub(equity)})")
 
-    if tax_debt > 10_000:
+    if tax_debt is not None and tax_debt > 0:
         p2_parts.append(f"налоговая задолженность {_fmt_rub(tax_debt)}")
-    else:
+    elif tax_debt == 0:
         p2_parts.append("долгов перед ФНС нет")
 
     if enforce_count > 0:
         p2_parts.append(f"у приставов ФССП {enforce_count} производств на {_fmt_rub(enforce_amount)}")
+    elif enforcement_checked:
+        p2_parts.append("по данным источника производств ФССП не найдено")
     else:
-        p2_parts.append("счета свободны от арестов ФССП")
+        p2_parts.append("данных для полной проверки ФССП недостаточно")
 
     if def_count > 0:
         p2_parts.append(f"в судах ответчик по искам на {_fmt_rub(def_amount)}")
@@ -231,10 +239,13 @@ def build_human_summary(
     q2_lines = [
         f"• Доходность и капитал: {profit_str}.",
     ]
-    if tax_debt > 10_000:
-        q2_lines.append(f"• Налоговая дисциплина: ⚠️ задолженность {_fmt_rub(tax_debt)} перед ФНС.")
+    if tax_debt is None:
+        tax_text = "Налоговая задолженность не проверена"
+    elif tax_debt > 0:
+        tax_text = f"Налоговая задолженность {_fmt_rub(tax_debt)}"
     else:
-        q2_lines.append("• Налоговая дисциплина: 🟢 долгов перед ФНС нет, налоги уплачиваются вовремя.")
+        tax_text = "Долгов перед ФНС нет по данным источника"
+    q2_lines.append(f"• {tax_text}.")
 
     if enforce_count > 0:
         enf_rel = ""
@@ -246,9 +257,14 @@ def build_human_summary(
                 enf_rel = f" ({enf_pct:.1f}% от годовой выручки)"
         is_minor_enf = enf_rel.endswith("незначительный уровень)")
         icon_enf = "•" if is_minor_enf else "⚠️"
-        q2_lines.append(f"• Взыскания приставов (ФССП): {icon_enf} {enforce_count} производств на {_fmt_rub(enforce_amount)}{enf_rel}.")
+        enforcement_text = f"ФССП: {enforce_count} производств на {_fmt_rub(enforce_amount)}{enf_rel}"
+    elif enforcement_checked:
+        icon_enf, enforcement_text = "🟢", "Производств ФССП в источнике не найдено"
+    elif enforcement_partial:
+        icon_enf, enforcement_text = "⚠️", "ФССП: поиск частичный, совпадений нет"
     else:
-        q2_lines.append("• Взыскания приставов (ФССП): 🟢 исполнительных производств нет, аресты на счета не накладывались.")
+        icon_enf, enforcement_text = "⚠️", "ФССП: данные не подтверждены"
+    q2_lines.append(f"• {icon_enf} {enforcement_text}.")
 
     if def_count > 0:
         def_rel = ""
@@ -259,19 +275,24 @@ def build_human_summary(
             else:
                 def_rel = f" ({def_pct:.1f}% от годовой выручки)"
         q2_lines.append(f"• Судебная нагрузка: выступает ответчиком в арбитраже по искам на {_fmt_rub(def_amount)}{def_rel}.")
-    else:
+    elif arbitration_checked:
         q2_lines.append("• Судебная нагрузка: 🟢 крупных судебных споров с контрагентами не зафиксировано.")
+    else:
+        q2_lines.append("• Судебная нагрузка: данных для полной проверки арбитража недостаточно.")
 
-    rnp_flag = any(
-        f.payload.get("flag") == "rnp"
+    rnp_flag = any(res.flags.get(key) for res in results for key in rnp_keys) or any(
+        f.payload.get("flag") in rnp_keys
         for res in (risk.results if risk else [])
         for f in res.facts
         if f.kind == "registry_flag"
     )
     if rnp_flag:
-        q2_lines.append("• Черный список поставщиков (РНП): ⛔ числится в реестре недобросовестных поставщиков.")
+        rnp_text = "Числится в РНП"
+    elif rnp_checked:
+        rnp_text = "В РНП не найден по данным источника"
     else:
-        q2_lines.append("• Черный список поставщиков (РНП): 🟢 в черном списке не числится, допущен к любым закупкам.")
+        rnp_text = "РНП: статус не подтверждён"
+    q2_lines.append(f"• {rnp_text}.")
 
     q2_lines.append(f"• Резюме надежности: {p3}")
 
@@ -346,9 +367,10 @@ def build_human_summary(
         "основной_профиль": f"{profile} (код ОКВЭД {ctx.okved_code if ctx else ''})".strip(),
         "масштаб_бизнеса": size_desc,
         "официальный_штат": f"{employees} сотрудников (данные ФНС)" if employees else "не указан в открытых источниках",
-        "налоговый_статус": f"Задолженность {_fmt_rub(tax_debt)}" if tax_debt > 10_000 else "Задолженностей перед бюджетом нет (чисто)",
-        "судебные_приставы_фссп": f"Открыто производств на {_fmt_rub(enforce_amount)}" if enforce_count > 0 else "0 ₽ — принудительных взысканий нет, счета свободны",
-        "черный_список_рнп": "Числится (высокий риск)" if rnp_flag else "Не числится (полная благонадежность в закупках)",
+        "налоговый_статус": tax_text,
+        "судебные_приставы_фссп": enforcement_text,
+        "черный_список_рнп": rnp_text,
+        "юридическая_чистота_подтверждена": enforcement_checked and not enforce_count and tax_debt == 0 and rnp_checked and not rnp_flag,
     }
 
     return {

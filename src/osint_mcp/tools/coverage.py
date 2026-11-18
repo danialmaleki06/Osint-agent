@@ -43,6 +43,7 @@ MEANING: dict[tuple[str, str], str] = {
     ("fedresurs", "publications"): "коммерческие сведения Федресурса: лизинг, залоги, факторинг, гарантии, СРО",
     ("fsa", "declarations"): "сертификаты и декларации соответствия (ФГИС Росаккредитации)",
     ("hh", "vacancies"): "вакансии и динамика найма (HeadHunter)",
+    ("media", "search"): "публикации в СМИ и деловых изданиях",
     ("software_registry", "search"): "реестр отечественного ПО (Минцифры РФ)",
     ("site", "content"): "содержимое официального сайта и веб-стек",
     ("site", "dns"): "сетевая инфраструктура и DNS-записи",
@@ -67,8 +68,6 @@ FREE_ALWAYS = {
 # Направления, которых в системе пока нет вовсе. Перечисляются явно,
 # чтобы их отсутствие не выглядело как отсутствие находок.
 NOT_IMPLEMENTED = [
-    ("публикации в СМИ и деловых изданиях",
-     "веб-поиск не подключён, требуется доступ к поисковой службе"),
     ("детальный разбор сертификатов: изготовители за рубежом, ТН ВЭД, уведомления",
      "поиск ведётся только по заявителю и изготовителю, без детальных карточек"),
 ]
@@ -78,12 +77,13 @@ def _label(service: str, method: str) -> str:
     return MEANING.get((service, method)) or f"{service}/{method}"
 
 
-def build_coverage(inn: str) -> CoverageReport:
+def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> CoverageReport:
     """Собрать отчёт о полноте проверки по идентификатору организации."""
     from osint_mcp.tools.query_guard import extract_inn_and_name
     parsed_inn, _ = extract_inn_and_name(inn)
     clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
-    calls = ledger.calls_for(clean_inn)
+    if calls is None:
+        calls = ledger.calls_for(clean_inn)
     session = ledger.session_totals()
     daily = ledger.daily_totals()
 
@@ -131,14 +131,14 @@ def build_coverage(inn: str) -> CoverageReport:
             failures.setdefault(key, call.reason)
 
     obtained = [_label(*k) for k, got in succeeded.items() if got]
-    empty = [k for k, got in succeeded.items() if not got]
-    broken = [k for k in failures if not succeeded.get(k)]
+    empty = [k for k, got in succeeded.items() if not got and k not in failures]
+    broken = [k for k in failures if k not in succeeded]
 
     gaps: list[DataGap] = []
-    for key in broken:
+    for key in failures:
         gaps.append(DataGap(
             what=_label(*key),
-            kind="source_failed",
+            kind="partial" if key in succeeded else "source_failed",
             reason=failures.get(key) or "источник не ответил",
         ))
     for key in empty:
@@ -154,6 +154,13 @@ def build_coverage(inn: str) -> CoverageReport:
                 kind="not_requested",
                 reason="проверка не запускалась — вызовите check_affiliations",
             ))
+    media_key = ("media", "search")
+    if media_key not in succeeded and media_key not in failures:
+        gaps.append(DataGap(
+            what=_label(*media_key),
+            kind="not_requested",
+            reason="поиск СМИ по этому ИНН не запускался",
+        ))
     for key, label in FREE_ALWAYS.items():
         if key not in succeeded and key not in failures:
             gaps.append(DataGap(

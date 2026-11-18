@@ -22,6 +22,25 @@ def test_load_source_catalog():
     assert catalog.sources["office_environment"].produces_kind == "office_environment_signal"
 
 
+@pytest.mark.asyncio
+async def test_empty_dataset_is_reported_as_unavailable(monkeypatch):
+    from osint_mcp import server
+
+    def unexpected_registry_request(*args):
+        pytest.fail("Локальный снимок не требует вызова реестров")
+
+    monkeypatch.setattr(server, "_build_context", unexpected_registry_request)
+    monkeypatch.setattr(server, "_dataset_has_entries", lambda source_name: False)
+
+    inn = "7707083893"
+    source = "international_sanctions"
+    single = await server.scan_catalog_source(inn, source)
+    batch = await server.scan_catalog_batch(source, [inn])
+
+    assert "Проверка недоступна" in single.note
+    assert batch["details"][inn]["status"] == "unavailable"
+
+
 def test_custom_criterion_office_dog_kill_switch():
     """Тест критического стоп-фактора: обнаружение собаки в офисе срезает вердикт на -100."""
     now = datetime.now(timezone.utc)

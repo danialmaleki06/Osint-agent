@@ -186,7 +186,7 @@ class CheckoSource:
                 async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
                     resp = await client.get(url, params=params)
             if resp.status_code in ROTATE_STATUS_CODES and attempt < len(checko_pool.keys()):
-                if not checko_pool.rotate(f"HTTP {resp.status_code}"):
+                if not checko_pool.rotate(f"HTTP {resp.status_code}", failed_key=params["key"]):
                     break
                 params = {**params, "key": checko_pool.current()}
                 continue

@@ -149,7 +149,7 @@ class DaDataSource:
                 async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
                     resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in ROTATE_STATUS_CODES and attempt < keys_count:
-                if not dadata_pool.rotate(f"HTTP {resp.status_code}"):
+                if not dadata_pool.rotate(f"HTTP {resp.status_code}", failed_key=key):
                     break
                 key = dadata_pool.current()
                 headers = self._headers(key)

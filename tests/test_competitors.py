@@ -130,6 +130,7 @@ async def test_fetch_company_competitors_mocked():
         assert "бренд" in first
         assert "свежие_события" in first
         assert len(first["свежие_события"]) >= 1
+        assert all(not item["свежие_события"] for item in res["конкуренты"][1:])
 
 
 @pytest.mark.asyncio
@@ -157,7 +158,7 @@ async def test_generate_full_dossier_includes_competitors():
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
          patch("osint_mcp.context.competitors.search_web", return_value=fake_hits), \
-         patch("osint_mcp.context.news_media.search_web", return_value=[]):
+         patch("osint_mcp.context.news_media.search_news", return_value=[]):
 
         # 1. Standard
         res_std = await generate_full_dossier(inn="7724744134", detail="standard")

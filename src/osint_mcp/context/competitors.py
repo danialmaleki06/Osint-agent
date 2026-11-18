@@ -26,7 +26,7 @@ from typing import Any
 
 import structlog
 
-from osint_mcp.context.news_media import extract_news_date, resolve_news_source
+from osint_mcp.context.news_media import company_mention_pattern, extract_news_date, resolve_news_source
 from osint_mcp.tools.web_search_source import search_web
 
 log = structlog.get_logger()
@@ -204,8 +204,11 @@ async def _fetch_competitor_recent_news(competitor_brand: str) -> list[Competito
     """
     # Запрос строго на продукты, анонсы и партнерства компании (без руководства)
     query = f'"{competitor_brand}" представил OR запустил OR анонсировал OR соглашение'
+    mention = company_mention_pattern(competitor_brand)
+    if mention is None:
+        return []
     try:
-        hits = await asyncio.to_thread(search_web, query, limit=2, retries=1, retry_delay=0.5)
+        hits = await asyncio.to_thread(search_web, query, limit=5, retries=1, retry_delay=0.5)
     except Exception as exc:  # noqa: BLE001
         log.debug("competitor_news_search_error", brand=competitor_brand, error=str(exc))
         return []
@@ -219,7 +222,9 @@ async def _fetch_competitor_recent_news(competitor_brand: str) -> list[Competito
             continue
 
         # Отсекаем новости про кадровые перестановки и высказывания директоров
-        comb_low = f"{title} {snippet}".lower()
+        comb_low = " ".join(f"{title} {snippet}".casefold().replace("ё", "е").split())
+        if not mention.search(comb_low):
+            continue
         if any(w in comb_low for w in ("генеральный директор заявил", "глава рассказал", "директор отметил", "назначен гендиректором")):
             continue
 

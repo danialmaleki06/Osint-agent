@@ -97,6 +97,7 @@ class PendingFact(BaseModel):
         description="mention — просто упоминание; reference — подтверждает другой факт",
     )
     found_at: datetime = Field(description="Когда найдено")
+    payload: dict = Field(default_factory=dict, description="Структурированные сведения адаптера")
 
     @field_validator("source_url")
     @classmethod

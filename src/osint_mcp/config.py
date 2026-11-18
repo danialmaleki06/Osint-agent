@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     # OSINT_MCP_TRANSPORT, и остальные настройки сетевого режима обязаны
     # называться так же. Иначе сообщение об ошибке советует одно имя,
     # а код читает другое — на этом я уже споткнулся.
+    mcp_transport: str = Field(default="stdio", validation_alias="OSINT_MCP_TRANSPORT")
     mcp_token: str = Field(
         default="", validation_alias="OSINT_MCP_TOKEN",
         description="Токен доступа для сетевого режима",

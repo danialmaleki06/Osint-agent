@@ -6,7 +6,7 @@ import pytest
 
 from osint_mcp.scoring import score_company
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.quarantine import QuarantineStore
+from osint_mcp.tools.quarantine import AmbiguousFactId, QuarantineStore
 
 NOW = datetime.now(timezone.utc)
 
@@ -23,6 +23,19 @@ def pf(fid: str, url: str = "https://example.org/x") -> PendingFact:
         fact_id=fid, kind="dog_connection", statement=f"находка {fid}",
         source_url=url, found_by="web_search", trust="mention", found_at=NOW,
     )
+
+
+def test_review_ambiguous_legacy_id_affects_only_selected_article(store):
+    store.add("111", [pf("SRCH-1", "https://example.org/one"), pf("SRCH-1", "https://example.org/two")])
+
+    with pytest.raises(AmbiguousFactId):
+        store.reject("111", "SRCH-1")
+    with pytest.raises(AmbiguousFactId):
+        store.confirm("111", "SRCH-1", 0)
+
+    assert store.reject("111", "SRCH-1", source_url="https://example.org/two")
+    assert store.confirm("111", "SRCH-1", 0)["source_url"] == "https://example.org/one"
+    assert len(store.confirmed_facts("111")) == 1
 
 
 def test_add_and_list(store):

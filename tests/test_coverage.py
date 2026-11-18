@@ -131,14 +131,33 @@ async def test_unrequested_check_is_declared():
     assert any("check_affiliations" in (g.reason or "") for g in not_run)
 
 
-async def test_web_search_gap_is_always_declared():
-    """Направление, которого в системе нет, объявляется отдельно."""
+async def test_media_coverage_follows_search_outcome():
     ledger.set_subject(INN)
     ledger.record("dadata", "findById/party", "ok")
     r = build_coverage(INN)
 
-    missing = [g for g in r.gaps if g.kind == "not_implemented"]
-    assert any("СМИ" in g.what for g in missing)
+    assert any("СМИ" in g.what and g.kind == "not_requested" for g in r.gaps)
+
+    ledger.record("media", "search", "failed", "Поисковый сервис не ответил")
+    r = build_coverage(INN)
+    assert any("СМИ" in g.what and g.kind == "source_failed" for g in r.gaps)
+
+    ledger.record("media", "search", "ok")
+    r = build_coverage(INN)
+    assert any("СМИ" in label for label in r.obtained)
+    assert any("СМИ" in g.what and g.kind == "partial" for g in r.gaps)
+
+
+async def test_coverage_of_one_invocation_excludes_previous_invocation():
+    ledger.set_subject(INN)
+    ledger.record("media", "search", "failed")
+    with ledger.capture_calls():
+        ledger.record("media", "search", "ok")
+        coverage = build_coverage(INN, calls=ledger.current_calls())
+
+    assert coverage.total_requests == 1
+    assert coverage.services[0].ok == 1
+    assert coverage.services[0].failed == 0
 
 
 async def test_ledger_separates_companies():

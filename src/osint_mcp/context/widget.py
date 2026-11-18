@@ -130,10 +130,18 @@ def _extract_finance_summary(dossier: dict[str, Any]) -> tuple[str, str]:
 
 def _extract_legal_risks(dossier: dict[str, Any]) -> tuple[str, str]:
     """Возвращает информацию по судам, приставам (ФССП), налогам и РНП."""
-    human_rep = dossier.get("резюме_для_человека", {}).get("ответы_на_главные_вопросы", {})
+    summary = dossier.get("резюме_для_человека") or {}
+    terms = summary.get("переводчик_терминов") or {}
+    if "юридическая_чистота_подтверждена" in terms:
+        text = ", ".join(terms[key] for key in (
+            "судебные_приставы_фссп", "налоговый_статус", "черный_список_рнп",
+        ))
+        return text, "🟢" if terms["юридическая_чистота_подтверждена"] else "⚠️"
+
+    human_rep = summary.get("ответы_на_главные_вопросы", {})
     safety_text = human_rep.get("2_безопасно_ли_сотрудничать") or ""
 
-    fssp_ok = "исполнительных производств нет" in safety_text or "0 ₽" in safety_text
+    fssp_ok = "исполнительных производств нет" in safety_text
     tax_ok = "долгов перед фнс нет" in safety_text.lower() or "налоги уплачиваются вовремя" in safety_text.lower()
     rnp_ok = "в черном списке не числится" in safety_text.lower() or "допущен к любым закупкам" in safety_text.lower()
 
@@ -141,12 +149,12 @@ def _extract_legal_risks(dossier: dict[str, Any]) -> tuple[str, str]:
     if fssp_ok:
         parts.append("0 ₽ взысканий ФССП")
     else:
-        parts.append("Имеются взыскания ФССП")
+        parts.append("ФССП: данные не подтверждены")
 
     if tax_ok:
         parts.append("чистый налоговый профиль")
     else:
-        parts.append("есть вопросы по налогам")
+        parts.append("налоговая задолженность не проверена")
 
     if rnp_ok:
         parts.append("вне РНП (допущен к закупкам)")
@@ -244,8 +252,15 @@ def _extract_media_statements(dossier: dict[str, Any]) -> tuple[str, str, list[s
                 break
 
     if not paragraphs:
+        status = media.get("статус_поиска")
+        if status == "unavailable":
+            return "Поиск по СМИ недоступен", "⚠️", []
+        if status == "partial":
+            return "Поиск по СМИ выполнен частично, публикаций в доступной выдаче нет", "⚠️", []
+        if not media or status == "skipped":
+            return "Поиск по СМИ не выполнен", "ℹ️", []
         return (
-            "Громких заявлений руководства и инцидентов в ведущих деловых СМИ не зафиксировано",
+            "В доступной выдаче СМИ нет материалов для виджета",
             "ℹ️",
             [],
         )
