@@ -23,6 +23,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import registry_client
 
 log = structlog.get_logger()
 
@@ -48,7 +49,7 @@ class EgrulSource:
                 },
             )
         else:
-            async with httpx.AsyncClient(
+            async with registry_client(
                 timeout=settings.request_timeout,
                 headers={"User-Agent": _UA, "Referer": f"{settings.egrul_base_url}/"},
             ) as client:
@@ -73,7 +74,7 @@ class EgrulSource:
             params={"r": stamp, "_": stamp},
         ) if self._client is not None else None
         if result is None:
-            async with httpx.AsyncClient(
+            async with registry_client(
                 timeout=settings.request_timeout,
                 headers={"User-Agent": _UA, "Referer": f"{settings.egrul_base_url}/"},
             ) as client:

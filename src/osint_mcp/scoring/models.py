@@ -147,7 +147,7 @@ class SearchUnverifiedResult(BaseModel):
     )
     note: str = Field(description="Пояснение к результатам поиска")
     status: Literal["ok", "partial", "unavailable", "invalid_inn"] | None = Field(
-        default=None, description="Статус сверки с официальным реестром",
+        default=None, description="Статус поиска или сверки с реестром",
     )
     datasets: list[dict] | None = Field(
         default=None, description="Проверенные выгрузки реестра и даты публикации",

@@ -20,6 +20,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import registry_client
 from osint_mcp.models import MspInfo
 
 log = structlog.get_logger()
@@ -50,7 +51,7 @@ class RmspSource:
                     params={"query": inn},
                 )
             else:
-                async with httpx.AsyncClient(
+                async with registry_client(
                     timeout=settings.request_timeout,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; osint-mcp)"},
                 ) as client:
@@ -68,6 +69,12 @@ class RmspSource:
             return None, "Реестр МСП вернул не JSON"
 
         rows = data.get("data") if isinstance(data, dict) else None
+        # ФНС опускает поле data при корректной пустой выдаче.
+        if (
+            isinstance(data, dict) and "data" not in data
+            and type(data.get("rowCount")) is int and data["rowCount"] == 0
+        ):
+            rows = []
         if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
             ledger.record(service, method, "failed", "неожиданный формат ответа")
             return None, "Реестр МСП вернул неожиданный формат"

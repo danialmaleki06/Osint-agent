@@ -1429,6 +1429,7 @@ async def search_unverified(
             found=0,
             added_to_quarantine=0,
             hits=[],
+            status="unavailable",
             note="Веб-поиск недоступен: поисковые сервисы не вернули выдачу.",
         )
     added = _quarantine.add(clean_inn, found)
@@ -1440,7 +1441,8 @@ async def search_unverified(
         found=len(found),
         added_to_quarantine=added,
         hits=list(found),
-        note="Находки сохранены в карантин; в основной вердикт не включены.",
+        status="ok",
+        note="Находки помещены в карантин." if found else "Совпадений по запросу нет.",
     )
 
 
@@ -1609,6 +1611,7 @@ async def scan_catalog_source(
             found=0,
             added_to_quarantine=0,
             hits=[],
+            status="unavailable",
             note=f"Источник '{source_name}' не найден в каталоге. См. list_catalog_sources",
         )
 
@@ -1643,6 +1646,7 @@ async def scan_catalog_source(
             found=0,
             added_to_quarantine=0,
             hits=[],
+            status="unavailable",
             note="Локальный снимок источника не содержит записей. Проверка недоступна.",
         )
 
@@ -1654,7 +1658,7 @@ async def scan_catalog_source(
             domain = ctx.brand_domain
 
     import asyncio
-    found = await asyncio.to_thread(
+    scan = await asyncio.to_thread(
         _execute_catalog_source,
         source_name=source_name,
         spec=spec,
@@ -1662,7 +1666,14 @@ async def scan_catalog_source(
         name=name,
         brand_domain=domain,
     )
-    added = _quarantine.add(clean_inn, found)
+    found = scan.hits
+    added = _quarantine.add(clean_inn, found) if found else 0
+    note = scan.failure_note
+    if note is None:
+        note = (
+            "Находки помещены в карантин. Для учёта в скоринге подтвердите их через review_pending."
+            if found else "Совпадений по выполненным запросам нет."
+        )
     log.info("tool_call", tool="scan_catalog_source", inn=clean_inn,
              source=source_name, found=len(found), added=added)
 
@@ -1670,12 +1681,10 @@ async def scan_catalog_source(
         inn=clean_inn,
         query=f"catalog:{source_name}",
         found=len(found),
+        status=scan.status,
         added_to_quarantine=added,
         hits=list(found),
-        note=(
-            f"Находки по источнику '{source_name}' помещены в карантин (kind='{spec.produces_kind}'). "
-            "Для учёта в скоринге подтвердите находку через review_pending(confirm)."
-        ),
+        note=note,
     )
 
 
@@ -1837,7 +1846,7 @@ async def scan_catalog_batch(
         }
 
     import asyncio
-    grouped_hits = await asyncio.to_thread(
+    grouped_scans = await asyncio.to_thread(
         _execute_catalog_batch,
         source_name=source_name,
         inns=clean_inns,
@@ -1845,18 +1854,26 @@ async def scan_catalog_batch(
     )
 
     total_added = 0
+    checked = 0
+    incomplete = 0
     results_summary = {}
-    for inn, facts in grouped_hits.items():
+    for inn, scan in grouped_scans.items():
+        facts = scan.hits
+        result = {"hits_count": len(facts)}
         if facts:
             added = _quarantine.add(inn, facts)
             total_added += added
-            results_summary[inn] = {
-                "hits_count": len(facts),
+            result.update({
                 "added_to_quarantine": added,
                 "statements": [f.statement for f in facts],
-            }
-        else:
-            results_summary[inn] = {"hits_count": 0, "status": "not_found"}
+            })
+        if scan.status != "ok":
+            incomplete += 1
+            result.update(status=scan.status, note=scan.failure_note)
+        elif not facts:
+            result["status"] = "not_found"
+        checked += scan.status != "unavailable"
+        results_summary[inn] = result
 
     log.info("tool_call", tool="scan_catalog_batch", source=source_name,
              companies=len(clean_inns), total_added=total_added)
@@ -1864,7 +1881,9 @@ async def scan_catalog_batch(
     return {
         "source": source_name,
         "scope": spec.scope,
+        "status": "ok" if not incomplete else "partial" if checked else "unavailable",
         "total_requested": len(clean_inns),
+        "total_checked": checked,
         "total_hits_added": total_added,
         "details": results_summary,
         "note": (

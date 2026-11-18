@@ -4,6 +4,9 @@
 Проверяются парсинг дат tcinet, приоритет H1 над meta, честность отказов.
 """
 
+from ipaddress import IPv4Address
+from unittest.mock import AsyncMock, Mock
+
 import httpx
 import pytest
 import respx
@@ -65,6 +68,23 @@ async def test_domain_age_network_failure_reported(monkeypatch):
     created, reason = await domain_age("https://bpmsoft.ru")
     assert created is None
     assert reason and "WHOIS недоступен" in reason
+
+
+async def test_domain_age_uses_configured_interface(monkeypatch):
+    from osint_mcp.config import settings
+    from osint_mcp.context import site
+
+    monkeypatch.setattr(settings, "registry_bind_ipv4", IPv4Address("192.0.2.12"))
+    resolver = AsyncMock(return_value="193.232.156.17")
+    query = Mock(return_value="domain: BPMSOFT.RU\ncreated: 2023-04-18T10:00:00Z\n")
+    monkeypatch.setattr(site, "resolve_public_ipv4", resolver)
+    monkeypatch.setattr(site, "_query_whois", query)
+
+    created, reason = await site.domain_age("https://bpmsoft.ru")
+
+    assert reason is None and str(created) == "2023-04-18"
+    resolver.assert_awaited_once_with("whois.tcinet.ru", "192.0.2.12")
+    query.assert_called_once_with("bpmsoft.ru", "193.232.156.17", "192.0.2.12")
 
 
 async def test_self_description_prefers_h1_over_meta(respx_mock=None):

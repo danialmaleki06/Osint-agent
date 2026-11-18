@@ -25,6 +25,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import registry_client
 from osint_mcp.models import FinancialYear
 
 log = structlog.get_logger()
@@ -59,14 +60,18 @@ class BoNalogSource:
     async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
         """GET с учётом в журнале. Ошибки наружу — их смысл знает вызывающий."""
         service, method = self.name, "request"
-        if self._client is not None:
-            resp = await self._client.get(url, params=params)
-        else:
-            async with httpx.AsyncClient(
-                timeout=settings.request_timeout,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; osint-mcp)"},
-            ) as client:
-                resp = await client.get(url, params=params)
+        try:
+            if self._client is not None:
+                resp = await self._client.get(url, params=params)
+            else:
+                async with registry_client(
+                    timeout=settings.request_timeout,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; osint-mcp)"},
+                ) as client:
+                    resp = await client.get(url, params=params)
+        except httpx.TransportError as exc:
+            ledger.record(service, method, "failed", f"сеть: {type(exc).__name__}")
+            raise
         if resp.status_code >= 400:
             ledger.record(service, method, "failed", f"HTTP {resp.status_code}")
             resp.raise_for_status()
@@ -83,7 +88,10 @@ class BoNalogSource:
             params={"query": inn, "page": 0},
         )
         content = data.get("content") if isinstance(data, dict) else None
-        for row in content or []:
+        if not isinstance(content, list) or any(not isinstance(row, dict) for row in content):
+            ledger.record(self.name, "request", "failed", "неожиданный формат поиска организации")
+            raise ValueError("неожиданный формат поиска организации")
+        for row in content:
             # В выдаче ИНН подсвечен тегами: <strong>7724744134</strong>
             found = str(row.get("inn") or "").replace("<strong>", "").replace("</strong>", "")
             if found == inn:

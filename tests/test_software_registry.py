@@ -1,4 +1,4 @@
-"""Тесты единого реестра отечественного ПО Минцифры (SoftwareRegistrySource)."""
+"""Проверки разбора страниц официального реестра ПО Минцифры."""
 
 import httpx
 import pytest
@@ -9,30 +9,34 @@ from osint_mcp.context.software_registry import SoftwareRegistrySource
 pytestmark = pytest.mark.anyio
 
 INN = "7724744134"
+URL = "https://reestr.digital.gov.ru/reestr/"
+ACTIVE_QUERY = {"OWNER_INN": INN, "tab": "registry_active"}
 
-HTML_SAMPLE = """
-<!DOCTYPE html>
-<html>
-<body>
-<main>
-  <article>
-    <h3><a href="https://reestr.digital.gov.ru/reestr/17372/">BPMSoft</a></h3>
-    <span>В реестре</span>
-    <div class="flex">
-      <dt>Запись №</dt><dd>17372</dd>
+
+def _entry(name, number, path="/reestr/1435439/"):
+    return f"""
+    <div class="collection-item" data-href="{path}">
+      <div data-name="№ реестровой записи">{number}</div>
+      <div data-name="Дата регистрации">17.04.2023</div>
+      <div data-name="Наименование ПО">{name}</div>
+      <div data-name="Класс ПО"><div class="class-item"><span>09.01</span>
+        <span>Средства управления бизнес-процессами (BPM)</span></div></div>
     </div>
-    <div class="flex">
-      <dt>Включено</dt><dd>18.04.2023</dd>
+    """
+
+
+def _tab(name, total, rows):
+    return f"""
+    <div data-target="registry_{name}"><span class="tabs-list__item-counter">{total}</span></div>
+    <div class="tabs-content__item" data-tab="registry_{name}">
+      <div class="collection-registry">{rows}</div>
     </div>
-    <div class="flex">
-      <dt>Класс ПО</dt><dd>Системы управления процессами организации (BPM)</dd>
-    </div>
-    <a href="https://reestr.digital.gov.ru/reestr/17372/">Ссылка</a>
-  </article>
-</main>
-</body>
-</html>
-"""
+    <form id="registry_{name}"><input name="OWNER_INN" value="{INN}"></form>
+    """
+
+
+def _page(active="", excluded="", *, total=0, excluded_total=0):
+    return f"<html><body>{_tab('active', total, active)}{_tab('excluded', excluded_total, excluded)}</body></html>"
 
 
 @pytest.fixture
@@ -42,65 +46,56 @@ def anyio_backend():
 
 @respx.mock
 async def test_software_registry_success_parsing():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        return_value=httpx.Response(200, text=HTML_SAMPLE)
+    html = _page(
+        _entry("BPMSoft", "17372"),
+        _entry("ПС Контроль и оценка", "3545", "/excluded/304895/"),
+        total=1,
+        excluded_total=1,
     )
+    respx.get(URL, params=ACTIVE_QUERY).respond(text=html)
 
-    src = SoftwareRegistrySource()
-    products, facts, failure = await src.get_software_products(INN)
+    products, facts, failure = await SoftwareRegistrySource().get_software_products(INN)
 
     assert failure is None
-    assert len(products) == 1
-    p = products[0]
-    assert p.name == "BPMSoft"
-    assert p.reg_number == "17372"
-    assert p.reg_date == "18.04.2023"
-    assert p.status == "В реестре"
-    assert "BPM" in (p.software_class or "")
-    assert p.url == "https://reestr.digital.gov.ru/reestr/17372/"
-
-    assert len(facts) == 1
-    f = facts[0]
-    assert f.kind == "software_registry"
-    assert "BPMSoft" in f.statement
-    assert "17372" in f.statement
-    assert f.event_date is not None
-    assert f.payload["name"] == "BPMSoft"
+    active, excluded = products
+    assert active.name == "BPMSoft"
+    assert active.reg_number == "17372"
+    assert active.reg_date == "17.04.2023"
+    assert active.status == "В реестре"
+    assert "BPM" in (active.software_class or "")
+    assert active.url == f"{URL}1435439/"
+    assert excluded.status == "Исключено"
+    assert [f.fact_id for f in facts] == ["SW-17372"]
+    assert facts[0].event_date is not None
 
 
 @respx.mock
-async def test_software_registry_check_method_ok():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        return_value=httpx.Response(200, text=HTML_SAMPLE)
+async def test_software_registry_reads_remaining_pages():
+    respx.get(URL, params={**ACTIVE_QUERY, "PAGE_N": 2}).respond(
+        text=_page(_entry("Второй", "2"), total=2),
     )
+    respx.get(URL, params=ACTIVE_QUERY).respond(text=_page(_entry("Первый", "1"), total=2))
 
-    src = SoftwareRegistrySource()
-    res = await src.check_software_registry(INN)
+    result = await SoftwareRegistrySource().check_software_registry(INN)
 
-    assert res.status == "ok"
-    assert res.source == "software_registry"
-    assert len(res.facts) == 1
+    assert result.status == "ok"
+    assert [f.fact_id for f in result.facts] == ["SW-1", "SW-2"]
 
 
 @respx.mock
 async def test_software_registry_empty_is_partial():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        return_value=httpx.Response(200, text="<html><body><main>Ничего не найдено</main></body></html>")
-    )
+    respx.get(URL, params=ACTIVE_QUERY).respond(text=_page())
 
-    src = SoftwareRegistrySource()
-    res = await src.check_software_registry(INN)
+    result = await SoftwareRegistrySource().check_software_registry(INN)
 
-    assert res.status == "partial"
-    assert res.reason and "не найдено" in res.reason
-    assert res.facts == []
+    assert result.status == "partial"
+    assert result.reason and "не найдено" in result.reason
+    assert result.facts == []
 
 
 @respx.mock
 async def test_software_registry_unrecognized_html_is_unavailable():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        return_value=httpx.Response(200, text="<html><main>Услуга временно недоступна</main></html>")
-    )
+    respx.get(URL, params=ACTIVE_QUERY).respond(text=_page().replace(INN, "0"))
 
     result = await SoftwareRegistrySource().check_software_registry(INN)
 
@@ -110,25 +105,19 @@ async def test_software_registry_unrecognized_html_is_unavailable():
 
 @respx.mock
 async def test_software_registry_http_error_is_unavailable():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        return_value=httpx.Response(500)
-    )
+    respx.get(URL, params=ACTIVE_QUERY).respond(status_code=503)
 
-    src = SoftwareRegistrySource()
-    res = await src.check_software_registry(INN)
+    result = await SoftwareRegistrySource().check_software_registry(INN)
 
-    assert res.status == "unavailable"
-    assert "500" in (res.reason or "")
+    assert result.status == "unavailable"
+    assert "503" in (result.reason or "")
 
 
 @respx.mock
 async def test_software_registry_network_error_is_unavailable():
-    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
-        side_effect=httpx.ConnectTimeout("timeout")
-    )
+    respx.get(URL, params=ACTIVE_QUERY).mock(side_effect=httpx.ConnectTimeout("timeout"))
 
-    src = SoftwareRegistrySource()
-    res = await src.check_software_registry(INN)
+    result = await SoftwareRegistrySource().check_software_registry(INN)
 
-    assert res.status == "unavailable"
-    assert "недоступен" in (res.reason or "").lower()
+    assert result.status == "unavailable"
+    assert "недоступен" in (result.reason or "").lower()

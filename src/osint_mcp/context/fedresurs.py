@@ -44,6 +44,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import registry_client
 from osint_mcp.models import Fact, SourceResult
 
 log = structlog.get_logger()
@@ -154,7 +155,7 @@ class FedresursSource:
         if self._client is not None:
             resp = await self._client.get(url, headers=self._headers(referer))
         else:
-            async with httpx.AsyncClient(
+            async with registry_client(
                 timeout=min(settings.request_timeout, 3.5),
                 headers=self._headers(referer),
             ) as client:

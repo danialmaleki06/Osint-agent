@@ -1,11 +1,13 @@
 """Пакетная проверка российских ИНН по официальным XML-выгрузкам OFAC и ЕС."""
 
 import asyncio
+import ssl
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from xml.etree import ElementTree
 
 import httpx
+import structlog
 
 from osint_mcp.scoring.models import PendingFact
 from osint_mcp.tools.inn import validate_inn
@@ -20,6 +22,10 @@ _FEEDS = {
 }
 _TTL = timedelta(hours=1)
 _HEADERS = {"User-Agent": "osint-mcp/0.4 (sanctions registry client)", "Accept": "application/xml,text/xml"}
+_RETRY_DELAYS = (0.0, 0.5, 1.5)
+_RETRY_HTTP = {500, 502, 503, 504}
+_RETRY_NETWORK = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+log = structlog.get_logger()
 SCOPE_NOTE = (
     "Сверка выполнена по точному ИНН РФ в опубликованных выгрузках OFAC SDN, OFAC Non-SDN и ЕС. "
     "Сопоставляются записи с указанным ИНН. Отсутствие совпадения не исключает санкций по имени, "
@@ -135,6 +141,47 @@ def _build_snapshot(responses: dict[str, bytes]) -> SanctionsSnapshot:
     return SanctionsSnapshot(grouped, datasets, fetched_at)
 
 
+def _certificate_failure(error: httpx.RequestError) -> bool:
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(cause):
+            return True
+        cause = cause.__cause__
+    return False
+
+
+async def _download_feed(client: httpx.AsyncClient, label: str, url: str) -> bytes:
+    retry_after = 0.0
+    for attempt, delay in enumerate(_RETRY_DELAYS, 1):
+        if delay or retry_after:
+            await asyncio.sleep(max(delay, retry_after))
+        try:
+            # A fresh request to the official URL also obtains a fresh download redirect.
+            response = await client.get(url)
+        except httpx.RequestError as error:
+            host = error.request.url.host
+            certificate_failure = _certificate_failure(error)
+            detail = "ошибка проверки сертификата TLS" if certificate_failure else type(error).__name__
+            reason = f"{label}: {detail} ({host})"
+            retryable = isinstance(error, _RETRY_NETWORK) and not certificate_failure
+            retry_after = 0.0
+        else:
+            host = response.url.host
+            if response.status_code == 200:
+                if attempt > 1:
+                    log.info("sanctions_download_recovered", feed=label, host=host, attempts=attempt)
+                return response.content
+            reason = f"{label}: HTTP {response.status_code} ({host})"
+            wait = response.headers.get("Retry-After", "0")
+            # A long or absolute Retry-After is left to a later tool call.
+            retryable = response.status_code in _RETRY_HTTP and wait.isascii() and wait.isdecimal() and int(wait) <= 2
+            retry_after = float(wait) if retryable else 0.0
+        if not retryable or attempt == len(_RETRY_DELAYS):
+            raise SanctionsUnavailable(f"{reason}; попыток: {attempt}")
+        log.info("sanctions_download_retry", feed=label, host=host, attempt=attempt, reason=reason)
+    raise AssertionError("Выгрузка требует хотя бы одной попытки")
+
+
 class SanctionsRegistry:
     """Единая выгрузка каждого списка на период TTL и поиск всех ИНН в одном индексе."""
 
@@ -146,19 +193,21 @@ class SanctionsRegistry:
         async with self._lock:
             if self._snapshot and datetime.now(UTC) - self._snapshot.fetched_at < _TTL:
                 return self._snapshot
-            async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=_HEADERS) as client:
-                replies = await asyncio.gather(*(client.get(url) for url in _FEEDS.values()), return_exceptions=True)
+            timeout = httpx.Timeout(18, connect=7)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=_HEADERS) as client:
+                replies = await asyncio.gather(
+                    *(_download_feed(client, label, url) for label, url in _FEEDS.items()),
+                    return_exceptions=True,
+                )
             files = {}
             errors = []
             for label, reply in zip(_FEEDS, replies, strict=True):
-                if isinstance(reply, httpx.RequestError):
-                    errors.append(f"{label}: {type(reply).__name__}")
+                if isinstance(reply, SanctionsUnavailable):
+                    errors.append(str(reply))
                 elif isinstance(reply, BaseException):
                     raise reply
-                elif reply.status_code != 200:
-                    errors.append(f"{label}: HTTP {reply.status_code}")
                 else:
-                    files[label] = reply.content
+                    files[label] = reply
             if errors:
                 raise SanctionsUnavailable(", ".join(errors))
             self._snapshot = await asyncio.to_thread(_build_snapshot, files)

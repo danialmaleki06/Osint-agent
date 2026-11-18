@@ -111,6 +111,9 @@ async def collect_risk_facts(
         # в месяц) расходуется осознанно, а не впустую.
         backup = await _backup_checks(inn, failed_results, name)
         restored = [b for b in backup if b.status in ("ok", "partial")]
+        results.extend(
+            b for b in backup if b.source == "apicloud.enforcement" and b.status == "unavailable"
+        )
         for b in restored:
             results.append(b)
             facts.extend(b.facts)

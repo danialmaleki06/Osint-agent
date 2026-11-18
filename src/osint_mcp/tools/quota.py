@@ -304,7 +304,7 @@ async def check_all_limits(dadata_source: DaDataSource | None = None) -> Provide
             category="official_registry",
             session_spent=sw_session,
             cost_per_company_requests=1,
-            notes="Единый реестр российских программ для ЭВМ и БД (reestr.digital.gov.ru / proreestr.ru). Безлимитный доступ.",
+            notes="Официальный реестр российских программ для ЭВМ и БД (reestr.digital.gov.ru).",
         )
     )
 

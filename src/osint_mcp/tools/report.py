@@ -613,8 +613,11 @@ def _sales_lines(ctx: CompanyContext, risk: RiskCollection | None = None) -> lis
     if extras and extras.trademarks:
         lines.append("товарные знаки: " + ", ".join(extras.trademarks[:5]))
     if ctx.software_products:
-        prods = "; ".join(f"«{p.name}» (№{p.reg_number or 'б/н'})" for p in ctx.software_products[:4])
-        lines.append(f"реестр отечественного ПО Минцифры: {prods} — льгота по НДС и приоритет в госзакупках")
+        prods = "; ".join(
+            f"«{p.name}» (№{p.reg_number or 'б/н'}, {p.status})"
+            for p in ctx.software_products[:4]
+        )
+        lines.append(f"реестр отечественного ПО Минцифры: {prods}")
     hiring = ctx.hiring
     if hiring is not None:
         if hiring.open_vacancies:

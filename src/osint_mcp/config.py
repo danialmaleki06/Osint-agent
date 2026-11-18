@@ -1,5 +1,7 @@
 """Настройки. Ключи читаются из окружения либо из .env, в код не попадают."""
 
+from ipaddress import IPv4Address
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -66,6 +68,23 @@ class Settings(BaseSettings):
     # квотах платных справочников.
     bo_nalog_base_url: str = "https://bo.nalog.gov.ru"
     rmsp_base_url: str = "https://rmsp.nalog.ru"
+    registry_proxy_url: str | None = Field(
+        default=None, validation_alias="OSINT_REGISTRY_PROXY_URL"
+    )
+    registry_bind_ipv4: IPv4Address | None = Field(
+        default=None, validation_alias="OSINT_REGISTRY_BIND_IPV4"
+    )
+
+    @field_validator("registry_bind_ipv4", mode="before")
+    @classmethod
+    def _normalize_registry_address(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("registry_proxy_url")
+    @classmethod
+    def _normalize_registry_proxy(cls, value: str | None) -> str | None:
+        return (value or "").strip() or None
+
     hh_base_url: str = "https://api.hh.ru"
     # Бесплатный токен приложения dev.hh.ru: без него API вакансий
     # отвечает 403. Пусто — источник честно помечается недоступным.

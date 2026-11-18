@@ -21,6 +21,7 @@ from selectolax.parser import HTMLParser
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import resolve_public_ipv4
 from osint_mcp.models import SiteTechInfo, SslInfo
 
 log = structlog.get_logger()
@@ -28,7 +29,7 @@ log = structlog.get_logger()
 # WHOIS-серверы по зонам: .ru и .рф обслуживает tcinet.
 _WHOIS_SERVERS = {
     "ru": "whois.tcinet.ru",
-    "рф": "whois.tcinet.ru",
+    "xn--p1ai": "whois.tcinet.ru",
     "su": "whois.tcinet.ru",
 }
 
@@ -49,9 +50,12 @@ def _domain_of(url: str | None) -> str | None:
     return host
 
 
-def _query_whois(domain: str, server: str) -> str:
+def _query_whois(domain: str, server: str, bind: str | None = None) -> str:
     """Синхронный WHOIS-запрос через порт 43."""
-    with socket.create_connection((server, 43), timeout=settings.request_timeout) as s:
+    local_address = (bind, 0) if bind is not None else None
+    with socket.create_connection(
+        (server, 43), timeout=settings.request_timeout, source_address=local_address,
+    ) as s:
         s.sendall((domain + "\r\n").encode())
         chunks = []
         while True:
@@ -67,7 +71,13 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
     domain = _domain_of(url)
     if not domain:
         return None, None
-    tld = domain.rsplit(".", 1)[-1]
+    try:
+        ascii_domain = domain.rstrip(".").encode("idna").decode("ascii")
+    except UnicodeError:
+        return None, "Некорректное имя домена для WHOIS"
+    if not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", ascii_domain, re.ASCII):
+        return None, "Некорректное имя домена для WHOIS"
+    tld = ascii_domain.rsplit(".", 1)[-1]
     server = _WHOIS_SERVERS.get(tld)
     if server is None:
         return None, f"WHOIS для зоны .{tld} не настроен"
@@ -75,16 +85,22 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
     service, method = "whois", "domain_age"
 
     try:
-        text = await asyncio.to_thread(_query_whois, domain, server)
-    except OSError as e:
+        bind = settings.registry_bind_ipv4
+        if bind is None:
+            text = await asyncio.to_thread(_query_whois, ascii_domain, server)
+        else:
+            address = await resolve_public_ipv4(server, str(bind))
+            text = await asyncio.to_thread(_query_whois, ascii_domain, address, str(bind))
+    except (OSError, httpx.HTTPError, ValueError) as e:
         ledger.record(service, method, "failed", f"сеть: {type(e).__name__}")
         return None, f"WHOIS недоступен: {type(e).__name__}"
 
     created: date | None = None
     for line in text.splitlines():
-        if "created" not in line.lower() or ":" not in line:
+        field, delimiter, value = line.partition(":")
+        if not delimiter or field.strip().casefold() != "created":
             continue
-        raw = line.split(":", 1)[1].strip()
+        raw = value.strip()
         raw = raw.split()[0] if raw else ""
         try:
             created = datetime.fromisoformat(raw).date()

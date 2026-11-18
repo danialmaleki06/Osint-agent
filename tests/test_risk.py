@@ -56,9 +56,17 @@ def _mock_free_sources(fedresurs_status=200, fsa_status=200, sw_status=200):
     respx.post("https://pub.fsa.gov.ru/api/v1/rss/common/certificates/get").mock(
         return_value=httpx.Response(fsa_status, json={"items": [], "total": 0})
     )
-    respx.get(url__regex=r"https://proreestr\.ru/reestr-po/\?q=.*").mock(
-        return_value=httpx.Response(sw_status, text="<html><main>Ничего не найдено</main></html>")
-    )
+    def software_response(request):
+        inn = request.url.params["OWNER_INN"]
+        tabs = "".join(
+            f'<div data-target="{tab}"><span class="tabs-list__item-counter">0</span></div>'
+            f'<div class="tabs-content__item" data-tab="{tab}"></div>'
+            f'<form id="{tab}"><input name="OWNER_INN" value="{inn}"></form>'
+            for tab in ("registry_active", "registry_excluded")
+        )
+        return httpx.Response(sw_status, text=f"<html>{tabs}</html>")
+
+    respx.get(host="reestr.digital.gov.ru", path="/reestr/").mock(side_effect=software_response)
 
 
 def _mock_all():

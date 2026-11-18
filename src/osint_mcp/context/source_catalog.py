@@ -12,6 +12,7 @@
 """
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -21,7 +22,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
 
 _SOURCES_CATALOG_PATH = Path(__file__).parent.parent / "config_data" / "sources.yaml"
 _GLOBAL_DATASET_DB = Path(__file__).parent.parent / "config_data" / "global_datasets.db"
@@ -185,11 +186,35 @@ def save_source_to_catalog(
         yaml.safe_dump(cat.model_dump(), f, allow_unicode=True, sort_keys=False)
 
 
+@dataclass
+class CatalogScan:
+    hits: list[PendingFact]
+    succeeded: int = 0
+    failed: int = 0
+    config_error: str | None = None
+
+    @property
+    def status(self) -> Literal["unavailable", "partial", "ok"]:
+        if self.config_error:
+            return "unavailable"
+        if self.failed:
+            return "partial" if self.succeeded else "unavailable"
+        return "ok"
+
+    @property
+    def failure_note(self) -> str | None:
+        if self.config_error:
+            return self.config_error
+        if self.failed:
+            return f"Выполнено веб-запросов: {self.succeeded}, не ответили: {self.failed}."
+        return None
+
+
 def execute_catalog_batch(
     source_name: str,
     inns: list[str],
     catalog: SourceCatalog | None = None,
-) -> dict[str, list[PendingFact]]:
+) -> dict[str, CatalogScan]:
     """Пакетное выполнение для глобального источника на список ИНН.
 
     Не делает 100 запросов в поисковик! Опрашивает центральную базу за 1 вызов.
@@ -197,26 +222,27 @@ def execute_catalog_batch(
     cat = catalog or load_source_catalog()
     spec = cat.sources.get(source_name)
     if spec is None:
-        return {inn: [] for inn in inns}
+        return {inn: CatalogScan([], config_error="Источник отсутствует в каталоге.") for inn in inns}
 
     if spec.scope == "global" and spec.type == "dataset_table":
         # Мгновенный запрос к локальному срезу глобального реестра
-        return _dataset_store.match_inns(
+        matches = _dataset_store.match_inns(
             source_name=source_name,
             inns=inns,
             produces_kind=spec.produces_kind,
             trust=spec.trust,
         )
+        return {inn: CatalogScan(hits) for inn, hits in matches.items()}
 
     # Если это внешний поиск по доменам, пакетные запросы объединяются в пачки
-    grouped: dict[str, list[PendingFact]] = {inn: [] for inn in inns}
-    for inn in inns:
-        grouped[inn] = execute_catalog_source(
+    return {
+        inn: execute_catalog_source(
             source_name=source_name,
             spec=spec,
             inn=inn,
         )
-    return grouped
+        for inn in dict.fromkeys(inns)
+    }
 
 
 def execute_catalog_source(
@@ -226,7 +252,7 @@ def execute_catalog_source(
     name: str | None = None,
     brand_domain: str | None = None,
     limit: int = 5,
-) -> list[PendingFact]:
+) -> CatalogScan:
     """Выполнить целенаправленный сбор по источнику из каталога."""
     if spec.type.startswith("official_"):
         raise ValueError("Для официального реестра требуется асинхронная загрузка выгрузки")
@@ -238,7 +264,7 @@ def execute_catalog_source(
             produces_kind=spec.produces_kind,
             trust=spec.trust,
         )
-        return matches.get(inn, [])
+        return CatalogScan(matches.get(inn, []))
 
     company_name = name or inn
     queries = []
@@ -261,14 +287,20 @@ def execute_catalog_source(
         queries.append(spec.search_template.replace("{inn}", inn).replace("{name}", company_name))
 
     if not queries:
-        return []
+        return CatalogScan([], config_error="Для источника не настроены поисковые запросы.")
 
     hits: list[PendingFact] = []
     seen_urls: set[str] = set()
+    scan = CatalogScan(hits)
 
     for q in queries[:2]:
-        raw_results = search_web(q, limit=limit, retries=1)
-        for i, res in enumerate(raw_results):
+        try:
+            raw_results = search_web(q, limit=limit, retries=1, raise_on_unavailable=True)
+        except SearchUnavailable:
+            scan.failed += 1
+            continue
+        scan.succeeded += 1
+        for res in raw_results:
             url = res.get("url") or ""
             if not url or url in seen_urls:
                 continue
@@ -295,4 +327,4 @@ def execute_catalog_source(
                 )
             )
 
-    return hits
+    return scan

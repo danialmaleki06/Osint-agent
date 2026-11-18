@@ -64,7 +64,7 @@ class ApiCloudSource:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
 
-    async def _get(self, method: str, params: dict) -> dict | None:
+    async def _get(self, method: str, params: dict, *, record_success: bool = True) -> dict | None:
         """GET к агрегатору. None при любой неудаче — источник резервный."""
         key = settings.apicloud_key
         if not key:
@@ -95,26 +95,54 @@ class ApiCloudSource:
         if "error" in data and data.get("status") != 200:
             ledger.record(self.name, method, "failed", str(data.get("message") or "ошибка агрегатора"))
             return None
-        ledger.record(self.name, method, "ok")
+        if record_success:
+            ledger.record(self.name, method, "ok")
         return data
 
     # ─────────────────────────  ФССП  ─────────────────────────
 
     async def check_enforcement(self, inn: str) -> SourceResult:
         """Исполнительные производства по ИНН. Прямой аналог checko.enforcement."""
-        data = await self._get("fssp.php", {"type": "inn", "inn": inn, "region": "-1"})
-        if data is None:
+        method = "fssp.php"
+        source = "apicloud.enforcement"
+        if len(inn) != 10 or not inn.isascii() or not inn.isdecimal():
             return SourceResult(
-                source="apicloud.enforcement", status="unavailable",
-                reason="Резервный источник ФССП не ответил",
+                source=source, status="unavailable",
+                reason="Поиск ФССП через api-cloud требует 10-значный ИНН организации",
             )
-        records = data.get("records") or []
+        data = await self._get(
+            method, {"type": "inn", "inn": inn, "region": "-1"}, record_success=False,
+        )
+        if data is None:
+            reason = (
+                "Резервный источник ФССП не ответил"
+                if settings.apicloud_key else "Для подключения к ФССП через api-cloud не задан APICLOUD_KEY"
+            )
+            return SourceResult(source=source, status="unavailable", reason=reason)
+
+        count = str(data.get("countAll", data.get("count", "")))
+        records = data.get("records", [] if count == "0" else None)
+        if (
+            str(data.get("status")) != "200" or data.get("error")
+            or not (count.isascii() and count.isdecimal())
+            or not isinstance(records, list)
+            or any(not isinstance(rec, dict) or not str(rec.get("process_title") or "").strip() for rec in records)
+            or int(count) < len(records) or (int(count) > 0 and not records)
+        ):
+            reason = "api-cloud вернул непроверяемую выдачу ФССП"
+            ledger.record(self.name, method, "failed", reason)
+            return SourceResult(source=source, status="unavailable", reason=reason)
+
+        total = int(count)
+        total_amount = sum(_num(rec.get("sum")) for rec in records)
+        outstanding = sum(
+            _num(rec.get("sum")) for rec in records
+            if not (rec.get("stopIP") or rec.get("stopIPDate"))
+        )
         now = datetime.now(timezone.utc)
         facts: list[Fact] = []
-        total_amount = 0.0
         for i, rec in enumerate(records[:10], 1):
             amount = _num(rec.get("sum"))
-            total_amount += amount
             facts.append(Fact(
                 fact_id=f"REN-{i}",
                 kind="enforcement",
@@ -129,18 +157,19 @@ class ApiCloudSource:
                 payload={"number": rec.get("process_title"), "amount": amount,
                          "subject": rec.get("subject"), "via": "apicloud"},
             ))
-        total = int(_num(data.get("countAll")))
+        reason = None
+        if not total:
+            reason = "По запросу ФССП через api-cloud совпадений не найдено"
+        elif len(records) < total:
+            reason = f"Получено {len(records)} из {total} производств. Суммы по полученным записям"
+        ledger.record(self.name, method, "ok" if total else "empty")
         return SourceResult(
-            source="apicloud.enforcement",
-            status="ok" if total else "partial",
-            reason=None if total else (
-                "Резервный источник производств не нашёл. Поиск по базе приставов "
-                "приблизителен — пустой результат означает «не найдено», "
-                "а НЕ «задолженности отсутствуют»"
-            ),
+            source=source,
+            status="partial" if reason else "ok",
+            reason=reason,
             facts=facts,
             enforcement=EnforcementSummary(
-                total=total, total_amount=total_amount, outstanding=total_amount,
+                total=total, total_amount=total_amount, outstanding=outstanding,
             ),
         )
 

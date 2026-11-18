@@ -23,6 +23,7 @@ from tenacity import (
 
 from osint_mcp import ledger
 from osint_mcp.config import settings
+from osint_mcp.context.registry_http import registry_client
 from osint_mcp.context.okved import industry_terms
 from osint_mcp.keys import ROTATE_STATUS_CODES, QuotaExhausted
 from osint_mcp.keys import dadata as dadata_pool
@@ -146,7 +147,7 @@ class DaDataSource:
             if self._client is not None:
                 resp = await self._client.post(url, json=payload, headers=headers)
             else:
-                async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+                async with registry_client(timeout=settings.request_timeout, headers={}) as client:
                     resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in ROTATE_STATUS_CODES and attempt < keys_count:
                 if not dadata_pool.rotate(f"HTTP {resp.status_code}", failed_key=key):

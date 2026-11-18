@@ -31,6 +31,7 @@ EU_XML = f"""<export xmlns="http://eu.europa.ec/fpi/fsd/export" generationDate="
 @pytest.fixture
 def services(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_sanctions_registry", sanctions.SanctionsRegistry())
+    monkeypatch.setattr(sanctions, "_RETRY_DELAYS", (0.0, 0.0, 0.0))
     store = QuarantineStore(tmp_path / "q.db")
     monkeypatch.setattr(server, "_quarantine", store)
     yield store
@@ -85,3 +86,34 @@ async def test_200_with_wrong_export_is_unavailable(services):
 
     assert result.status == "unavailable" and "OFAC SDN" in result.note
     assert not services.list_pending(MATCH)
+
+
+@respx.mock
+async def test_sdn_redirect_connection_failure_retries_only_failed_feed(services):
+    routes = _feeds()
+    storage = "https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/test.xml"
+    routes[0].respond(302, headers={"Location": storage})
+    download = respx.get(storage).mock(side_effect=[
+        httpx.ConnectError("connection interrupted"),
+        httpx.Response(200, text=OFAC_XML),
+    ])
+
+    result = await server.scan_catalog_batch(SOURCE, [MATCH, ABSENT])
+
+    assert result["status"] == "ok" and result["total_checked"] == 2
+    assert result["details"][MATCH]["hits_count"] == 3
+    assert [route.call_count for route in routes] == [2, 1, 1]
+    assert download.call_count == 2
+
+
+@pytest.mark.parametrize("failure", [httpx.Response(403), httpx.ConnectError("CERTIFICATE_VERIFY_FAILED")])
+@respx.mock
+async def test_sanctions_permanent_errors_fail_on_first_attempt(services, failure):
+    routes = _feeds()
+    routes[0].mock(side_effect=[failure])
+
+    result = await server.scan_catalog_source(MATCH, SOURCE)
+
+    assert result.status == "unavailable"
+    assert "sanctionslistservice.ofac.treas.gov" in result.note
+    assert all(route.call_count == 1 for route in routes)

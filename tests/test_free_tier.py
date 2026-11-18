@@ -155,9 +155,10 @@ async def test_rmsp_parsed_direct_active_flag():
 
 
 @respx.mock
-async def test_rmsp_not_in_registry_is_valid_empty():
+@pytest.mark.parametrize("payload", [{"data": []}, {"rowCount": 0}])
+async def test_rmsp_not_in_registry_is_valid_empty(payload):
     respx.get(f"{settings.rmsp_base_url}/search-proc.json").mock(
-        return_value=httpx.Response(200, json={"data": []})
+        return_value=httpx.Response(200, json=payload)
     )
     msp, failure = await RmspSource().get_msp(BPMSOFT)
 
@@ -228,6 +229,43 @@ async def test_apicloud_enforcement_parses(monkeypatch):
     assert res.enforcement.total_amount == pytest.approx(150000.0)
     assert res.facts[0].fact_id == "REN-1"
     assert "[резервный источник]" in res.facts[0].statement
+
+
+@respx.mock
+@pytest.mark.parametrize("payload", [
+    {"status": 403},
+    {"status": 200},
+    {"status": 200, "countAll": 5, "records": []},
+])
+async def test_apicloud_enforcement_rejects_unverifiable_response(monkeypatch, payload):
+    monkeypatch.setattr(settings, "apicloud_key", "test-key")
+    respx.get(f"{settings.apicloud_base_url}/fssp.php").respond(json=payload)
+
+    result = await ApiCloudSource().check_enforcement(BPMSOFT)
+
+    assert result.status == "unavailable"
+    assert result.enforcement is None
+
+
+@respx.mock
+async def test_apicloud_enforcement_totals_cover_all_loaded_records(monkeypatch):
+    monkeypatch.setattr(settings, "apicloud_key", "test-key")
+    records = [
+        {"process_title": f"{i}/26/77015-ИП", "sum": "100.00"}
+        for i in range(11)
+    ]
+    records[0]["stopIPDate"] = "11.11.2026"
+    respx.get(f"{settings.apicloud_base_url}/fssp.php").respond(
+        json={"status": 200, "countAll": 20, "records": records},
+    )
+
+    result = await ApiCloudSource().check_enforcement(BPMSOFT)
+
+    assert result.status == "partial"
+    assert "11 из 20" in result.reason
+    assert result.enforcement.total_amount == 1100
+    assert result.enforcement.outstanding == 1000
+    assert len(result.facts) == 10
 
 
 # ─────────────  баги, пойманные живым прогоном агента  ─────────────

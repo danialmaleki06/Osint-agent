@@ -1,6 +1,7 @@
 """Тесты для каталога подключаемых источников и динамических критериев."""
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 import pytest
 
 from osint_mcp.context.source_catalog import (
@@ -42,6 +43,34 @@ async def test_empty_dataset_is_reported_as_unavailable(monkeypatch):
 
     assert "Проверка недоступна" in single.note
     assert batch["details"][inn]["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("successful", "status"), [(False, "unavailable"), (True, "partial")])
+async def test_catalog_reports_web_failures(monkeypatch, successful, status):
+    from osint_mcp import server
+    from osint_mcp.context import source_catalog
+    from osint_mcp.models import ContextResult
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+
+    inn = "7707083893"
+    source = "test_search"
+    spec = SourceSpec(topic="test", produces_kind="test", domains=["one.example", "two.example"])
+    monkeypatch.setattr(server, "_build_context", AsyncMock(return_value=ContextResult(status="unavailable")))
+    monkeypatch.setattr(server, "_load_source_catalog", lambda: SourceCatalog(sources={source: spec}))
+
+    def search(query, *, limit, retries, raise_on_unavailable):
+        assert raise_on_unavailable is True
+        if successful and "one.example" in query:
+            return []
+        raise SearchUnavailable("веб-поиск отказал")
+
+    monkeypatch.setattr(source_catalog, "search_web", search)
+    single = await server.scan_catalog_source(inn, source)
+    batch = await server.scan_catalog_batch(source, [inn])
+
+    assert single.status == status and single.found == 0
+    assert batch["status"] == batch["details"][inn]["status"] == status
 
 
 def test_custom_criterion_office_dog_kill_switch():
