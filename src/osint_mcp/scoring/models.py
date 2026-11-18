@@ -146,6 +146,13 @@ class SearchUnverifiedResult(BaseModel):
         description="Сами находки — каждая с source_url",
     )
     note: str = Field(description="Пояснение к результатам поиска")
+    status: Literal["ok", "partial", "unavailable", "invalid_inn"] | None = Field(
+        default=None, description="Статус сверки с официальным реестром",
+    )
+    datasets: list[dict] | None = Field(
+        default=None, description="Проверенные выгрузки реестра и даты публикации",
+    )
+    next_offset: int | None = Field(default=None, description="Смещение следующей страницы находок")
 
 
 class ScoreResult(BaseModel):

@@ -5,6 +5,7 @@
     "osint-mcp": {
       "type": "local",
       "command": ["uv", "run", "python", "-m", "osint_mcp.server"],
+      "timeout": 180000,
       "environment": {
         "PYTHONUTF8": "1",
         "OSINT_DEBUG": "false",

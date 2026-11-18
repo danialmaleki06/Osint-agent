@@ -33,20 +33,26 @@ sources:
   international_sanctions:
     scope: global
     topic: sanctions
-    type: dataset_table
+    type: official_sanctions
     trust: reference
-    description: "Единый централизованный реестр международных санкций (OFAC, EU, SDN)"
+    description: "Сверка по ИНН РФ с официальными списками OFAC SDN, OFAC Non-SDN и ЕС"
     produces_kind: international_sanction
-    domains:
-      - "opensanctions.org"
-      - "sanctionssearch.ofac.treas.gov"
-      - "data.europa.eu"
-    search_template: 'site:{domain} ("{inn}" OR "{name}")'
-    keywords:
-      - "sanctions"
-      - "sdn list"
-      - "asset freeze"
-      - "санкционный список"
+
+  rospotrebnadzor_plan:
+    scope: global
+    topic: inspections
+    type: official_erknm_plan
+    trust: reference
+    description: "Плановые мероприятия Роспотребнадзора по 248-ФЗ, официальный годовой архив ЕРКНМ"
+    produces_kind: rospotrebnadzor_inspection
+
+  rospotrebnadzor_inspections:
+    scope: global
+    topic: inspections
+    type: official_erknm_month
+    trust: reference
+    description: "Мероприятия Роспотребнадзора по 248-ФЗ, официальный архив ЕРКНМ за текущий месяц"
+    produces_kind: rospotrebnadzor_inspection
 
   office_environment:
     scope: company_asset

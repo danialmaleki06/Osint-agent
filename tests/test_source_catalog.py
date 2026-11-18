@@ -16,7 +16,7 @@ from osint_mcp.models import ExtFact, Fact
 
 def test_load_source_catalog():
     catalog = load_source_catalog()
-    assert "international_sanctions" in catalog.sources
+    assert catalog.sources["international_sanctions"].type == "official_sanctions"
     assert "office_environment" in catalog.sources
     assert catalog.sources["office_environment"].topic == "company_culture"
     assert catalog.sources["office_environment"].produces_kind == "office_environment_signal"
@@ -33,7 +33,10 @@ async def test_empty_dataset_is_reported_as_unavailable(monkeypatch):
     monkeypatch.setattr(server, "_dataset_has_entries", lambda source_name: False)
 
     inn = "7707083893"
-    source = "international_sanctions"
+    source = "local_dataset"
+    monkeypatch.setattr(server, "_load_source_catalog", lambda: SourceCatalog(sources={source: SourceSpec(
+        scope="global", type="dataset_table", topic="test", produces_kind="test",
+    )}))
     single = await server.scan_catalog_source(inn, source)
     batch = await server.scan_catalog_batch(source, [inn])
 

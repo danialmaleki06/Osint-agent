@@ -46,6 +46,8 @@ from osint_mcp.context.reputation_fiascos import (
     async_build_reputation_fiasco_facts as _async_build_reputation_fiasco_facts,
 )
 from osint_mcp.context.site import inspect_site_content as _inspect_site_content
+from osint_mcp.context.sanctions import SCOPE_NOTE, SanctionsRegistry, SanctionsUnavailable
+from osint_mcp.context.erknm import ErknmRegistry, ErknmSnapshot, ErknmUnavailable
 from osint_mcp.context.source_catalog import (
     SourceSpec as _SourceSpec,
 )
@@ -137,6 +139,19 @@ class _LazyQuarantineStore:
 
 
 _quarantine = _LazyQuarantineStore()
+_sanctions_registry = SanctionsRegistry()
+_erknm_plan = ErknmRegistry()
+_erknm_month = ErknmRegistry(monthly=True)
+
+
+def _official_registry(source_type: str) -> tuple[SanctionsRegistry | ErknmRegistry, str] | None:
+    if source_type == "official_sanctions":
+        return _sanctions_registry, SCOPE_NOTE
+    if source_type == "official_erknm_plan":
+        return _erknm_plan, _erknm_plan.note
+    if source_type == "official_erknm_month":
+        return _erknm_month, _erknm_month.note
+    return None
 
 SERVER_NAME = "osint-mcp"
 VERSION = "0.4.0"
@@ -1573,6 +1588,7 @@ async def scan_catalog_source(
             examples=["office_environment", "international_sanctions"],
         ),
     ],
+    offset: Annotated[int, Field(ge=0, description="Смещение страницы в выдаче ЕРКНМ")] = 0,
 ) -> SearchUnverifiedResult:
     """Точечно опросить подключённый источник из Библиотеки источников.
 
@@ -1595,6 +1611,29 @@ async def scan_catalog_source(
             hits=[],
             note=f"Источник '{source_name}' не найден в каталоге. См. list_catalog_sources",
         )
+
+    if official := _official_registry(spec.type):
+        registry, scope_note = official
+        query = f"catalog:{source_name}"
+        if not _validate_inn(clean_inn).valid:
+            return SearchUnverifiedResult(inn=clean_inn, query=query, found=0, added_to_quarantine=0,
+                                          hits=[], status="invalid_inn", note="Требуется корректный ИНН РФ.")
+        try:
+            snapshot = await registry.snapshot()
+        except (SanctionsUnavailable, ErknmUnavailable) as exc:
+            return SearchUnverifiedResult(inn=clean_inn, query=query, found=0, added_to_quarantine=0,
+                                          hits=[], status="unavailable", note=f"Сверка недоступна: {exc}")
+        facts = snapshot.entries.get(clean_inn, [])
+        page = facts[offset:offset + 25] if isinstance(registry, ErknmRegistry) else facts
+        end = offset + len(page)
+        incomplete = isinstance(snapshot, ErknmSnapshot) and bool(snapshot.empty_files)
+        if incomplete:
+            scope_note += f" Полнота ограничена. Число пустых XML-файлов в архиве — {len(snapshot.empty_files)}."
+        return SearchUnverifiedResult(inn=clean_inn, query=query, found=len(facts),
+                                      added_to_quarantine=_quarantine.add(clean_inn, page) if page else 0,
+                                      hits=page, status="partial" if incomplete else "ok",
+                                      datasets=snapshot.datasets, note=scope_note,
+                                      next_offset=end if page and end < len(facts) else None)
 
     is_local_dataset = spec.scope == "global" and spec.type == "dataset_table"
     if is_local_dataset and not _dataset_has_entries(source_name):
@@ -1701,7 +1740,10 @@ def register_custom_source(
         keywords=keywords,
         search_template=search_template,
     )
-    _save_source_to_catalog(name.strip(), spec)
+    try:
+        _save_source_to_catalog(name.strip(), spec)
+    except ValueError as exc:
+        return {"error": str(exc)}
     log.info("tool_call", tool="register_custom_source", name=name, scope=scope_norm)
     return {
         "status": "ok",
@@ -1745,6 +1787,43 @@ async def scan_catalog_batch(
     spec = catalog.sources.get(source_name)
     if spec is None:
         return {"error": f"Источник '{source_name}' не найден в каталоге"}
+
+    if official := _official_registry(spec.type):
+        registry, scope_note = official
+        unique = dict.fromkeys(clean_inns)
+        valid = {inn for inn in unique if _validate_inn(inn).valid}
+        details = {inn: {"hits_count": 0, "status": "invalid_inn"} for inn in unique if inn not in valid}
+        result = {"source": source_name, "scope": spec.scope, "total_requested": len(clean_inns),
+                  "total_checked": 0, "total_hits_added": 0, "details": details}
+        if not valid:
+            return {**result, "status": "invalid_inn", "note": "Требуются корректные ИНН РФ."}
+        try:
+            snapshot = await registry.snapshot()
+        except (SanctionsUnavailable, ErknmUnavailable) as exc:
+            details.update({inn: {"hits_count": 0, "status": "unavailable"} for inn in valid})
+            return {**result, "status": "unavailable", "note": f"Сверка недоступна: {exc}"}
+
+        incomplete = isinstance(snapshot, ErknmSnapshot) and bool(snapshot.empty_files)
+        if incomplete:
+            scope_note += f" Полнота ограничена. Число пустых XML-файлов в архиве — {len(snapshot.empty_files)}."
+        total_added = 0
+        for inn in unique:
+            if inn not in valid:
+                continue
+            facts = snapshot.entries.get(inn, [])
+            preview = facts[:3] if isinstance(registry, ErknmRegistry) else facts
+            added = _quarantine.add(inn, preview) if preview else 0
+            total_added += added
+            empty_status = "not_found_in_available_records" if incomplete else "not_found"
+            details[inn] = {"hits_count": len(facts), "status": "found" if facts else empty_status,
+                            "added_to_quarantine": added, "statements": [f.statement for f in preview],
+                            "hits_returned": len(preview),
+                            "hits": [{"fact_id": f.fact_id, "source_url": f.source_url,
+                                      "dataset": f.payload.get("dataset", f.found_by),
+                                      "reference": f.payload.get("reference", f.payload.get("number"))} for f in preview]}
+        return {**result, "status": "ok" if not incomplete and len(valid) == len(unique) else "partial",
+                "total_checked": len(valid),
+                "total_hits_added": total_added, "datasets": snapshot.datasets, "note": scope_note}
 
     if spec.scope == "global" and spec.type == "dataset_table" and not _dataset_has_entries(source_name):
         return {

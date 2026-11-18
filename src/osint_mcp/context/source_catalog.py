@@ -136,7 +136,8 @@ class SourceSpec(BaseModel):
         description="global — единый реестр на все компании; company_asset — сайт/активы конкретного юрлица",
     )
     topic: str = Field(description="Тематическая категория (sanctions, company_culture, hr_stack, etc.)")
-    type: Literal["dataset_table", "curated_domains", "site_inspection", "vacancy_api", "custom"] = Field(
+    type: Literal["dataset_table", "official_sanctions", "official_erknm_plan", "official_erknm_month",
+                  "curated_domains", "site_inspection", "vacancy_api", "custom"] = Field(
         default="curated_domains",
         description="Тип адаптера источника",
     )
@@ -175,6 +176,9 @@ def save_source_to_catalog(
     """Сохранить новый источник в YAML каталога."""
     p = path or _SOURCES_CATALOG_PATH
     cat = load_source_catalog(p)
+    current = cat.sources.get(name)
+    if current and current.type.startswith("official_"):
+        raise ValueError("Встроенный официальный источник нельзя заменить пользовательским")
     cat.sources[name] = spec
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -224,6 +228,8 @@ def execute_catalog_source(
     limit: int = 5,
 ) -> list[PendingFact]:
     """Выполнить целенаправленный сбор по источнику из каталога."""
+    if spec.type.startswith("official_"):
+        raise ValueError("Для официального реестра требуется асинхронная загрузка выгрузки")
     # Если источник глобальный и лежит в локальном снимке датасетов
     if spec.scope == "global" and spec.type == "dataset_table":
         matches = _dataset_store.match_inns(
