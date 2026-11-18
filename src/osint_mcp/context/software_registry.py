@@ -67,10 +67,10 @@ class SoftwareRegistrySource:
             html = resp.text
         except httpx.HTTPStatusError as e:
             ledger.record(self.name, "search", "failed", f"HTTP {e.response.status_code}")
-            return [], [], f"Реестр ПО вернул HTTP {e.response.status_code}"
+            return [], [], f"Зеркало реестра ПО (proreestr.ru) вернуло HTTP {e.response.status_code}"
         except (httpx.TransportError, httpx.TimeoutException) as e:
             ledger.record(self.name, "search", "failed", f"сеть: {type(e).__name__}")
-            return [], [], f"Реестр ПО недоступен ({type(e).__name__})"
+            return [], [], f"Реестр ПО недоступен через proreestr.ru ({type(e).__name__})"
 
         doc = HTMLParser(html)
         products: list[SoftwareProduct] = []
@@ -107,6 +107,8 @@ class SoftwareRegistrySource:
                 software_class=software_class,
                 url=link or (f"https://reestr.digital.gov.ru/reestr/{reg_number}/" if reg_number else None),
             )
+            if not name or not (reg_number or link):
+                continue
             products.append(prod)
 
             facts.append(Fact(
@@ -130,6 +132,12 @@ class SoftwareRegistrySource:
                 },
             ))
 
+        if not products:
+            main = doc.css_first("main")
+            if not main or "ничего не найдено" not in main.text(separator=" ", strip=True).casefold():
+                reason = "Зеркало реестра ПО вернуло страницу без распознаваемых результатов поиска"
+                ledger.record(self.name, "search", "failed", reason)
+                return [], [], reason
         ledger.record(self.name, "search", "ok" if products else "empty")
         log.info("software_registry.search", inn=inn, found=len(products))
         return products, facts, None

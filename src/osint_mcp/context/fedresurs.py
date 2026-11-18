@@ -168,10 +168,15 @@ class FedresursSource:
                f"?limit=15&offset=0&code={inn}&searchString={inn}")
         referer = f"{settings.fedresurs_base_url}/search/entity?code={inn}"
         data = await self._get_json(url, referer)
-        page = data.get("pageData") or []
+        page = data.get("pageData") if isinstance(data, dict) else None
+        if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+            raise ValueError("нет списка организаций pageData")
         for row in page:
             if str(row.get("inn") or "") == inn:
-                return row.get("guid")
+                guid = row.get("guid")
+                if not isinstance(guid, str) or not guid:
+                    raise ValueError("в карточке отсутствует guid")
+                return guid
         return None
 
     async def check_commercial_facts(self, inn: str) -> SourceResult:
@@ -197,10 +202,10 @@ class FedresursSource:
                 reason=f"Федресурс недоступен: {type(e).__name__}",
             )
         except ValueError:
-            ledger.record(service, method, "failed", "ответ не JSON")
+            ledger.record(service, method, "failed", "неожиданный формат поиска организаций")
             return SourceResult(
                 source="fedresurs.commercial", status="unavailable",
-                reason="Федресурс вернул не JSON",
+                reason="Федресурс вернул неожиданный формат поиска организаций",
             )
 
         if not guid:
@@ -212,38 +217,50 @@ class FedresursSource:
                 reason=None,
             )
 
-        url = (f"{settings.fedresurs_base_url}/backend/companies/{guid}"
-               f"/publications?limit={MAX_PUBLICATIONS}&offset=0")
         referer = f"{settings.fedresurs_base_url}/company/{guid}"
-        try:
-            data = await self._get_json(url, referer)
-        except httpx.HTTPStatusError as e:
-            ledger.record(service, method, "failed", f"HTTP {e.response.status_code}")
-            return SourceResult(
-                source="fedresurs.commercial", status="unavailable",
-                reason=f"Федресурс ответил {e.response.status_code} на список публикаций",
-            )
-        except (httpx.TransportError, httpx.TimeoutException) as e:
-            ledger.record(service, method, "failed", f"сеть: {type(e).__name__}")
-            return SourceResult(
-                source="fedresurs.commercial", status="unavailable",
-                reason=f"Федресурс недоступен: {type(e).__name__}",
-            )
-        except ValueError:
-            ledger.record(service, method, "failed", "ответ не JSON")
-            return SourceResult(
-                source="fedresurs.commercial", status="unavailable",
-                reason="Федресурс вернул не JSON",
-            )
+        records: list[dict] = []
+        total = 0
+        failure = None
+        seen_guids: set[str] = set()
+        for page in range(max(1, settings.max_pages)):
+            offset = page * MAX_PUBLICATIONS
+            url = (f"{settings.fedresurs_base_url}/backend/companies/{guid}"
+                   f"/publications?limit={MAX_PUBLICATIONS}&offset={offset}")
+            try:
+                data = await self._get_json(url, referer)
+                rows = data.get("pageData") if isinstance(data, dict) else None
+                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                    raise ValueError("нет списка публикаций pageData")
+                total = max(total, int(data["found"]) if data.get("found") is not None else offset + len(rows))
+                if not rows and offset < total:
+                    raise ValueError("пустая страница при неполной выдаче")
+            except httpx.HTTPStatusError as exc:
+                failure = f"HTTP {exc.response.status_code}"
+            except httpx.TransportError as exc:
+                failure = f"сеть: {type(exc).__name__}"
+            except (TypeError, ValueError):
+                failure = "неожиданный формат публикаций"
+            if failure:
+                ledger.record(service, method, "failed", failure)
+                break
+            ledger.record(service, method, "ok" if rows else "empty")
+            for row in rows:
+                pub_guid = row.get("guid")
+                if isinstance(pub_guid, str) and pub_guid:
+                    if pub_guid in seen_guids:
+                        continue
+                    seen_guids.add(pub_guid)
+                records.append(row)
+            if offset + len(rows) >= total:
+                break
 
-        records = data.get("pageData") or []
-        total = int(data.get("found") or 0)
+        if failure and not records:
+            return SourceResult(source="fedresurs.commercial", status="unavailable",
+                                reason=f"Федресурс не вернул публикации ({failure})")
         now = datetime.now(UTC)
 
         facts: list[Fact] = []
-        for i, rec in enumerate(records[:MAX_PUBLICATIONS], 1):
-            if not isinstance(rec, dict):
-                continue
+        for i, rec in enumerate(records, 1):
             if rec.get("isAnnuled") or rec.get("isRefuted"):
                 continue
             title = rec.get("title") or rec.get("type") or None
@@ -280,17 +297,21 @@ class FedresursSource:
                 },
             ))
 
-        ledger.record(service, method, "ok" if total else "empty")
         log.info("fedresurs.publications", inn=inn, found=total,
                  classified=len(facts))
+        if failure or len(records) < total:
+            reason = f"Федресурс: прочитано {len(records)} из {total} публикаций"
+            if failure:
+                reason += f" ({failure})"
+        elif not total:
+            reason = ("Публикаций в Федресурсе не найдено. Лизинг, залоги и факторинг публикуют "
+                      "не все организации, поэтому пустой результат означает отсутствие публикаций.")
+        else:
+            reason = None
         return SourceResult(
             source="fedresurs.commercial",
-            status="ok" if total else "partial",
-            reason=None if total else (
-                "Публикаций в Федресурсе не найдено. Лизинг, залоги и "
-                "факторинг публикуют не все организации — пустой результат "
-                "означает «публикаций нет», а не «активов нет»"
-            ),
+            status="partial" if reason else "ok",
+            reason=reason,
             facts=facts,
         )
 

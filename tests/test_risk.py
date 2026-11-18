@@ -57,7 +57,7 @@ def _mock_free_sources(fedresurs_status=200, fsa_status=200, sw_status=200):
         return_value=httpx.Response(fsa_status, json={"items": [], "total": 0})
     )
     respx.get(url__regex=r"https://proreestr\.ru/reestr-po/\?q=.*").mock(
-        return_value=httpx.Response(sw_status, text="<html></html>")
+        return_value=httpx.Response(sw_status, text="<html><main>Ничего не найдено</main></html>")
     )
 
 

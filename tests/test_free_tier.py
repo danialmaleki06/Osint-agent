@@ -147,7 +147,7 @@ async def test_rmsp_parsed_direct_active_flag():
     msp, failure = await RmspSource().get_msp(BPMSOFT)
 
     assert failure is None
-    assert msp is not None and msp.in_registry
+    assert msp is not None and not msp.in_registry
     assert msp.employees == 386
     assert msp.is_active is False              # is_active=0 -> исключён
     assert msp.excluded_at is not None and msp.excluded_at.year == 2024

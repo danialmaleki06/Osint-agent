@@ -97,6 +97,18 @@ async def test_software_registry_empty_is_partial():
 
 
 @respx.mock
+async def test_software_registry_unrecognized_html_is_unavailable():
+    respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
+        return_value=httpx.Response(200, text="<html><main>Услуга временно недоступна</main></html>")
+    )
+
+    result = await SoftwareRegistrySource().check_software_registry(INN)
+
+    assert result.status == "unavailable"
+    assert result.facts == []
+
+
+@respx.mock
 async def test_software_registry_http_error_is_unavailable():
     respx.get(f"https://proreestr.ru/reestr-po/?q={INN}").mock(
         return_value=httpx.Response(500)

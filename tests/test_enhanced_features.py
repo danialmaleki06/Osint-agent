@@ -8,8 +8,10 @@
 """
 
 from datetime import date, datetime, timezone
+import httpx
 import pytest
 
+from osint_mcp.config import settings
 from osint_mcp.context.fedresurs import FedresursSource, MAX_PUBLICATIONS
 from osint_mcp.models import (
     CardExtras,
@@ -37,6 +39,31 @@ def test_fedresurs_page_size_is_15():
     headers = src._headers("https://fedresurs.ru")
     assert "Sec-Ch-Ua" in headers
     assert headers["Referer"] == "https://fedresurs.ru"
+
+
+@pytest.mark.parametrize("second_status", [200, 503])
+async def test_fedresurs_paginates_and_preserves_first_page(second_status, monkeypatch):
+    inn = "7724744134"
+    offsets = []
+    monkeypatch.setattr(settings, "max_pages", 3)
+
+    def handle(request):
+        if request.url.path.endswith("/companies"):
+            return httpx.Response(200, json={"pageData": [{"inn": inn, "guid": "company-id"}]})
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        if offset and second_status != 200:
+            return httpx.Response(second_status)
+        rows = [{"guid": f"item-{i}", "title": "Договор лизинга", "type": "SfactMessage"}
+                for i in range(offset, min(offset + MAX_PUBLICATIONS, 16))]
+        return httpx.Response(200, json={"found": 16, "pageData": rows})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        result = await FedresursSource(client).check_commercial_facts(inn)
+
+    assert offsets == [0, 15]
+    assert len(result.facts) == (16 if second_status == 200 else 15)
+    assert result.status == ("ok" if second_status == 200 else "partial")
 
 
 def test_financial_health_matrix_calculation():

@@ -21,6 +21,7 @@ import httpx
 import structlog
 from selectolax.parser import HTMLParser
 
+from osint_mcp import ledger
 from osint_mcp.scoring.models import PendingFact
 
 SEARCH_URL = "https://lite.duckduckgo.com/lite/"
@@ -131,7 +132,9 @@ def search_web(
             if response.status_code == 202:
                 raise SearchUnavailable("DuckDuckGo Lite: HTTP 202")
             response.raise_for_status()
-            return _parse_duckduckgo(response.text)[:limit]
+            hits = _parse_duckduckgo(response.text)[:limit]
+            ledger.record("duckduckgo", "web_search", "ok" if hits else "empty")
+            return hits
         except (httpx.HTTPError, SearchUnavailable) as exc:
             _log_provider_failure("duckduckgo", exc)
 
@@ -141,7 +144,9 @@ def search_web(
                 timeout=timeout, follow_redirects=True,
             )
             response.raise_for_status()
-            return _parse_yahoo(response.text)[:limit]
+            hits = _parse_yahoo(response.text)[:limit]
+            ledger.record("yahoo", "web_search", "ok" if hits else "empty")
+            return hits
         except (httpx.HTTPError, SearchUnavailable) as exc:
             _log_provider_failure("yahoo", exc)
 
@@ -156,6 +161,10 @@ def search_web(
 
 def _log_provider_failure(provider: str, error: Exception) -> None:
     reason = f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError) else type(error).__name__
+    if provider in ("duckduckgo", "yahoo"):
+        if isinstance(error, SearchUnavailable):
+            reason = str(error)
+        ledger.record(provider, "web_search", "failed", reason)
     log.debug("web_search_provider_failed", provider=provider, error=reason)
 
 

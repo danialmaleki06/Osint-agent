@@ -1094,13 +1094,14 @@ def build_report(
                 report["события_егрюл"] = ev_list
 
         # ── Реестр МСП ──
-        if ctx.msp and ctx.msp.in_registry:
+        if ctx.msp:
             msp_data = {
                 k: v for k, v in {
                     "в_реестре": ctx.msp.in_registry,
                     "категория": ctx.msp.category,
                     "численность": ctx.msp.employees,
                     "дата_включения": _fmt_date(ctx.msp.included_at),
+                    "дата_исключения": _fmt_date(ctx.msp.excluded_at),
                     "действует": ctx.msp.is_active,
                 }.items() if v is not None
             }

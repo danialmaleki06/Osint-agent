@@ -15,13 +15,12 @@
 декларация, где компания изготовитель, раскрывает её производство,
 где заявитель — что и для чего она возит.
 
-Из этой сети pub.fsa.gov.ru может быть недоступен (geo-ограничение
-сервиса наблюдалось 06.10.2026): любой отказ сети — пустой результат
-с reason, источник не должен ронять проверку рисков. Поиск по колонке
-идёт как по ИНН, так и по наименованию; записи сверяются с ИНН по
-данным детального запроса.
+Из этой сети pub.fsa.gov.ru может быть недоступен. Отказ одного
+эндпоинта оставляет в результате данные от второго. Поиск по колонкам
+идёт по ИНН и, если передано, по наименованию.
 """
 
+import asyncio
 from datetime import UTC, date, datetime
 
 import httpx
@@ -147,64 +146,85 @@ class FsaSource:
         resp.raise_for_status()
         return resp.json()
 
+    async def _search(self, url: str, body: dict) -> tuple[list[dict], int]:
+        try:
+            data = await self._post(url, body)
+        except ValueError as exc:
+            raise ValueError("ответ не JSON") from exc
+
+        items = data.get("items") if isinstance(data, dict) else None
+        if items is None and isinstance(data, dict):
+            items = data.get("pageData")
+        if not isinstance(items, list) or any(
+            not isinstance(rec, dict) or not (rec.get("id") or rec.get("number"))
+            for rec in items
+        ):
+            raise ValueError("неожиданный формат списка записей")
+        raw_total = data.get("total")
+        if raw_total is None:
+            return items, len(items)
+        if type(raw_total) is int or (isinstance(raw_total, str) and raw_total.isdigit()):
+            total = int(raw_total)
+            if total >= len(items) and (items or not total):
+                return items, total
+        raise ValueError("некорректное количество записей")
+
     async def check_certificates(self, inn: str, name: str | None = None) -> SourceResult:
         """Сертификаты и декларации, где организация заявитель или изготовитель.
 
         Статус partial при пустом результате: не у всякой торговли есть
         обязательная сертификация, отсутствие записей законно.
         """
-        service, method = self.name, "declarations"
         facts: list[Fact] = []
         total = 0
+        answered = 0
+        gaps: list[str] = []
         now = datetime.now(UTC)
 
-        for url, label, view in (
-            (_DECL_SEARCH_URL, "декларация о соответствии",
+        endpoints = (
+            ("declarations", _DECL_SEARCH_URL, "декларация о соответствии",
              "https://pub.fsa.gov.ru/rds/declaration/view/{rid}/common"),
-            (_CERT_SEARCH_URL, "сертификат соответствия",
+            ("certificates", _CERT_SEARCH_URL, "сертификат соответствия",
              "https://pub.fsa.gov.ru/rss/certificate/view/{rid}/baseInfo"),
-        ):
-            try:
-                data = await self._post(url, _search_body(inn, name))
-            except httpx.HTTPStatusError as e:
-                ledger.record(service, method, "failed", f"HTTP {e.response.status_code}")
-                return SourceResult(
-                    source="fsa.certificates", status="unavailable",
-                    reason=f"Реестр Росаккредитации ответил {e.response.status_code}",
-                )
-            except (httpx.TransportError, httpx.TimeoutException) as e:
-                ledger.record(service, method, "failed", f"сеть: {type(e).__name__}")
-                return SourceResult(
-                    source="fsa.certificates", status="unavailable",
-                    reason=(f"ФГИС Росаккредитации недоступен из этой сети "
-                            f"({type(e).__name__}) — сертификаты и декларации "
-                            f"НЕ ПРОВЕРЕНЫ"),
-                )
-            except ValueError:
-                ledger.record(service, method, "failed", "ответ не JSON")
-                return SourceResult(
-                    source="fsa.certificates", status="unavailable",
-                    reason="Реестр Росаккредитации вернул не JSON",
-                )
+        )
+        body = _search_body(inn, name)
+        responses = await asyncio.gather(
+            *(self._search(url, body) for _, url, _, _ in endpoints),
+            return_exceptions=True,
+        )
+        for (method, _, label, view), response in zip(endpoints, responses, strict=True):
+            if isinstance(response, BaseException):
+                if isinstance(response, httpx.HTTPStatusError):
+                    error = f"HTTP {response.response.status_code}"
+                elif isinstance(response, httpx.TransportError):
+                    error = f"сеть: {type(response).__name__}"
+                elif isinstance(response, ValueError):
+                    error = str(response)
+                else:
+                    raise response
+                ledger.record(self.name, method, "failed", error)
+                gaps.append(f"{label} — {error}")
+                continue
 
-            items = (data.get("items") or data.get("pageData") or [])
-            total += int(data.get("total") or len(items))
-            base = len(facts)
-            for i, rec in enumerate(items[:MAX_RECORDS], 1):
-                if not isinstance(rec, dict):
-                    continue
+            items, found = response
+            answered += 1
+            total += found
+            ledger.record(self.name, method, "ok" if items else "empty")
+            if found > min(len(items), MAX_RECORDS):
+                gaps.append(f"{label} — получено {min(len(items), MAX_RECORDS)} из {found}")
+            for rec in items[:MAX_RECORDS]:
                 rid = rec.get("id") or ""
-                product = (rec.get("productFullName") or rec.get("fullName")
-                           or rec.get("productName") or "")
-                manufacturer = rec.get("manufacterName") or ""
-                number = rec.get("number") or ""
+                product = str(rec.get("productFullName") or rec.get("fullName")
+                              or rec.get("productName") or "")
+                manufacturer = str(rec.get("manufacterName") or "")
+                number = str(rec.get("number") or "")
                 end_date = _parse_date(rec.get("declEndDate") or rec.get("endDate"))
                 is_foreign, country_hint = detect_manufacturer_origin(manufacturer)
                 # Скорing-порог смотрит на endDate: истёкший документ — сигнал,
                 # что партия выпущена, а подтверждение не продлено.
                 origin_suffix = f" (импорт: {country_hint})" if is_foreign and country_hint else ""
                 facts.append(Fact(
-                    fact_id=f"FSA-{base + i}",
+                    fact_id=f"FSA-{len(facts) + 1}",
                     kind="fsa_certificate",
                     statement=(f"{label.capitalize()} №{number or 'б/н'}: "
                                f"{product[:150] or 'продукция не указана'}"
@@ -221,21 +241,26 @@ class FsaSource:
                         "is_foreign": is_foreign,
                         "origin_country": country_hint,
                         "end_date": end_date.isoformat() if end_date else None,
-                        "doc_type": "declaration" if "declarations" in url else "certificate",
+                        "doc_type": "declaration" if method == "declarations" else "certificate",
                         "via": "fsa",
                     },
                 ))
 
-        ledger.record(service, method, "ok" if total else "empty")
         log.info("fsa.certificates", inn=inn, found=total, facts=len(facts))
-        return SourceResult(
-            source="fsa.certificates",
-            status="ok" if total else "partial",
-            reason=None if total else (
+        reason = None
+        if gaps:
+            summary = "Сертификаты и декларации НЕ ПРОВЕРЕНЫ" if not answered else "Проверка выполнена частично"
+            reason = f"{summary}: {', '.join(gaps)}"
+        elif not total:
+            reason = (
                 "Сертификатов и деклараций по этому ИНН не найдено. "
                 "Обязательная сертификация есть не у всякой продукции — "
                 "пустой результат означает «в реестре не значится», "
                 "а не «не торгует»"
-            ),
+            )
+        return SourceResult(
+            source="fsa.certificates",
+            status="unavailable" if not answered else ("partial" if reason else "ok"),
+            reason=reason,
             facts=facts,
         )

@@ -68,7 +68,7 @@ class RmspSource:
             return None, "Реестр МСП вернул не JSON"
 
         rows = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(rows, list):
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
             ledger.record(service, method, "failed", "неожиданный формат ответа")
             return None, "Реестр МСП вернул неожиданный формат"
 
@@ -90,7 +90,10 @@ class RmspSource:
                 return None
 
         raw_active = row.get("is_active")
-        if raw_active is None:
+        excluded_at = _d(row.get("dtregistryout"))
+        if excluded_at:
+            active = False
+        elif raw_active is None:
             # Поля нет — выводим из даты исключения: нет даты, значит
             # не исключён
             active = not row.get("dtregistryout")
@@ -98,11 +101,11 @@ class RmspSource:
             active = raw_active in (1, "1", True)
         try:
             msp = MspInfo(
-                in_registry=True,
+                in_registry=active,
                 category=_CATEGORIES.get(row.get("category")),
                 employees=int(row["od2_sschr"]) if row.get("od2_sschr") is not None else None,
                 included_at=_d(row.get("dtregistry")),
-                excluded_at=_d(row.get("dtregistryout")),
+                excluded_at=excluded_at,
                 is_active=active,
             )
         except (TypeError, ValueError) as e:

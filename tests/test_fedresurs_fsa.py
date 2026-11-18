@@ -16,6 +16,7 @@ import httpx
 import pytest
 import respx
 
+from osint_mcp import ledger
 from osint_mcp.config import settings
 from osint_mcp.context.fedresurs import FedresursSource, classify_publication
 from osint_mcp.context.fsa import FsaSource
@@ -226,9 +227,53 @@ async def test_fsa_geo_block_is_unavailable():
     respx.post("https://pub.fsa.gov.ru/api/v1/rds/common/declarations/get").mock(
         side_effect=httpx.ConnectTimeout("timeout")
     )
+    respx.post("https://pub.fsa.gov.ru/api/v1/rss/common/certificates/get").mock(
+        return_value=httpx.Response(403)
+    )
     result = await FsaSource().check_certificates(BPMSOFT)
     assert result.status == "unavailable"
     assert result.reason and "НЕ ПРОВЕРЕНЫ" in result.reason
+    assert "ConnectTimeout" in result.reason and "HTTP 403" in result.reason
+
+
+@pytest.mark.parametrize("failed", ["declarations", "certificates"])
+@respx.mock
+async def test_fsa_keeps_facts_when_one_endpoint_fails(failed):
+    urls = {
+        "declarations": "https://pub.fsa.gov.ru/api/v1/rds/common/declarations/get",
+        "certificates": "https://pub.fsa.gov.ru/api/v1/rss/common/certificates/get",
+    }
+    for method, url in urls.items():
+        response = (
+            httpx.Response(403) if method == failed
+            else httpx.Response(200, json=_fixture(f"fsa_{method}_bpmsoft.json"))
+        )
+        respx.post(url).mock(return_value=response)
+
+    with ledger.capture_calls():
+        result = await FsaSource().check_certificates(BPMSOFT)
+        statuses = {call.method: call.outcome for call in ledger.current_calls() or []}
+
+    assert result.status == "partial"
+    assert result.reason and "HTTP 403" in result.reason
+    available = next(method for method in urls if method != failed)
+    assert statuses == {failed: "failed", available: "ok"}
+    assert len(result.facts) == (2 if available == "declarations" else 1)
+    assert all(f.payload["doc_type"] == available[:-1] for f in result.facts)
+
+
+@respx.mock
+async def test_fsa_error_json_is_failed_and_page_limit_is_reported():
+    declarations = _fixture("fsa_declarations_bpmsoft.json")
+    declarations["total"] = 19
+    _mock_fsa(decl=declarations, certs={"error": "Сервис недоступен"})
+
+    result = await FsaSource().check_certificates(BPMSOFT)
+
+    assert result.status == "partial"
+    assert result.reason and "получено 2 из 19" in result.reason
+    assert "неожиданный формат" in result.reason
+    assert len(result.facts) == 2
 
 
 def test_detect_manufacturer_origins():
