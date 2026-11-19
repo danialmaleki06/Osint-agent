@@ -70,3 +70,23 @@ def test_unverified_snippets_are_partial_and_not_saved_as_verified_pages(monkeyp
     assert len(result) == 1 and result.partial_reason
     assert result[0].payload["evidence_type"] == "search_snippet"
     assert INN not in source._LINKS
+
+
+def test_expired_page_deadline_prevents_http_request():
+    with pytest.raises(source.PageReadDeadline):
+        source._read(URL, INN, deadline=-1)
+
+
+def test_exhausted_read_budget_keeps_completed_documents(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(source.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(source, "search_web", Mock(return_value=[{"url": URL}, {"url": URL + "/second"}]))
+    def read(url, inn, deadline):
+        source._remaining(deadline)
+        clock[0] += 13
+        return {"url": url, "title": "Company export", "snippet": INN, "evidence_type": "source_page"}
+    monkeypatch.setattr(source, "_read", read)
+    result = source.find_customs_mentions(INN)
+    assert len(result) == 1 and result.partial_reason
+    assert "общий срок" in result.partial_reason
+    assert INN not in source._LINKS

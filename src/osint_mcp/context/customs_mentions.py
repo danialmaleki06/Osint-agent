@@ -18,6 +18,21 @@ _LOCK = Lock()
 _TRADE = re.compile(r"импорт|экспорт|таможенн|\bгтд\b|\bimport\b|\bexport\b", re.I)
 
 
+class PageReadDeadline(ValueError):
+    pass
+
+
+class UnrelatedPage(ValueError):
+    pass
+
+
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise PageReadDeadline("Исчерпан общий срок чтения первоисточников ВЭД")
+    return min(4.0, left)
+
+
 def _allowed(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -33,24 +48,36 @@ def _related(text: str, inn: str) -> bool:
     return bool(re.search(rf"(?<!\d){re.escape(inn)}(?!\d)", text) and _TRADE.search(text))
 
 
-def _read(url: str, inn: str) -> dict:
+def _read(url: str, inn: str, deadline: float | None = None) -> dict:
     if not _allowed(url):
         raise ValueError("URL вне списка таможенных источников")
     # Follow redirects manually so an indexed URL cannot send requests to an
     # arbitrary host. Every redirect must stay within the same trusted set.
-    with httpx.Client(timeout=8, headers={"User-Agent": "Mozilla/5.0"}) as client:
+    deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + 6)
+    with httpx.Client(timeout=4, headers={"User-Agent": "Mozilla/5.0"}) as client:
         target = url
         for _ in range(4):
             for attempt in range(3):
                 try:
-                    response = client.get(target)
-                    if response.status_code in {408, 500, 502, 503, 504}:
-                        response.raise_for_status()
+                    with client.stream("GET", target, timeout=_remaining(deadline)) as incoming:
+                        if incoming.status_code in {408, 500, 502, 503, 504}:
+                            incoming.raise_for_status()
+                        chunks, size = [], 0
+                        if not incoming.is_redirect:
+                            incoming.raise_for_status()
+                            for chunk in incoming.iter_bytes():
+                                _remaining(deadline)
+                                size += len(chunk)
+                                if size > 5_000_000:
+                                    raise ValueError("Слишком большая страница")
+                                chunks.append(chunk)
+                        response = httpx.Response(incoming.status_code, headers=incoming.headers,
+                                                  content=b"".join(chunks), request=incoming.request)
                     break
                 except (httpx.TransportError, httpx.HTTPStatusError):
                     if attempt == 2:
                         raise
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(min(0.5 * (attempt + 1), _remaining(deadline)))
             if response.is_redirect:
                 from urllib.parse import urljoin
                 target = urljoin(target, response.headers.get("location", ""))
@@ -68,7 +95,7 @@ def _read(url: str, inn: str) -> dict:
         element.decompose()
     text = " ".join(tree.text(separator=" ").split())
     if not _related(text, inn):
-        raise ValueError("Страница не подтверждает связанное с ИНН упоминание ВЭД")
+        raise UnrelatedPage("Страница не подтверждает связанное с ИНН упоминание ВЭД")
     position = text.find(inn)
     title = tree.css_first("title")
     ledger.record("customs_pages", "read", "ok")
@@ -83,9 +110,10 @@ def find_customs_mentions(inn: str) -> SearchResults:
         saved = _LINKS.get(inn)
     if saved and saved[0] > time.monotonic():
         refreshed, errors = [], []
+        deadline = time.monotonic() + 12
         for url in saved[1]:
             try:
-                refreshed.append(_read(url, inn))
+                refreshed.append(_read(url, inn, deadline))
             except (httpx.HTTPError, ValueError):
                 errors.append("Ранее найденная страница не прошла повторную проверку")
         # Reuse only a completely refreshed set; never replace a broken source
@@ -98,15 +126,19 @@ def find_customs_mentions(inn: str) -> SearchResults:
     mentions, verified, notes = [], [], []
     if getattr(raw, "partial_reason", None):
         notes.append(raw.partial_reason)
+    deadline = time.monotonic() + 12
     for hit in raw:
         url = hit.get("url") or ""
         if not _allowed(url):
             continue
         try:
-            document = _read(url, inn)
+            document = _read(url, inn, deadline)
             mentions.append(document)
             verified.append(document["url"])
-        except (httpx.HTTPError, ValueError):
+        except UnrelatedPage:
+            continue
+        except (httpx.HTTPError, ValueError) as exc:
+            notes.append(str(exc) if isinstance(exc, PageReadDeadline) else "Не все страницы первоисточников удалось прочитать")
             text = f"{hit.get('title') or ''} {hit.get('snippet') or ''}"
             if _related(text, inn):
                 mentions.append({**hit, "evidence_type": "search_snippet"})
