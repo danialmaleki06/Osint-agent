@@ -544,8 +544,10 @@ async def get_company_report(
       карточка, статус, светофор, вердикт, score, warnings, риски,
       коммерческий_срез, кадровый_потенциал_документы, ссылки.
     """
-    from osint_mcp.tools.search_budget import search_budget
-    with ledger.capture_calls(), ledger.subject_scope(None), search_budget(settings.yandex_search_budget_rub) as budget:
+    from osint_mcp.context.search_depth import search_depth
+    from osint_mcp.tools.search_budget import protect_yandex_attempts, search_budget
+    essential_attempts = len(search_depth(_normalize_detail_level(detail)).reputation_platforms) if include_reputation else 0
+    with ledger.capture_calls(), ledger.subject_scope(None), search_budget(settings.yandex_search_budget_rub) as budget, protect_yandex_attempts("reputation", essential_attempts):
         report = await _assemble_company_report(
             inn=inn, detail=detail, include_reputation=include_reputation,
             expected_name=expected_name, debug=debug, human_mode=human_mode, widget=widget,
@@ -632,13 +634,15 @@ async def _assemble_company_report(
             if not include_reputation:
                 return []
             try:
-                facts = await _async_build_reputation_fiasco_facts(
-                    inn=clean_inn,
-                    company_name=target_name or clean_inn,
-                    brand=brand_to_use,
-                    domain=target_domain,
-                    detail=detail_norm,
-                )
+                from osint_mcp.tools.search_budget import yandex_search_stage
+                with yandex_search_stage("reputation"):
+                    facts = await _async_build_reputation_fiasco_facts(
+                        inn=clean_inn,
+                        company_name=target_name or clean_inn,
+                        brand=brand_to_use,
+                        domain=target_domain,
+                        detail=detail_norm,
+                    )
                 if facts:
                     _quarantine.add(clean_inn, facts)
                 return facts
@@ -849,6 +853,13 @@ async def _assemble_company_report(
     is_debug = debug or getattr(settings, "osint_debug", False)
     is_human = human_mode if human_mode is not None else getattr(settings, "human_friendly_mode", True)
     result = _build_report(detail_norm, context_result, risk, score, debug=is_debug, human_mode=is_human, media_info=news_media_info, competitors_info=competitors_info)
+
+    if include_reputation and context_result.context:
+        coverage = getattr(fiasco_facts, "coverage", None)
+        if coverage is not None:
+            result["проверка_репутации"] = coverage
+            if coverage["статус"] != "ok":
+                result.setdefault("warnings", []).append("Репутационная проверка неполная: часть направлений поиска недоступна. Отсутствие находок не подтверждает отсутствие инцидентов.")
 
     if query_discrepancy:
         result["расхождение_запроса"] = query_discrepancy

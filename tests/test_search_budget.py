@@ -107,9 +107,11 @@ async def test_report_wrapper_limits_the_entire_dossier(monkeypatch, paid):
 
     route = respx.post(YANDEX_SEARCH_URL).respond(json=empty_response())
     async def assemble(**kwargs):
-        await asyncio.gather(*(
-            asyncio.to_thread(search_web, f"query-{i}", raise_on_unavailable=True) for i in range(20)
-        ), return_exceptions=True)
+        from osint_mcp.tools.search_budget import yandex_search_stage
+        with yandex_search_stage("reputation"):
+            await asyncio.gather(*(
+                asyncio.to_thread(search_web, f"query-{i}", raise_on_unavailable=True) for i in range(20)
+            ), return_exceptions=True)
         return {"inn": kwargs["inn"]}
     monkeypatch.setattr(server, "_assemble_company_report", assemble)
     result = await server.get_company_report("7724744134")
@@ -147,3 +149,80 @@ async def test_dossier_preserves_search_priority(monkeypatch):
     monkeypatch.setattr(server, "_fetch_company_competitors", AsyncMock(side_effect=phase("competitors")))
     await server.generate_full_dossier(ctx.inn, detail="full")
     assert phases == ["reputation", "geo", "customs", "analytics", "competitors"]
+
+
+@pytest.mark.parametrize("fail_one", [False, True])
+@respx.mock
+async def test_site_discovery_cannot_spend_reputation_minimum(monkeypatch, paid, fail_one):
+    """Exercise real paid fallback and real reputation queries within a dossier."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from osint_mcp import server
+    from osint_mcp.models import CompanyContext, ContextResult, RiskCollection, SiteTechInfo
+    from osint_mcp.context.reputation_fiascos import build_fiasco_queries
+    from osint_mcp.tools.web_search_source import SEARCH_URL
+
+    monkeypatch.setattr(settings, "yandex_search_mode", "fallback")
+    respx.post(SEARCH_URL).respond(202)
+    respx.get(url__startswith="https://search.yahoo.com/").respond(500)
+    attempted = []
+    def respond(request):
+        query = json.loads(request.content)["query"]["queryText"]
+        attempted.append(query)
+        if fail_one and "датацентр пожар" in query:
+            return httpx.Response(503)
+        return httpx.Response(200, json=empty_response())
+    route = respx.post(YANDEX_SEARCH_URL).mock(side_effect=respond)
+    ctx = CompanyContext(inn="7724744134", name_legal="БПМСОФТ", name_short="БПМСОФТ",
+                         brand="BPMSoft", brand_domain="bpmsoft.ru")
+    async def context(*args):
+        # Simulate multiple candidate queries and their paid retries before reputation.
+        for i in range(3):
+            await asyncio.to_thread(search_web, f"site-discovery-{i}", raise_on_unavailable=False)
+        return ContextResult(status="ok", context=ctx)
+    monkeypatch.setattr(server, "_build_context", context)
+    monkeypatch.setattr(server, "_collect_risk_facts", AsyncMock(return_value=RiskCollection(inn=ctx.inn, results=[], facts=[])))
+    monkeypatch.setattr(server, "_quarantine", SimpleNamespace(confirmed_facts=lambda inn: [], add=lambda *args: 0))
+    monkeypatch.setattr("osint_mcp.tools.hr_hub.detect_corporate_hr_hub", AsyncMock(return_value=None))
+    monkeypatch.setattr(server._checko, "check_affiliations", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(server, "_fetch_company_media_presence", AsyncMock(return_value={}))
+    monkeypatch.setattr(server, "_fetch_company_competitors", AsyncMock(return_value=None))
+    monkeypatch.setattr(server, "_inspect_site_content", AsyncMock(return_value=(None, SiteTechInfo(), None)))
+    result = await server.generate_full_dossier(ctx.inn, detail="full")
+    required = {queries[0] for queries in build_fiasco_queries(ctx.name_short, ctx.brand, ctx.brand_domain, inn=ctx.inn).values()}
+    reputation = [query for query in attempted if not query.startswith("site-discovery-")]
+    assert len(reputation) == 6
+    assert set(reputation) <= required
+    assert route.call_count == 8
+    assert result["бюджет_Яндекса"]["верхняя_оценка_расхода_руб"] == 3.904
+    coverage = result["проверка_репутации"]
+    assert coverage["направлений_с_ответом"] == (5 if fail_one else 6)
+    assert coverage["статус"] == ("partial" if fail_one else "ok")
+    if fail_one:
+        assert "disasters" in coverage["неполные_направления"]
+        assert any("Репутационная проверка неполная" in warning for warning in result["warnings"])
+
+
+def test_unused_protected_slots_return_to_optional_search():
+    from osint_mcp.tools.search_budget import protect_yandex_attempts, reserve_yandex_attempt, yandex_search_stage
+    with search_budget(4) as budget, protect_yandex_attempts("reputation", 6):
+        reserve_yandex_attempt()
+        reserve_yandex_attempt()
+        with pytest.raises(SearchBudgetExceeded):
+            reserve_yandex_attempt()
+        with yandex_search_stage("reputation"):
+            pass  # All reputation queries were free or cached.
+        for _ in range(6):
+            reserve_yandex_attempt()
+    assert budget.attempts == 8
+
+
+async def test_reputation_failure_is_not_a_clean_empty_result(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp.context import reputation_fiascos
+    monkeypatch.setattr(reputation_fiascos, "search_web", Mock(side_effect=SearchUnavailable("offline")))
+    facts = await reputation_fiascos.async_build_reputation_fiasco_facts("7724744134", "БПМСОФТ", detail="full")
+    assert not facts
+    assert facts.coverage["статус"] == "unavailable"
+    assert len(facts.coverage["неполные_направления"]) == 6

@@ -25,7 +25,8 @@ from typing import Any
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
+from osint_mcp.tools.search_budget import yandex_attempt_limit
 from osint_mcp.context.search_depth import search_depth
 
 log = structlog.get_logger()
@@ -803,6 +804,12 @@ DEFAULT_MONITORING_PLATFORMS = [
 ]
 
 
+class ReputationFacts(list):
+    """Keep search completeness separate from the number of incidents found."""
+
+    coverage: dict
+
+
 async def async_build_reputation_fiasco_facts(
     inn: str,
     company_name: str,
@@ -813,7 +820,7 @@ async def async_build_reputation_fiasco_facts(
 ) -> list[PendingFact]:
     """Асинхронный параллельный сбор и генерация фактов инцидентов и новостных событий."""
     import asyncio
-    facts: list[PendingFact] = []
+    facts = ReputationFacts()
     now = datetime.now(UTC)
 
     queries_map = build_fiasco_queries(company_name, brand, domain, inn=inn)
@@ -826,22 +833,39 @@ async def async_build_reputation_fiasco_facts(
     # Параллельный поиск по целевым контурам (без последовательного time.sleep)
     async def _search_one(plat: FiascoPlatform, q: str) -> list[dict[str, Any]]:
         try:
-            hits = await asyncio.to_thread(search_web, q, limit=3, retries=1, retry_delay=0.5)
+            with yandex_attempt_limit(1):
+                hits = await asyncio.to_thread(search_web, q, limit=3, retries=1, retry_delay=0.5,
+                                              raise_on_unavailable=True)
             for h in hits:
                 h["platform_hint"] = plat
             return hits
         except Exception as exc:  # noqa: BLE001
             log.warning("fiasco_search_error", query=q, error=str(exc))
-            return []
+            raise SearchUnavailable(str(exc)) from exc
 
-    search_tasks = []
+    planned = []
     for plat, q_list in queries_map.items():
         if plat.value not in target_platform_vals:
             continue
         for q in q_list[:1]:  # По одному высокоточному запросу на контур
-            search_tasks.append(_search_one(plat, q))
+            planned.append((plat, q))
 
-    gathered_hits = await asyncio.gather(*search_tasks, return_exceptions=True)
+    gathered_hits = await asyncio.gather(*(_search_one(plat, q) for plat, q in planned), return_exceptions=True)
+    # Each direction gets its first attempt before any direction retries.
+    failed = [i for i, hits in enumerate(gathered_hits) if isinstance(hits, Exception)]
+    if failed:
+        retried = await asyncio.gather(*(_search_one(*planned[i]) for i in failed), return_exceptions=True)
+        for i, hits in zip(failed, retried):
+            gathered_hits[i] = hits
+    incomplete = [plat.value for (plat, _), hits in zip(planned, gathered_hits)
+                  if isinstance(hits, Exception) or getattr(hits, "partial_reason", None)]
+    succeeded = sum(isinstance(hits, list) for hits in gathered_hits)
+    facts.coverage = {
+        "статус": ("partial" if succeeded else "unavailable") if incomplete else "ok",
+        "направлений_запланировано": len(planned),
+        "направлений_с_ответом": succeeded,
+        "неполные_направления": incomplete,
+    }
     raw_hits: list[dict[str, Any]] = []
     for r in gathered_hits:
         if isinstance(r, list):
