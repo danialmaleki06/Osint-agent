@@ -1,4 +1,4 @@
-"""Картографический OSINT, отзывы и гео-инспекция (Yandex / 2GIS API).
+"""Публичные карточки 2ГИС и поисковые упоминания отзывов.
 
 OSINT-логика и интерпретация для аналитика и LLM:
 1. Картографические сервисы (Яндекс Карты, 2ГИС) отражают ФИЗИЧЕСКУЮ РЕАЛЬНОСТЬ
@@ -17,10 +17,13 @@ OSINT-логика и интерпретация для аналитика и LL
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
+from osint_mcp.context.geo_card import GeoCardUnavailable, fetch_geo_card
+from osint_mcp.tools.names import core_name
 from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_web
 
 log = structlog.get_logger()
@@ -45,7 +48,7 @@ class GeoReviewsProfile:
     company_name: str
     rating: float | None
     reviews_count: int
-    has_physical_presence: bool
+    has_physical_presence: bool | None
     suspicious_location_flags: list[str]
     recent_issues: list[str]
     interpretation: str
@@ -91,17 +94,17 @@ def evaluate_geo_findings(
     elif rating and rating >= 4.0:
         interpretation = (
             f"Высокий подтвержденный клиентский рейтинг ({rating} из 5 на картах, {len(reviews_list)} отзывов). "
-            "Реальное физическое присутствие подтверждено клиентами и посетителями."
+            "Рейтинг карточки сам по себе не подтверждает физическое присутствие компании."
         )
     else:
-        interpretation = "Физическое присутствие подтверждено на картах, критических аномалий в отзывах не обнаружено."
+        interpretation = "Данных для подтверждения физического присутствия и оценки отзывов недостаточно."
 
     return GeoReviewsProfile(
         address=address,
         company_name=company_name,
         rating=rating,
         reviews_count=len(reviews_list),
-        has_physical_presence=len(suspicious_flags) == 0,
+        has_physical_presence=False if suspicious_flags else (True if reviews_list else None),
         suspicious_location_flags=suspicious_flags,
         recent_issues=issues_found,
         interpretation=interpretation,
@@ -114,6 +117,7 @@ def build_geo_reviews_facts(
     address: str,
     reviews: list[str] | None = None,
     rating: float | None = None,
+    website: str | None = None,
 ) -> list[PendingFact]:
     """Сбор и генерация фактов картографического OSINT для шины фактов."""
     facts: list[PendingFact] = []
@@ -121,6 +125,15 @@ def build_geo_reviews_facts(
 
     collected_reviews = list(reviews) if reviews else []
     partial_reason = None
+    card = None
+    evidence_urls = []
+    if not collected_reviews and website:
+        try:
+            card = fetch_geo_card(company_name, address, website)
+            if rating is None:
+                rating = card.rating
+        except GeoCardUnavailable:
+            pass  # Keep the existing search path if the direct source fails.
 
     # Поиск по картам и отзывам при отсутствии прямых данных
     if not collected_reviews and address:
@@ -128,16 +141,27 @@ def build_geo_reviews_facts(
         try:
             hits = search_web(query, limit=5, retries=1, raise_on_unavailable=True)
             partial_reason = getattr(hits, "partial_reason", None)
-        except SearchUnavailable:
-            raise
+        except SearchUnavailable as exc:
+            if card is None:
+                raise
+            partial_reason = str(exc)
+            hits = []
         except Exception as exc:  # noqa: BLE001
             log.warning("geo_search_failed", company=company_name, error=str(exc))
             raise SearchUnavailable("Не удалось обработать геопоиск") from exc
 
         for h in hits:
             text = (h.get("title", "") + " " + h.get("snippet", "")).strip()
+            url = h.get("url") or ""
+            host = (urlparse(url).hostname or "").lower()
+            if not any(host == domain or host.endswith("." + domain) for domain in ("yandex.ru", "2gis.ru")):
+                continue
+            name = (core_name(company_name) or company_name).casefold()
+            if name not in text.casefold() and not (card and url.startswith(card.url + "/")):
+                continue
             if any(m in text.lower() for m in OPERATIONAL_ISSUE_MARKERS):
                 collected_reviews.append(text)
+                evidence_urls.append(url)
 
     profile = evaluate_geo_findings(
         address=address,
@@ -165,11 +189,19 @@ def build_geo_reviews_facts(
                 fact_id=f"GEO-OPERATIONAL-RISK-{inn}",
                 kind="operational_issue_signal",
                 statement=f"Анализ отзывов на картах ({company_name}): {profile.interpretation}",
-                source_url=f"https://yandex.ru/maps/?text={company_name}",
+                source_url=evidence_urls[0] if evidence_urls else f"https://yandex.ru/maps/?text={company_name}",
                 found_by="geo_reviews_inspection",
                 found_at=now,
                 trust="mention",
             )
         )
 
+    if card:
+        facts.append(PendingFact(
+            fact_id=f"GEO-CARD-{inn}", kind="geo_card_signal",
+            statement=f"Карточка 2ГИС: {card.name}; адрес: {card.address}; рейтинг: {card.rating}; текстовых отзывов в счётчике: {card.review_count}. Принадлежность сверена по официальному сайту.",
+            source_url=card.url, found_by="2gis_public_card", found_at=now, trust="reference",
+        ))
+        if card.review_count:
+            partial_reason = partial_reason or "Карточка 2ГИС получена напрямую; полные тексты отзывов не загружены."
     return SearchResults(facts, partial_reason=partial_reason)

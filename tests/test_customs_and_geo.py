@@ -23,7 +23,8 @@ from osint_mcp.models import ExtFact
 ])
 def test_search_failure_is_not_an_empty_finding(module, builder, kwargs):
     from osint_mcp.tools.web_search_source import SearchUnavailable
-    with patch(f"osint_mcp.context.{module}.search_web", side_effect=SearchUnavailable("HTTP 403")):
+    target = "find_customs_mentions" if module == "customs" else "search_web"
+    with patch(f"osint_mcp.context.{module}.{target}", side_effect=SearchUnavailable("HTTP 403")):
         with pytest.raises(SearchUnavailable):
             builder(**kwargs)
 

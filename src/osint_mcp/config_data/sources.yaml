@@ -118,7 +118,7 @@ sources:
     topic: customs_ved
     type: curated_domains
     trust: reference
-    description: "Таможенные декларации и внешнеэкономическая деятельность (импорт/экспорт, цепочки поставок, санкционные риски)"
+    description: "Публичные упоминания ВЭД с прямой проверкой найденных страниц; не выгрузка таможенных деклараций"
     produces_kind: customs_trade_signal
     domains:
       - "customs.gov.ru"
@@ -137,7 +137,7 @@ sources:
     topic: geo_reality
     type: curated_domains
     trust: mention
-    description: "Картографический OSINT (Яндекс.Карты, 2ГИС): физическая реальность адреса и семантика свежих отзывов"
+    description: "Прямая карточка 2ГИС: адрес, рейтинг, счётчик отзывов; дополнительно поисковые упоминания. Полные отзывы и панорамы не загружаются"
     produces_kind: operational_issue_signal
     domains:
       - "yandex.ru"

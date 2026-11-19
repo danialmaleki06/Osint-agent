@@ -25,7 +25,8 @@ from typing import Any
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_web
+from osint_mcp.tools.web_search_source import SearchResults
+from osint_mcp.context.customs_mentions import find_customs_mentions
 
 log = structlog.get_logger()
 
@@ -137,42 +138,16 @@ def build_customs_facts(
     collected_declarations = list(declarations) if declarations else []
     partial_reason = None
 
-    if not collected_declarations:
-        query = f'"{inn}" ("декларация" OR "импорт" OR "экспорт" OR "таможенная база" OR "ГТД")'
-        try:
-            hits = search_web(query, limit=5, retries=1, raise_on_unavailable=True)
-            partial_reason = getattr(hits, "partial_reason", None)
-        except SearchUnavailable:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log.warning("customs_search_failed", inn=inn, error=str(exc))
-            raise SearchUnavailable("Не удалось обработать таможенный поиск") from exc
-
-        for hit in hits:
-            snippet = hit.get("snippet", "") + " " + hit.get("title", "")
-            snippet_low = snippet.lower()
-            detected_country = "не указана"
-            for hr in HIGH_RISK_ORIGINS:
-                if hr in snippet_low:
-                    detected_country = hr.title()
-                    break
-
-            if any(term in snippet_low for term in ["импорт", "поставка", "ввоз", "import"]):
-                collected_declarations.append({
-                    "direction": "import",
-                    "goods": "промышленная продукция / компоненты",
-                    "country": detected_country,
-                    "partner": hit.get("title", "Внешнеторговый партнер"),
-                    "source_url": hit.get("url"),
-                })
-            elif any(term in snippet_low for term in ["экспорт", "вывоз", "export"]):
-                collected_declarations.append({
-                    "direction": "export",
-                    "goods": "экспортная продукция",
-                    "country": detected_country,
-                    "partner": hit.get("title", "Внешнеторговый партнер"),
-                    "source_url": hit.get("url"),
-                })
+    if declarations is None:
+        hits = find_customs_mentions(inn)
+        for index, hit in enumerate(hits, 1):
+            facts.append(PendingFact(
+                fact_id=f"CUSTOMS-MENTION-{inn}-{index}", kind="customs_trade_signal",
+                statement=f"Публичное упоминание ВЭД: {hit.get('title') or ''}. {hit.get('snippet') or ''} Это не подтверждение поставки или таможенной декларации.",
+                source_url=hit["url"], found_by="customs_web_mention", found_at=now, trust="mention",
+                payload={"evidence_type": hit.get("evidence_type", "web_mention"), "inn": inn},
+            ))
+        return SearchResults(facts, partial_reason=getattr(hits, "partial_reason", None))
 
     profile = evaluate_customs_findings(inn, collected_declarations)
 

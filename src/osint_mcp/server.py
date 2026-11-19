@@ -682,11 +682,11 @@ async def _assemble_company_report(
                 if facts:
                     _quarantine.add(clean_inn, facts)
                 profile = _evaluate_customs_findings(clean_inn, [])
-                interpretation = facts[0].statement if facts else profile.interpretation
+                interpretation = facts[0].statement if facts else "Проверены публичные упоминания ВЭД; наличие или отсутствие реальных поставок не установлено."
                 if not facts and getattr(facts, "partial_reason", None):
                     interpretation = "ВЭД не установлена: поиск выполнен частично."
                 return {
-                    "has_ved_activity": bool(facts) if facts or not getattr(facts, "partial_reason", None) else None,
+                    "has_ved_activity": True if any(f.found_by == "customs_registry" for f in facts) else None,
                     "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
                     "coverage_note": getattr(facts, "partial_reason", None),
                     "facts_count": len(facts),
@@ -707,6 +707,7 @@ async def _assemble_company_report(
                     inn=clean_inn,
                     company_name=target_name or clean_inn,
                     address=target_addr,
+                    website=target_domain,
                 )
                 if facts:
                     _quarantine.add(clean_inn, facts)
@@ -1709,6 +1710,19 @@ async def scan_catalog_source(
                     trust="mention" if hiring.found_by_name else "reference",
                 ))
             scan = CatalogScan(facts, succeeded=1, incomplete=int(hiring.found_by_name))
+    elif source_name == "customs_ved_trade":
+        try:
+            facts = await asyncio.to_thread(_build_customs_facts, inn=clean_inn, company_name=name)
+            scan = CatalogScan(facts, succeeded=1, incomplete=int(bool(getattr(facts, "partial_reason", None))))
+        except SearchUnavailable as exc:
+            scan = CatalogScan([], config_error=str(exc))
+    elif source_name == "geo_maps_reviews" and getattr(ctx, "address_full", None):
+        try:
+            facts = await asyncio.to_thread(_build_geo_reviews_facts, inn=clean_inn,
+                company_name=name or clean_inn, address=ctx.address_full, website=domain)
+            scan = CatalogScan(facts, succeeded=1, incomplete=int(bool(getattr(facts, "partial_reason", None))))
+        except SearchUnavailable as exc:
+            scan = CatalogScan([], config_error=str(exc))
     elif source_name == "shared_web_analytics":
         if not domain:
             scan = CatalogScan([], config_error="Не найден сайт для извлечения идентификаторов аналитики.")
@@ -1742,6 +1756,8 @@ async def scan_catalog_source(
     note = scan.failure_note
     if source_name == "tech_stack_requirements" and scan.status == "ok":
         note = "Использованы уже полученные вакансии HeadHunter; дополнительных поисковых запросов нет. Habr и SuperJob не проверялись."
+    if source_name == "customs_ved_trade" and scan.status == "ok":
+        note = "Проверены найденные публичные упоминания по ИНН; реальные таможенные декларации и полнота базы поставок не проверялись."
     if note is None:
         note = (
             "Находки помещены в карантин. Для учёта в скоринге подтвердите их через review_pending."
@@ -2132,7 +2148,7 @@ async def check_customs_ved(
 
     profile = _evaluate_customs_findings(clean_inn, [])
     # Если нашлись факты в веб-поиске, формируем профиль по первому факту
-    interpretation = facts[0].statement if facts else profile.interpretation
+    interpretation = facts[0].statement if facts else "Проверены публичные упоминания ВЭД; наличие или отсутствие реальных поставок не установлено."
     if not facts and getattr(facts, "partial_reason", None):
         interpretation = "ВЭД не установлена: поиск выполнен частично."
 
@@ -2142,7 +2158,7 @@ async def check_customs_ved(
     return {
         "inn": clean_inn,
         "company_name": target_name,
-        "has_ved_activity": bool(facts) if facts or not getattr(facts, "partial_reason", None) else None,
+        "has_ved_activity": True if any(f.found_by == "customs_registry" for f in facts) else None,
         "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
         "coverage_note": getattr(facts, "partial_reason", None),
         "facts_found": len(facts),
@@ -2176,6 +2192,7 @@ async def check_geo_reviews(
     clean_inn = (parsed_inn or inn).strip().replace(" ", "").replace("-", "")
     target_addr = address
     target_name = auto_name
+    target_website = None
 
     if not target_addr or not target_name:
         ctx_res = await _build_context(clean_inn, _source, _checko)
@@ -2183,6 +2200,7 @@ async def check_geo_reviews(
             if not target_addr:
                 target_addr = ctx_res.context.address_full
             target_name = ctx_res.context.name_short or ctx_res.context.name_legal
+            target_website = ctx_res.context.brand_domain
 
     if not target_addr:
         return {
@@ -2198,6 +2216,7 @@ async def check_geo_reviews(
             inn=clean_inn,
             company_name=target_name or clean_inn,
             address=target_addr,
+            website=target_website,
         )
     except SearchUnavailable as exc:
         return {"inn": clean_inn, "company_name": target_name, "address": target_addr,
