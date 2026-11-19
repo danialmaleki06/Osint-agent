@@ -543,11 +543,19 @@ async def get_company_report(
       карточка, статус, светофор, вердикт, score, warnings, риски,
       коммерческий_срез, кадровый_потенциал_документы, ссылки.
     """
-    with ledger.capture_calls(), ledger.subject_scope(None):
-        return await _assemble_company_report(
+    from osint_mcp.tools.search_budget import search_budget
+    with ledger.capture_calls(), ledger.subject_scope(None), search_budget(settings.yandex_search_budget_rub) as budget:
+        report = await _assemble_company_report(
             inn=inn, detail=detail, include_reputation=include_reputation,
             expected_name=expected_name, debug=debug, human_mode=human_mode, widget=widget,
         )
+        report["бюджет_Яндекса"] = {
+            **budget.snapshot(),
+            "примечание": "Резерв по 0,488 ₽ за каждую HTTP-попытку, включая повторы и потерянные ответы; не выписка биллинга. Другие API не включены.",
+        }
+        if budget.blocked:
+            report.setdefault("warnings", []).append("Часть веб-проверок не выполнена: достигнут бюджет Яндекса. Охват ограничен.")
+        return report
 
 
 async def _assemble_company_report(
@@ -787,25 +795,19 @@ async def _assemble_company_report(
                 log.warning("get_company_report_competitors_error", error=str(exc))
                 return None
 
-        (
-            fiasco_facts,
-            hr_hub_info,
-            affiliations_info,
-            customs_info,
-            geo_info,
-            analytics_info,
-            news_media_info,
-            competitors_info,
-        ) = await asyncio.gather(
-            _fetch_fiascos(),
-            _fetch_hr_hub(),
-            _fetch_affiliations(),
-            _fetch_customs(),
-            _fetch_geo(),
-            _fetch_analytics(),
-            _fetch_news_media(),
-            _fetch_competitors(),
-        )
+        # Direct sources and free RSS do not compete for the search budget.
+        async with asyncio.TaskGroup() as group:
+            hr_job = group.create_task(_fetch_hr_hub())
+            affiliations_job = group.create_task(_fetch_affiliations())
+            news_job = group.create_task(_fetch_news_media())
+            # The official site has already been resolved by the context builder.
+            # Paid search proceeds in business priority order, not response-speed order.
+            fiasco_facts = await _fetch_fiascos()
+            geo_info = await _fetch_geo()
+            customs_info = await _fetch_customs()
+            analytics_info = await _fetch_analytics()
+            competitors_info = await _fetch_competitors()
+        hr_hub_info, affiliations_info, news_media_info = hr_job.result(), affiliations_job.result(), news_job.result()
 
     if context_result.context:
         risk.facts.extend(_extract_financial_risk_facts(context_result.context))

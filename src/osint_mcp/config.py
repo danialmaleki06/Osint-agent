@@ -113,6 +113,10 @@ class Settings(BaseSettings):
         default="fallback", validation_alias="YANDEX_SEARCH_MODE",
         description="fallback — платный резерв после отказа бесплатных источников; disabled — без Яндекса",
     )
+    yandex_search_budget_rub: float = Field(
+        default=4.0, ge=0, le=4.0, allow_inf_nan=False, validation_alias="YANDEX_SEARCH_BUDGET_RUB",
+        description="Максимальный бюджет Яндекса на одно досье; от 0 до 4 рублей",
+    )
     cache_ttl_hours: int = Field(default=24, description="Срок жизни кэша реестровых данных")
     osint_debug: bool = Field(
         default=False,

@@ -30,6 +30,7 @@ from selectolax.parser import HTMLParser
 from osint_mcp import ledger
 from osint_mcp.config import settings
 from osint_mcp.scoring.models import PendingFact
+from osint_mcp.tools.search_budget import SearchBudgetExceeded, reserve_yandex_attempt, search_budget
 
 SEARCH_URL = "https://lite.duckduckgo.com/lite/"
 YAHOO_SEARCH_URL = "https://search.yahoo.com/search"
@@ -195,6 +196,8 @@ def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
         raise SearchUnavailable("Для Yandex Search API нужны YANDEX_SEARCH_API_KEY и YANDEX_SEARCH_FOLDER_ID")
     try:
         for attempt in range(3):
+            reserve_yandex_attempt()
+            log.debug("paid_search_http_attempt", provider="yandex_search_api", attempt=attempt + 1)
             try:
                 response = httpx.post(
                     YANDEX_SEARCH_URL,
@@ -257,6 +260,15 @@ def search_web(
     query: str, limit: int = 5, timeout: float = 5.0, retries: int = 1,
     retry_delay: float = 0.5, *, raise_on_unavailable: bool = False,
 ) -> list[dict]:
+    with search_budget(settings.yandex_search_budget_rub):
+        return _search_web_cached(query, limit, timeout, retries, retry_delay,
+                                  raise_on_unavailable=raise_on_unavailable)
+
+
+def _search_web_cached(
+    query: str, limit: int = 5, timeout: float = 5.0, retries: int = 1,
+    retry_delay: float = 0.5, *, raise_on_unavailable: bool = False,
+) -> list[dict]:
     """Reuse identical successful searches and bound concurrent provider calls."""
     if limit <= 0:
         return []
@@ -291,12 +303,14 @@ def search_web(
                                 raise
                             use_paid = True
                     if use_paid:
-                        log.info("paid_search_used", provider="yandex_search_api", mode=mode,
+                        log.info("paid_search_requested", provider="yandex_search_api", mode=mode,
                                  reason="free_sources_unavailable" if mode == "fallback" else "explicit_primary")
                         hour = datetime.now(timezone(timedelta(hours=3))).hour
                         price = 0.366 if hour < 8 else 0.488
                         try:
                             hits = _search_yandex(query, limit, timeout)
+                        except SearchBudgetExceeded as exc:
+                            raise SearchUnavailable(str(exc)) from exc
                         except SearchUnavailable as exc:
                             ledger.record("yandex_search_api", "web_search", "failed", str(exc))
                             raise
