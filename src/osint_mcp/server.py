@@ -85,6 +85,7 @@ from osint_mcp.models import (
 from osint_mcp.scoring import score_company as _score_company
 from osint_mcp.scoring.engine import load_config as _load_scoring_config
 from osint_mcp.scoring.models import (
+    PendingFact,
     ScoreResult,
     SearchUnverifiedResult,
     Verdict,
@@ -730,7 +731,9 @@ async def _assemble_company_report(
             if not include_reputation or detail_norm != "full" or not target_domain:
                 return None
             try:
-                _, tech, err = await _inspect_site_content(target_domain)
+                tech = ctx.site_tech
+                if tech is None:
+                    _, tech, err = await _inspect_site_content(target_domain)
                 tracker_ids = tech.tracker_ids if tech else {}
                 if not tracker_ids:
                     return None
@@ -1683,7 +1686,7 @@ async def scan_catalog_source(
             note="Локальный снимок источника не содержит записей. Проверка недоступна.",
         )
 
-    name, domain = auto_name, None
+    name, domain, ctx = auto_name, None, None
     if not is_local_dataset:
         context_res = await _build_context(clean_inn, _source, _checko)
         if ctx := context_res.context:
@@ -1691,11 +1694,29 @@ async def scan_catalog_source(
             domain = ctx.brand_domain
 
     import asyncio
-    if source_name == "shared_web_analytics":
+    if source_name == "tech_stack_requirements":
+        hiring = getattr(ctx, "hiring", None)
+        if hiring is None or hiring.reason:
+            scan = CatalogScan([], config_error=(hiring.reason if hiring else "Данные HeadHunter не получены"))
+        else:
+            facts = []
+            if hiring.tech_stack:
+                facts.append(PendingFact(
+                    fact_id=f"HH-TECH-{clean_inn}", kind=spec.produces_kind,
+                    statement="Технологии в вакансиях HeadHunter: " + ", ".join(hiring.tech_stack),
+                    source_url=f"https://hh.ru/employer/{hiring.employer_id}" if hiring.employer_id else "https://hh.ru/search/vacancy",
+                    found_by="hh_vacancies", found_at=datetime.now(UTC),
+                    trust="mention" if hiring.found_by_name else "reference",
+                ))
+            scan = CatalogScan(facts, succeeded=1, incomplete=int(hiring.found_by_name))
+    elif source_name == "shared_web_analytics":
         if not domain:
             scan = CatalogScan([], config_error="Не найден сайт для извлечения идентификаторов аналитики.")
         else:
-            _, tech, error = await _inspect_site_content(domain)
+            tech = getattr(ctx, "site_tech", None)
+            error = None
+            if tech is None:
+                _, tech, error = await _inspect_site_content(domain)
             if error:
                 scan = CatalogScan([], config_error=error)
             else:
@@ -1719,6 +1740,8 @@ async def scan_catalog_source(
     found = scan.hits
     added = _quarantine.add(clean_inn, found) if found else 0
     note = scan.failure_note
+    if source_name == "tech_stack_requirements" and scan.status == "ok":
+        note = "Использованы уже полученные вакансии HeadHunter; дополнительных поисковых запросов нет. Habr и SuperJob не проверялись."
     if note is None:
         note = (
             "Находки помещены в карантин. Для учёта в скоринге подтвердите их через review_pending."

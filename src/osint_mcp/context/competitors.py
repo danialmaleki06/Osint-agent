@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import re
+from xml.etree.ElementTree import ParseError
+import httpx
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
 
 from osint_mcp.context.news_media import company_mention_pattern, extract_news_date, resolve_news_source
-from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.tools.web_search_source import SearchUnavailable, search_news, search_web
 from osint_mcp.context.search_depth import search_depth
 
 log = structlog.get_logger()
@@ -209,7 +211,10 @@ async def _fetch_competitor_recent_news(competitor_brand: str) -> list[Competito
     if mention is None:
         return []
     try:
-        hits = await asyncio.to_thread(search_web, query, limit=5, retries=1, retry_delay=0.5)
+        try:
+            hits = await asyncio.to_thread(search_news, query, limit=5)
+        except (httpx.HTTPError, ParseError, SearchUnavailable):
+            hits = await asyncio.to_thread(search_web, query, limit=5, retries=1, retry_delay=0.5, raise_on_unavailable=True)
     except Exception as exc:  # noqa: BLE001
         log.debug("competitor_news_search_error", brand=competitor_brand, error=str(exc))
         return []

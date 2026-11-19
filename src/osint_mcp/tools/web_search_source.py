@@ -291,18 +291,22 @@ def _search_web_cached(
     account = sha256(
         f"{settings.yandex_search_folder_id}\0{settings.yandex_search_api_key}".encode()
     ).hexdigest() if provider != "html" else ""
-    key = (provider, account, query, limit, timeout, retries, retry_delay)
+    # Fetching ten hits costs the same as three. Share one response across
+    # callers asking for 3, 5 or 10 hits and using different retry policies.
+    fetch_limit = max(limit, 10)
+    key = (provider, account, query, fetch_limit)
+    pending_key = (key, timeout, retries, retry_delay)
     with _SEARCH_LOCK:
         cached = _SEARCH_CACHE.get(key)
         if cached and cached[0] > time.monotonic():
             _SEARCH_CACHE.move_to_end(key)
             ledger.record("web_search_cache", "web_search", "ok" if cached[1] else "empty", cached=True)
-            return deepcopy(cached[1])
-        pending = _SEARCH_PENDING.get(key)
+            return SearchResults(deepcopy(cached[1][:limit]), partial_reason=getattr(cached[1], "partial_reason", None))
+        pending = _SEARCH_PENDING.get(pending_key)
         owner = pending is None
         if owner:
             pending = Future()
-            _SEARCH_PENDING[key] = pending
+            _SEARCH_PENDING[pending_key] = pending
     try:
         if owner:
             try:
@@ -310,7 +314,7 @@ def _search_web_cached(
                     use_paid = configured and mode == "primary"
                     if not use_paid:
                         try:
-                            hits = _search_web(query, limit, timeout, retries, retry_delay, raise_on_unavailable=True)
+                            hits = _search_web(query, fetch_limit, timeout, retries, retry_delay, raise_on_unavailable=True)
                         except SearchUnavailable:
                             if not configured or mode == "disabled":
                                 raise
@@ -321,7 +325,7 @@ def _search_web_cached(
                         hour = datetime.now(timezone(timedelta(hours=3))).hour
                         price = 0.366 if hour < 8 else 0.488
                         try:
-                            hits = _search_yandex(query, limit, timeout)
+                            hits = _search_yandex(query, fetch_limit, timeout)
                         except SearchBudgetExceeded as exc:
                             raise SearchUnavailable(str(exc)) from exc
                         except SearchUnavailable as exc:
@@ -342,12 +346,12 @@ def _search_web_cached(
                 pending.set_exception(exc)
             finally:
                 with _SEARCH_LOCK:
-                    _SEARCH_PENDING.pop(key, None)
+                    _SEARCH_PENDING.pop(pending_key, None)
         hits = deepcopy(pending.result())
         if not owner:
             ledger.record("web_search_cache", "web_search", "ok" if hits else "empty", cached=True,
                           partial_reason=getattr(hits, "partial_reason", None))
-        return hits
+        return SearchResults(hits[:limit], partial_reason=getattr(hits, "partial_reason", None))
     except SearchUnavailable:
         if raise_on_unavailable:
             raise

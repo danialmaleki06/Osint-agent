@@ -30,17 +30,20 @@ async def test_media_search_count_depends_on_detail(monkeypatch, detail, maximum
         assert search.call_count == len(news_media.build_media_queries("БПМСОФТ", "BPMSoft", "Баранов Денис Валентинович"))
 
 
-@pytest.mark.parametrize("detail,expected", [("brief", 0), ("standard", 3), ("full", 7)])
-async def test_competitor_discovery_and_news_share_detail_limits(monkeypatch, detail, expected):
+@pytest.mark.parametrize("detail,expected,news_count", [("brief", 0, 0), ("standard", 1, 2), ("full", 2, 5)])
+async def test_competitor_discovery_and_news_share_detail_limits(monkeypatch, detail, expected, news_count):
     from osint_mcp.context import competitors
 
     search = Mock(return_value=[])
     monkeypatch.setattr(competitors, "search_web", search)
+    news = Mock(return_value=[])
+    monkeypatch.setattr(competitors, "search_news", news)
     monkeypatch.setattr(competitors, "_match_cluster_peers", lambda **kw: (None, []))
     monkeypatch.setattr(competitors, "_extract_competitor_names_from_text",
                         lambda *a: ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"])
     result = await competitors.fetch_company_competitors("Example", detail=detail)
     assert search.call_count == expected
+    assert news.call_count == news_count
     if detail == "brief":
         assert "не запускались" in result["примечание"]
 
@@ -55,7 +58,7 @@ async def test_brief_known_competitors_do_not_claim_their_news_was_checked(monke
     assert all("не запускался" in item["последняя_новость"] for item in result["конкуренты"])
 
 
-@pytest.mark.parametrize("detail,web_count,rss_count", [("brief", 2, 1), ("standard", 6, 4)])
+@pytest.mark.parametrize("detail,web_count,rss_count", [("brief", 2, 1), ("standard", 4, 4)])
 async def test_dossier_passes_detail_to_real_search_collectors(monkeypatch, detail, web_count, rss_count):
     from osint_mcp import server
     from osint_mcp.context import reputation_fiascos, competitors, news_media
@@ -70,6 +73,7 @@ async def test_dossier_passes_detail_to_real_search_collectors(monkeypatch, deta
     rep_search, competitor_search, rss_search = Mock(return_value=[]), Mock(return_value=[]), Mock(return_value=[])
     monkeypatch.setattr(reputation_fiascos, "search_web", rep_search)
     monkeypatch.setattr(competitors, "search_web", competitor_search)
+    monkeypatch.setattr(competitors, "search_news", Mock(return_value=[]))
     monkeypatch.setattr(news_media, "search_news", rss_search)
     result = await server.generate_full_dossier(ctx.inn, detail=detail)
     assert rep_search.call_count + competitor_search.call_count == web_count

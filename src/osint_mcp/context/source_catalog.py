@@ -264,6 +264,8 @@ def execute_catalog_source(
     """Выполнить целенаправленный сбор по источнику из каталога."""
     if spec.type.startswith("official_"):
         raise ValueError("Для официального реестра требуется асинхронная загрузка выгрузки")
+    if spec.type == "vacancy_api":
+        return CatalogScan([], config_error="Адаптер вакансий использует данные контекста HH; вызывайте scan_catalog_source.")
     # Если источник глобальный и лежит в локальном снимке датасетов
     if spec.scope == "global" and spec.type == "dataset_table":
         matches = _dataset_store.match_inns(

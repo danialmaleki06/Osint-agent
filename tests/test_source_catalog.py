@@ -23,6 +23,30 @@ def test_load_source_catalog():
     assert catalog.sources["office_environment"].produces_kind == "office_environment_signal"
 
 
+@pytest.mark.parametrize("stack,reason,status,found", [
+    (["Python", "PostgreSQL"], None, "ok", 1),
+    ([], None, "ok", 0),
+    ([], "HH unavailable", "unavailable", 0),
+])
+async def test_tech_catalog_reuses_hh_without_search(monkeypatch, stack, reason, status, found):
+    from osint_mcp import server
+    from osint_mcp.models import CompanyContext, ContextResult, HiringInfo
+    from unittest.mock import Mock
+    from types import SimpleNamespace
+
+    ctx = CompanyContext(inn="7724744134", name_legal="БПМСОФТ", hiring=HiringInfo(
+        tech_stack=stack, employer_id="9251203", reason=reason))
+    monkeypatch.setattr(server, "_build_context", AsyncMock(return_value=ContextResult(status="ok", context=ctx)))
+    search = Mock(side_effect=AssertionError("HH data must not trigger web search"))
+    monkeypatch.setattr(server, "_execute_catalog_source", search)
+    monkeypatch.setattr(server, "_quarantine", SimpleNamespace(add=Mock(return_value=found)))
+    result = await server.scan_catalog_source(ctx.inn, "tech_stack_requirements")
+    assert result.status == status and result.found == found
+    assert search.call_count == 0
+    if found:
+        assert result.hits[0].source_url == "https://hh.ru/employer/9251203"
+
+
 def test_partial_query_preserves_hits_and_marks_scan_partial(monkeypatch):
     from osint_mcp.context import source_catalog
     from osint_mcp.tools.web_search_source import SearchResults
@@ -96,6 +120,22 @@ async def test_tracker_catalog_uses_real_ids_from_site(monkeypatch):
     assert result.status == "ok"
     builder.assert_called_once_with(domain="bpmsoft.ru", tracker_ids={"yandex_metrika": ["12345678"]},
                                     subject_inn="7724744134")
+
+
+async def test_tracker_catalog_reuses_site_tech_without_download(monkeypatch):
+    from osint_mcp import server
+    from osint_mcp.models import CompanyContext, ContextResult, SiteTechInfo
+    from unittest.mock import Mock
+
+    ctx = CompanyContext(inn="7724744134", name_legal="БПМСОФТ", brand_domain="bpmsoft.ru",
+                         site_tech=SiteTechInfo(tracker_ids={"yandex_metrika": ["12345678"]}))
+    monkeypatch.setattr(server, "_build_context", AsyncMock(return_value=ContextResult(status="ok", context=ctx)))
+    download = AsyncMock(side_effect=AssertionError("Site was already inspected"))
+    monkeypatch.setattr(server, "_inspect_site_content", download)
+    builder = Mock(return_value=[])
+    monkeypatch.setattr(server, "_build_analytics_affiliation_facts", builder)
+    result = await server.scan_catalog_source(ctx.inn, "shared_web_analytics")
+    assert result.status == "ok" and download.await_count == 0 and builder.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -74,22 +74,12 @@ sources:
   tech_stack_requirements:
     scope: company_asset
     topic: hr_stack
-    type: curated_domains
+    type: vacancy_api
     trust: reference
-    description: "Технологический стек, используемое ПО и требования в вакансиях (HH, Habr)"
+    description: "Стек из уже полученных вакансий HeadHunter, без дополнительных запросов к поисковикам"
     produces_kind: tech_stack_signal
     domains:
       - "hh.ru"
-      - "career.habr.com"
-      - "superjob.ru"
-    search_template: 'site:{domain} "{name}" ("стек" OR "знание" OR "опыт работы")'
-    keywords:
-      - "1с"
-      - "bitrix"
-      - "postgresql"
-      - "python"
-      - "kubernetes"
-      - "linux"
 
   employee_reviews_salary:
     scope: company_asset

@@ -3,6 +3,32 @@
 from unittest.mock import AsyncMock, patch
 import pytest
 
+
+@pytest.mark.asyncio
+async def test_empty_news_rss_does_not_trigger_general_search(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp.context import competitors
+
+    rss = Mock(return_value=[])
+    web = Mock(side_effect=AssertionError("Valid empty RSS must not spend search budget"))
+    monkeypatch.setattr(competitors, "search_news", rss)
+    monkeypatch.setattr(competitors, "search_web", web)
+    assert await competitors._fetch_competitor_recent_news("ELMA") == []
+    assert rss.call_count == 1 and web.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_broken_news_rss_uses_existing_search_chain(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp.context import competitors
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+
+    monkeypatch.setattr(competitors, "search_news", Mock(side_effect=SearchUnavailable("bad RSS")))
+    web = Mock(return_value=[])
+    monkeypatch.setattr(competitors, "search_web", web)
+    assert await competitors._fetch_competitor_recent_news("ELMA") == []
+    web.assert_called_once()
+
 from osint_mcp.context.competitors import (
     CompetitorNewsItem,
     CompetitorProfile,
@@ -116,7 +142,7 @@ async def test_fetch_company_competitors_mocked():
         }
     ]
 
-    with patch("osint_mcp.context.competitors.search_web", return_value=fake_news):
+    with patch("osint_mcp.context.competitors.search_news", return_value=fake_news):
         res = await fetch_company_competitors(
             company_name='ООО "БПМСОФТ"',
             brand="BPMSoft",
@@ -158,6 +184,7 @@ async def test_generate_full_dossier_includes_competitors():
          patch("osint_mcp.server._collect_risk_facts", AsyncMock(return_value=risk_col)), \
          patch("osint_mcp.server._async_build_reputation_fiasco_facts", AsyncMock(return_value=[])), \
          patch("osint_mcp.context.competitors.search_web", return_value=fake_hits), \
+         patch("osint_mcp.context.competitors.search_news", return_value=fake_hits), \
          patch("osint_mcp.context.news_media.search_news", return_value=[]):
 
         # 1. Standard

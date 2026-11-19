@@ -347,3 +347,19 @@ def test_parallel_failover_has_one_paid_request(monkeypatch):
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(lambda _: search_web("query", raise_on_unavailable=True), range(8)))
     assert all(result == [] for result in results) and paid.call_count == 1
+
+
+@respx.mock
+def test_search_limits_and_timeouts_share_one_paid_response(monkeypatch, yandex_primary):
+    from osint_mcp.tools.search_budget import search_budget
+
+    monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
+    monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
+    docs = "".join(f'<doc><url>https://example.org/{i}</url><title>Result {i}</title></doc>' for i in range(10))
+    xml = f'<yandexsearch><response><found>10</found>{docs}</response></yandexsearch>'
+    paid = respx.post(YANDEX_SEARCH_URL).respond(json={"rawData": base64.b64encode(xml.encode()).decode()})
+    with search_budget(4) as budget:
+        assert len(search_web("query", limit=3, timeout=5, raise_on_unavailable=True)) == 3
+        assert len(search_web("query", limit=5, timeout=8, retries=2, raise_on_unavailable=True)) == 5
+        assert len(search_web("query", limit=10, raise_on_unavailable=True)) == 10
+    assert paid.call_count == budget.snapshot()["http_попыток"] == 1
