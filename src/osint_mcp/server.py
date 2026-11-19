@@ -673,8 +673,12 @@ async def _assemble_company_report(
                     _quarantine.add(clean_inn, facts)
                 profile = _evaluate_customs_findings(clean_inn, [])
                 interpretation = facts[0].statement if facts else profile.interpretation
+                if not facts and getattr(facts, "partial_reason", None):
+                    interpretation = "ВЭД не установлена: поиск выполнен частично."
                 return {
-                    "has_ved_activity": bool(facts),
+                    "has_ved_activity": bool(facts) if facts or not getattr(facts, "partial_reason", None) else None,
+                    "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+                    "coverage_note": getattr(facts, "partial_reason", None),
                     "facts_count": len(facts),
                     "interpretation": interpretation,
                     "facts": [f.statement for f in facts] if facts else [],
@@ -703,6 +707,8 @@ async def _assemble_company_report(
                 )
                 return {
                     "address": target_addr,
+                    "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+                    "coverage_note": getattr(facts, "partial_reason", None),
                     "facts_count": len(facts),
                     "interpretation": interpretation,
                     "facts": [f.statement for f in facts] if facts else [],
@@ -739,6 +745,8 @@ async def _assemble_company_report(
                     })
                 return {
                     "site": target_domain,
+                    "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+                    "coverage_note": getattr(facts, "partial_reason", None),
                     "tracker_ids": tracker_ids,
                     "shared_networks": networks,
                 }
@@ -939,6 +947,7 @@ async def _assemble_company_report(
             "с_данными": sum(s.ok for s in coverage_rep.services),
             "без_данных": sum(s.empty for s in coverage_rep.services),
             "с_ошибкой": sum(s.failed for s in coverage_rep.services),
+            "частичных_ответов": sum(s.partial for s in coverage_rep.services),
             "платный_веб_поиск": {
                 "провайдер": "yandex_search_api",
                 "режим": settings.yandex_search_mode,
@@ -1453,8 +1462,8 @@ async def search_unverified(
         found=len(found),
         added_to_quarantine=added,
         hits=list(found),
-        status="ok",
-        note="Находки помещены в карантин." if found else "Совпадений по запросу нет.",
+        status="partial" if getattr(found, "partial_reason", None) else "ok",
+        note=getattr(found, "partial_reason", None) or ("Находки помещены в карантин." if found else "Совпадений по запросу нет."),
     )
 
 
@@ -1683,7 +1692,7 @@ async def scan_catalog_source(
                         _build_analytics_affiliation_facts, domain=domain,
                         tracker_ids=tech.tracker_ids if tech else {}, subject_inn=clean_inn,
                     )
-                    scan = CatalogScan(facts, succeeded=1)
+                    scan = CatalogScan(facts, succeeded=1, incomplete=int(bool(getattr(facts, "partial_reason", None))))
                 except SearchUnavailable as exc:
                     scan = CatalogScan([], config_error=str(exc))
     else:
@@ -2031,7 +2040,8 @@ async def check_shared_analytics(
     return {
         "inn": clean_inn,
         "site": target_site,
-        "status": "ok",
+        "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+        "coverage_note": getattr(facts, "partial_reason", None),
         "tracker_ids": tracker_ids,
         "networks_found": len(networks_summary),
         "shared_networks": networks_summary,
@@ -2088,6 +2098,8 @@ async def check_customs_ved(
     profile = _evaluate_customs_findings(clean_inn, [])
     # Если нашлись факты в веб-поиске, формируем профиль по первому факту
     interpretation = facts[0].statement if facts else profile.interpretation
+    if not facts and getattr(facts, "partial_reason", None):
+        interpretation = "ВЭД не установлена: поиск выполнен частично."
 
     log.info("tool_call", tool="check_customs_ved", inn=clean_inn,
              name=target_name, facts_count=len(facts), quarantined=added_to_quarantine)
@@ -2095,8 +2107,9 @@ async def check_customs_ved(
     return {
         "inn": clean_inn,
         "company_name": target_name,
-        "has_ved_activity": bool(facts),
-        "status": "ok",
+        "has_ved_activity": bool(facts) if facts or not getattr(facts, "partial_reason", None) else None,
+        "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+        "coverage_note": getattr(facts, "partial_reason", None),
         "facts_found": len(facts),
         "added_to_quarantine": added_to_quarantine,
         "interpretation": interpretation,
@@ -2170,7 +2183,8 @@ async def check_geo_reviews(
         "company_name": target_name,
         "address": target_addr,
         "facts_found": len(facts),
-        "status": "ok",
+        "status": "partial" if getattr(facts, "partial_reason", None) else "ok",
+        "coverage_note": getattr(facts, "partial_reason", None),
         "added_to_quarantine": added_to_quarantine,
         "interpretation": interpretation,
     }

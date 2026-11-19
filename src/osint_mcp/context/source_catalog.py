@@ -194,12 +194,13 @@ class CatalogScan:
     succeeded: int = 0
     failed: int = 0
     config_error: str | None = None
+    incomplete: int = 0
 
     @property
     def status(self) -> Literal["unavailable", "partial", "ok"]:
         if self.config_error:
             return "unavailable"
-        if self.failed:
+        if self.failed or self.incomplete:
             return "partial" if self.succeeded else "unavailable"
         return "ok"
 
@@ -208,7 +209,10 @@ class CatalogScan:
         if self.config_error:
             return self.config_error
         if self.failed:
-            return f"Выполнено веб-запросов: {self.succeeded}, не ответили: {self.failed}."
+            return (f"Выполнено веб-запросов: {self.succeeded}, не ответили: {self.failed}."
+                    + (f" Частичная выдача: {self.incomplete}." if self.incomplete else ""))
+        if self.incomplete:
+            return f"Частичная выдача в {self.incomplete} запросах: пригодные результаты сохранены, часть карточек повреждена."
         return None
 
 
@@ -305,6 +309,7 @@ def execute_catalog_source(
             scan.failed += 1
             continue
         scan.succeeded += 1
+        scan.incomplete += bool(getattr(raw_results, "partial_reason", None))
         for res in raw_results:
             url = res.get("url") or ""
             if not url or url in seen_urls:

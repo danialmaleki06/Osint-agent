@@ -23,6 +23,20 @@ def test_load_source_catalog():
     assert catalog.sources["office_environment"].produces_kind == "office_environment_signal"
 
 
+def test_partial_query_preserves_hits_and_marks_scan_partial(monkeypatch):
+    from osint_mcp.context import source_catalog
+    from osint_mcp.tools.web_search_source import SearchResults
+
+    monkeypatch.setattr(source_catalog, "search_web", lambda *a, **kw: SearchResults([
+        {"url": "https://company.example/7724744134", "title": "Company"},
+    ], partial_reason="One card broken"))
+    result = execute_catalog_source("test", SourceSpec(topic="test", produces_kind="test",
+        domains=["company.example"]), "7724744134")
+    assert result.status == "partial" and len(result.hits) == 1
+    assert result.succeeded == 1 and result.failed == 0 and result.incomplete == 1
+    assert "Частичная" in result.failure_note
+
+
 def test_all_configured_domains_keep_the_search_template(monkeypatch):
     from unittest.mock import Mock
     from osint_mcp.context import source_catalog

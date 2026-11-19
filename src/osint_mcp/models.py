@@ -1214,6 +1214,7 @@ class ServiceUsage(BaseModel):
     ok: int = Field(default=0, description="Из них вернули данные")
     empty: int = Field(default=0, description="Ответили, но данных нет")
     failed: int = Field(default=0, description="Не ответили")
+    partial: int = Field(default=0, description="Ответили с пригодными данными, но часть выдачи повреждена")
     daily_spent: int | None = Field(
         default=None,
         description=(

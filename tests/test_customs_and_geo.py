@@ -39,6 +39,17 @@ async def test_customs_tool_reports_unknown_activity_when_search_failed(monkeypa
     assert result["has_ved_activity"] is None and result["facts_found"] is None
 
 
+async def test_partial_empty_customs_is_unknown_not_absence(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp import server
+    from osint_mcp.tools.web_search_source import SearchResults
+
+    monkeypatch.setattr(server, "_build_customs_facts", Mock(return_value=SearchResults([], partial_reason="broken cards")))
+    result = await server.check_customs_ved("7724744134", company_name="БПМСОФТ")
+    assert result["status"] == "partial" and result["has_ved_activity"] is None
+    assert result["coverage_note"] == "broken cards"
+
+
 def test_evaluate_customs_findings_sanction_risk():
     """Тест выявления импортной зависимости от ЕС/США и санкционных рисков."""
     raw_declarations = [

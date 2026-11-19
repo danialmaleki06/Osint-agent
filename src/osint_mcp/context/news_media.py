@@ -27,7 +27,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.tools.names import core_name
-from osint_mcp.tools.web_search_source import SearchUnavailable, search_news
+from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_news
 
 log = structlog.get_logger()
 
@@ -576,8 +576,9 @@ async def fetch_company_media_presence(
             normalized = " ".join(text.casefold().replace("ё", "е").split())
             if mention.search(normalized):
                 relevant.append(hit)
-        ledger.record("media", "search", "ok" if relevant else "empty")
-        return relevant[:5]
+        partial_reason = getattr(hits, "partial_reason", None)
+        ledger.record("media", "search", "ok" if relevant else "empty", partial_reason=partial_reason)
+        return SearchResults(relevant[:5], partial_reason=partial_reason)
 
     gathered = await asyncio.gather(*(_search_one(query) for _, query in queries))
 
@@ -603,13 +604,14 @@ async def fetch_company_media_presence(
     media_items.sort(key=_sort_key, reverse=True)
     result = format_media_profile(media_items, detail=detail)
     failed = gathered.count(None)
+    incomplete = sum(bool(getattr(hits, "partial_reason", None)) for hits in gathered if hits is not None)
     if failed == len(gathered):
         result["статус_поиска"] = "unavailable"
         result["сводка"] = "Поиск по СМИ недоступен."
         log.warning("news_search_unavailable", queries=failed)
-    elif failed:
+    elif failed or incomplete:
         result["статус_поиска"] = "partial"
-        result["сводка"] += " Часть поисковых запросов не выполнена."
+        result["сводка"] += " Часть запросов или карточек результатов недоступна; пригодные публикации сохранены."
     else:
         result["статус_поиска"] = "ok"
     return result

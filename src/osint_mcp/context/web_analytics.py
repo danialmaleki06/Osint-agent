@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
+from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_web
 
 log = structlog.get_logger()
 
@@ -46,6 +46,7 @@ class SharedTrackerHit:
     is_probable_holding: bool
     interpretation: str
     sample_urls: list[str]
+    partial_reason: str | None = None
 
 
 def clean_domain(url_or_domain: str) -> str | None:
@@ -95,7 +96,7 @@ def search_domains_sharing_tracker(
         raise
     except Exception as exc:  # noqa: BLE001
         log.warning("tracker_search_failed", tracker_id=tracker_id, error=str(exc))
-        hits = []
+        raise SearchUnavailable("Не удалось обработать поиск по счётчику") from exc
 
     domains: set[str] = set()
     sample_urls: list[str] = []
@@ -145,6 +146,7 @@ def search_domains_sharing_tracker(
         is_probable_holding=is_holding,
         interpretation=interpretation,
         sample_urls=sample_urls,
+        partial_reason=getattr(hits, "partial_reason", None),
     )
 
 
@@ -158,14 +160,20 @@ def build_analytics_affiliation_facts(
     if not tracker_ids:
         return facts
 
+    errors = []
+    succeeded = 0
     for tracker_type, id_list in tracker_ids.items():
         for tid in id_list:
-            hit = search_domains_sharing_tracker(
-                tracker_type=tracker_type,
-                tracker_id=tid,
-                current_domain=domain,
-                limit=10,
-            )
+            try:
+                hit = search_domains_sharing_tracker(
+                    tracker_type=tracker_type, tracker_id=tid, current_domain=domain, limit=10,
+                )
+            except SearchUnavailable as exc:
+                errors.append(str(exc))
+                continue
+            succeeded += 1
+            if hit.partial_reason:
+                errors.append(hit.partial_reason)
             if hit.shared_domains and hit.is_probable_holding:
                 domains_str = ", ".join(hit.shared_domains[:5])
                 now = datetime.now(UTC)
@@ -194,4 +202,6 @@ def build_analytics_affiliation_facts(
                     )
                 )
 
-    return facts
+    if errors and not succeeded:
+        raise SearchUnavailable("; ".join(dict.fromkeys(errors)))
+    return SearchResults(facts, partial_reason="; ".join(dict.fromkeys(errors)) if errors else None)

@@ -1,6 +1,32 @@
 """Тесты для анализа веб-аналитики, поиска связанных доменов и скрытых холдингов."""
 
 import pytest
+
+
+def test_one_failed_tracker_keeps_other_tracker_results(monkeypatch):
+    from osint_mcp.context import web_analytics
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+
+    def search(tracker_type, tracker_id, **kwargs):
+        if tracker_id == "broken":
+            raise SearchUnavailable("provider unavailable")
+        return web_analytics.SharedTrackerHit(tracker_type, tracker_id, ["related.example"], True,
+                                              "Shared tracker", ["https://related.example"])
+    monkeypatch.setattr(web_analytics, "search_domains_sharing_tracker", search)
+    facts = web_analytics.build_analytics_affiliation_facts("company.example",
+        {"yandex_metrika": ["working", "broken"]}, "7724744134")
+    assert len(facts) == 1 and facts.partial_reason
+
+
+def test_all_failed_trackers_are_unavailable(monkeypatch):
+    from osint_mcp.context import web_analytics
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+
+    def fail(**kwargs):
+        raise SearchUnavailable("provider unavailable")
+    monkeypatch.setattr(web_analytics, "search_domains_sharing_tracker", fail)
+    with pytest.raises(SearchUnavailable):
+        web_analytics.build_analytics_affiliation_facts("company.example", {"yandex_metrika": ["broken"]}, "7724744134")
 from types import SimpleNamespace
 from unittest.mock import patch
 

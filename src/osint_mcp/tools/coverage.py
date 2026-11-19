@@ -121,6 +121,7 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
         )
         usage.requests += not call.cached
         usage.cached += call.cached
+        usage.partial += bool(call.partial_reason) and not call.cached
         usage.estimated_cost_rub = round(usage.estimated_cost_rub + call.estimated_cost_rub, 6)
         if not call.cached and hasattr(usage, call.outcome):
             setattr(usage, call.outcome, getattr(usage, call.outcome) + 1)
@@ -133,6 +134,8 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
     failures: dict[tuple[str, str], str | None] = {}
     for call in calls:
         key = (call.service, call.method)
+        if call.partial_reason:
+            failures.setdefault(key, call.partial_reason)
         if call.outcome == "ok":
             succeeded[key] = True
         elif call.outcome == "empty":

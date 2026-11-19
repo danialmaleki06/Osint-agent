@@ -56,6 +56,29 @@ class SearchUnavailable(RuntimeError):
     """Поисковый источник не вернул выдачу в распознаваемом формате."""
 
 
+class SearchResults(list):
+    """Usable hits with an explicit warning when some result cards are broken."""
+
+    def __init__(self, items=(), *, partial_reason: str | None = None):
+        super().__init__(items)
+        self.partial_reason = partial_reason
+
+
+def _checked_results(hits: list[dict], rejected: int, provider: str) -> SearchResults:
+    usable = [hit for hit in hits if (hit.get("title") or "").strip() or (hit.get("snippet") or "").strip()]
+    rejected += len(hits) - len(usable)
+    hits = usable
+    if rejected and not hits:
+        raise SearchUnavailable(f"{provider}: все карточки результатов повреждены")
+    return SearchResults(hits, partial_reason=(f"{provider}: повреждено карточек — {rejected}" if rejected else None))
+
+
+def _check_challenge(html: str, provider: str) -> None:
+    tree = HTMLParser(html)
+    if tree.css_first('.anomaly-modal, #challenge-form, form[action*="captcha"], form[action*="challenge"]'):
+        raise SearchUnavailable(f"{provider}: проверка бота вместо выдачи")
+
+
 def _result_url(href: str) -> str | None:
     url = unescape(href).strip()
     try:
@@ -84,6 +107,7 @@ def _result_url(href: str) -> str | None:
 
 
 def _parse_duckduckgo(html: str) -> list[dict]:
+    _check_challenge(html, "DuckDuckGo Lite")
     # Lite иногда возвращает невалидную таблицу. Сниппет ищем между соседними
     # ссылками, чтобы результат без сниппета не сдвигал последующие описания.
     links = list(re.finditer(
@@ -95,9 +119,12 @@ def _parse_duckduckgo(html: str) -> list[dict]:
         raise SearchUnavailable("DuckDuckGo Lite: нет распознаваемой выдачи")
 
     results: list[dict] = []
+    starts = len(re.findall(r"""<a\b[^>]*\bclass=['"]result-link['"]""", html, re.I))
+    rejected = max(0, starts - len(links))
     for index, link in enumerate(links):
         url = _result_url(link.group(1))
         if not url:
+            rejected += 1
             continue
         end = links[index + 1].start() if index + 1 < len(links) else len(html)
         snippet = re.search(r"""class=['"]result-snippet['"][^>]*>(.*?)</td>""", html[link.end():end], re.S)
@@ -106,23 +133,29 @@ def _parse_duckduckgo(html: str) -> list[dict]:
             "url": url,
             "snippet": HTMLParser(snippet.group(1)).text().strip() if snippet else "",
         })
-    return results
+    return _checked_results(results, rejected, "DuckDuckGo Lite")
 
 
 def _parse_yahoo(html: str) -> list[dict]:
+    _check_challenge(html, "Yahoo Search")
     tree = HTMLParser(html)
     cards = tree.css(".algo-sr")
-    if not cards and not tree.css_first(".no-results, .noResults"):
-        raise SearchUnavailable("Yahoo Search: нет распознаваемой выдачи")
+    if not cards:
+        empty = tree.css_first(".no-results, .noResults")
+        if empty is None or not re.search(r"no results|did not find|not find|ничего не|не найден", empty.text(), re.I):
+            raise SearchUnavailable("Yahoo Search: нет распознаваемой выдачи")
 
     results: list[dict] = []
+    rejected = 0
     for card in cards:
         heading = card.css_first(".compTitle h3")
         if heading is None:
+            rejected += 1
             continue
         anchor = heading.parent if heading.parent.tag == "a" else heading.css_first("a")
         url = _result_url(anchor.attributes.get("href", "")) if anchor else None
         if not url:
+            rejected += 1
             continue
         snippet = card.css_first(".compText")
         results.append({
@@ -130,7 +163,7 @@ def _parse_yahoo(html: str) -> list[dict]:
             "url": url,
             "snippet": snippet.text(separator=" ", strip=True) if snippet else "",
         })
-    return results
+    return _checked_results(results, rejected, "Yahoo Search")
 
 
 def _request_yahoo(query: str, timeout: float) -> httpx.Response:
@@ -200,9 +233,11 @@ def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
                 return []
             raise ValueError(f"ошибка поискового API {error.get('code')}")
         hits = []
+        rejected = 0
         for doc in root.findall(".//doc"):
             url = _result_url(doc.findtext("url", ""))
             if not url:
+                rejected += 1
                 continue
             title = doc.find("title")
             hits.append({
@@ -210,9 +245,9 @@ def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
                 "url": url,
                 "snippet": " ".join("".join(p.itertext()) for p in doc.findall(".//passage")),
             })
-        if not hits and root.find(".//found") is None:
+        if not hits and (root.find(".//found") is None or root.findtext(".//found", "").strip() != "0"):
             raise ValueError("нет результатов или подтверждения пустой выдачи")
-        return hits[:limit]
+        return _checked_results(hits[:limit], rejected, "Yandex Search API")
     except (httpx.HTTPError, ValueError, binascii.Error, ElementTree.ParseError) as exc:
         reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
         raise SearchUnavailable(f"Yandex Search API: {reason}") from exc
@@ -268,10 +303,11 @@ def search_web(
                         # Public synchronous RU tariff, VAT included. This is
                         # an estimate for successful responses, not billing data.
                         ledger.record("yandex_search_api", "web_search", "ok" if hits else "empty",
-                                      estimated_cost_rub=price)
+                                      estimated_cost_rub=price, partial_reason=getattr(hits, "partial_reason", None))
                 with _SEARCH_LOCK:
-                    _SEARCH_CACHE[key] = (time.monotonic() + 300, deepcopy(hits))
-                    _SEARCH_CACHE.move_to_end(key)
+                    if not getattr(hits, "partial_reason", None):
+                        _SEARCH_CACHE[key] = (time.monotonic() + 300, deepcopy(hits))
+                        _SEARCH_CACHE.move_to_end(key)
                     while len(_SEARCH_CACHE) > 256:
                         _SEARCH_CACHE.popitem(last=False)
                 pending.set_result(hits)
@@ -282,7 +318,8 @@ def search_web(
                     _SEARCH_PENDING.pop(key, None)
         hits = deepcopy(pending.result())
         if not owner:
-            ledger.record("web_search_cache", "web_search", "ok" if hits else "empty", cached=True)
+            ledger.record("web_search_cache", "web_search", "ok" if hits else "empty", cached=True,
+                          partial_reason=getattr(hits, "partial_reason", None))
         return hits
     except SearchUnavailable:
         if raise_on_unavailable:
@@ -306,8 +343,9 @@ def _search_web(
             if response.status_code == 202:
                 raise SearchUnavailable("DuckDuckGo Lite: HTTP 202")
             response.raise_for_status()
-            hits = _parse_duckduckgo(response.text)[:limit]
-            ledger.record("duckduckgo", "web_search", "ok" if hits else "empty")
+            parsed = _parse_duckduckgo(response.text)
+            hits = SearchResults(parsed[:limit], partial_reason=parsed.partial_reason)
+            ledger.record("duckduckgo", "web_search", "ok" if hits else "empty", partial_reason=hits.partial_reason)
             return hits
         except (httpx.HTTPError, SearchUnavailable) as exc:
             _log_provider_failure("duckduckgo", exc)
@@ -315,8 +353,9 @@ def _search_web(
         try:
             response = _request_yahoo(query, timeout)
             response.raise_for_status()
-            hits = _parse_yahoo(response.text)[:limit]
-            ledger.record("yahoo", "web_search", "ok" if hits else "empty")
+            parsed = _parse_yahoo(response.text)
+            hits = SearchResults(parsed[:limit], partial_reason=parsed.partial_reason)
+            ledger.record("yahoo", "web_search", "ok" if hits else "empty", partial_reason=hits.partial_reason)
             return hits
         except (httpx.HTTPError, SearchUnavailable) as exc:
             _log_provider_failure("yahoo", exc)
@@ -348,19 +387,23 @@ def search_news(query: str, limit: int = 5, timeout: float = 5.0) -> list[dict]:
         headers=_HEADERS, timeout=timeout, follow_redirects=True,
     )
     response.raise_for_status()
-    channel = ElementTree.fromstring(response.content).find("channel")
-    if channel is None:
+    root = ElementTree.fromstring(response.content)
+    channel = root.find("channel")
+    if root.tag != "rss" or channel is None:
         raise SearchUnavailable("Google News: отсутствует канал RSS")
 
     results: list[dict] = []
+    rejected = 0
     for item in channel.findall("item"):
         url = item.findtext("link", "").strip()
         title = item.findtext("title", "").strip()
         try:
             parsed = urlparse(url)
         except ValueError:
+            rejected += 1
             continue
         if not title or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            rejected += 1
             continue
 
         source = item.find("source")
@@ -384,7 +427,7 @@ def search_news(query: str, limit: int = 5, timeout: float = 5.0) -> list[dict]:
         })
         if len(results) >= limit:
             break
-    return results
+    return _checked_results(results, rejected, "Google News RSS")
 
 
 def make_pending_facts(
@@ -409,7 +452,7 @@ def make_pending_facts(
             trust="mention",
             found_at=now,
         ))
-    return facts
+    return SearchResults(facts, partial_reason=getattr(hits, "partial_reason", None))
 
 
 def search_pending(query: str, kind: str, limit: int = 5) -> list[PendingFact]:

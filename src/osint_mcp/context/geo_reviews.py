@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
+from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_web
 
 log = structlog.get_logger()
 
@@ -120,17 +120,19 @@ def build_geo_reviews_facts(
     now = datetime.now(UTC)
 
     collected_reviews = list(reviews) if reviews else []
+    partial_reason = None
 
     # Поиск по картам и отзывам при отсутствии прямых данных
     if not collected_reviews and address:
         query = f'"{company_name}" "{address}" (отзывы OR яндекс карты OR 2gis)'
         try:
             hits = search_web(query, limit=5, retries=1, raise_on_unavailable=True)
+            partial_reason = getattr(hits, "partial_reason", None)
         except SearchUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("geo_search_failed", company=company_name, error=str(exc))
-            hits = []
+            raise SearchUnavailable("Не удалось обработать геопоиск") from exc
 
         for h in hits:
             text = (h.get("title", "") + " " + h.get("snippet", "")).strip()
@@ -170,4 +172,4 @@ def build_geo_reviews_facts(
             )
         )
 
-    return facts
+    return SearchResults(facts, partial_reason=partial_reason)

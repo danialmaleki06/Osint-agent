@@ -25,7 +25,7 @@ from typing import Any
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
+from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_web
 
 log = structlog.get_logger()
 
@@ -135,16 +135,18 @@ def build_customs_facts(
 
     # Если декларации не переданы напрямую, выполняем целевой поиск по таможенным базам
     collected_declarations = list(declarations) if declarations else []
+    partial_reason = None
 
     if not collected_declarations:
         query = f'"{inn}" ("декларация" OR "импорт" OR "экспорт" OR "таможенная база" OR "ГТД")'
         try:
             hits = search_web(query, limit=5, retries=1, raise_on_unavailable=True)
+            partial_reason = getattr(hits, "partial_reason", None)
         except SearchUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("customs_search_failed", inn=inn, error=str(exc))
-            hits = []
+            raise SearchUnavailable("Не удалось обработать таможенный поиск") from exc
 
         for hit in hits:
             snippet = hit.get("snippet", "") + " " + hit.get("title", "")
@@ -198,4 +200,4 @@ def build_customs_facts(
             )
         )
 
-    return facts
+    return SearchResults(facts, partial_reason=partial_reason)
