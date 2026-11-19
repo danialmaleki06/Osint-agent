@@ -23,6 +23,67 @@ def test_load_source_catalog():
     assert catalog.sources["office_environment"].produces_kind == "office_environment_signal"
 
 
+def test_all_configured_domains_keep_the_search_template(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp.context import source_catalog
+
+    search = Mock(return_value=[])
+    monkeypatch.setattr(source_catalog, "search_web", search)
+    spec = SourceSpec(topic="customs", produces_kind="customs_trade_signal",
+                      domains=["one.example", "two.example", "three.example", "four.example"],
+                      search_template='"{inn}" ("импорт" OR "экспорт")')
+    scan = execute_catalog_source("customs", spec, "7724744134")
+    assert scan.succeeded == 4 and scan.failed == 0
+    assert [call.args[0] for call in search.call_args_list] == [
+        f'site:{domain} "7724744134" ("импорт" OR "экспорт")' for domain in spec.domains
+    ]
+
+
+def test_generic_statistics_and_unrelated_domains_are_not_company_facts(monkeypatch):
+    from osint_mcp.context import source_catalog
+
+    monkeypatch.setattr(source_catalog, "search_web", lambda *a, **kw: [
+        {"url": "https://customs.gov.ru/statistics", "title": "Таможенная декларация, экспорт России"},
+        {"url": "https://other.example/bpmsoft", "title": "БПМСОФТ экспорт"},
+        {"url": "https://customs.gov.ru/company/7724744134", "title": "БПМСОФТ экспорт"},
+    ])
+    spec = SourceSpec(topic="customs", produces_kind="customs", domains=["customs.gov.ru"],
+                      keywords=["экспорт"])
+    result = execute_catalog_source("customs", spec, "7724744134", "БПМСОФТ", "bpmsoft.ru")
+    assert [hit.source_url for hit in result.hits] == ["https://customs.gov.ru/company/7724744134"]
+
+
+def test_employee_resume_is_not_the_company_vacancy(monkeypatch):
+    from osint_mcp.context import source_catalog
+
+    monkeypatch.setattr(source_catalog, "search_web", lambda *a, **kw: [
+        {"url": "https://career.habr.com/someone", "title": "БПМСОФТ Python резюме"},
+        {"url": "https://career.habr.com/vacancies/123", "title": "БПМСОФТ Python разработчик"},
+    ])
+    spec = SourceSpec(topic="hr_stack", produces_kind="tech_stack_signal", domains=["career.habr.com"],
+                      keywords=["python"])
+    result = execute_catalog_source("hr", spec, "7724744134", "БПМСОФТ")
+    assert len(result.hits) == 1 and "/vacancies/" in result.hits[0].source_url
+
+
+async def test_tracker_catalog_uses_real_ids_from_site(monkeypatch):
+    from types import SimpleNamespace
+    from osint_mcp import server
+    from osint_mcp.models import SiteTechInfo
+
+    monkeypatch.setattr(server, "_build_context", AsyncMock(return_value=SimpleNamespace(
+        context=SimpleNamespace(name_short="БПМСОФТ", name_legal="БПМСОФТ", brand_domain="bpmsoft.ru"))))
+    monkeypatch.setattr(server, "_inspect_site_content", AsyncMock(return_value=(
+        None, SiteTechInfo(tracker_ids={"yandex_metrika": ["12345678"]}), None)))
+    from unittest.mock import Mock
+    builder = Mock(return_value=[])
+    monkeypatch.setattr(server, "_build_analytics_affiliation_facts", builder)
+    result = await server.scan_catalog_source("7724744134", "shared_web_analytics")
+    assert result.status == "ok"
+    builder.assert_called_once_with(domain="bpmsoft.ru", tracker_ids={"yandex_metrika": ["12345678"]},
+                                    subject_inn="7724744134")
+
+
 @pytest.mark.asyncio
 async def test_empty_dataset_is_reported_as_unavailable(monkeypatch):
     from osint_mcp import server

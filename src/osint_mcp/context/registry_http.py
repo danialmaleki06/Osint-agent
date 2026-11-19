@@ -15,6 +15,7 @@ _REGISTRY_HOSTS = frozenset({
     "egrul.nalog.ru",
     "fedresurs.ru",
     "pub.fsa.gov.ru",
+    "proverki.gov.ru",
     "reestr.digital.gov.ru",
     "rmsp.nalog.ru",
     "suggestions.dadata.ru",

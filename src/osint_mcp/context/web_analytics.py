@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import structlog
 
 from osint_mcp.scoring.models import PendingFact
-from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
 
 log = structlog.get_logger()
 
@@ -90,7 +90,9 @@ def search_domains_sharing_tracker(
         search_query += f" -site:{cur_host}"
 
     try:
-        hits = search_web(search_query, limit=limit, retries=1)
+        hits = search_web(search_query, limit=limit, retries=1, raise_on_unavailable=True)
+    except SearchUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("tracker_search_failed", tracker_id=tracker_id, error=str(exc))
         hits = []

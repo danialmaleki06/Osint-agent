@@ -49,6 +49,9 @@ from osint_mcp.context.site import inspect_site_content as _inspect_site_content
 from osint_mcp.context.sanctions import SCOPE_NOTE, SanctionsRegistry, SanctionsUnavailable
 from osint_mcp.context.erknm import ErknmRegistry, ErknmSnapshot, ErknmUnavailable
 from osint_mcp.context.source_catalog import (
+    CatalogScan,
+)
+from osint_mcp.context.source_catalog import (
     SourceSpec as _SourceSpec,
 )
 from osint_mcp.context.source_catalog import (
@@ -932,6 +935,7 @@ async def _assemble_company_report(
     if coverage_rep.checked:
         coverage = {
             "всего_запросов": coverage_rep.total_requests,
+            "из_кэша": sum(s.cached for s in coverage_rep.services),
             "с_данными": sum(s.ok for s in coverage_rep.services),
             "без_данных": sum(s.empty for s in coverage_rep.services),
             "с_ошибкой": sum(s.failed for s in coverage_rep.services),
@@ -1658,14 +1662,31 @@ async def scan_catalog_source(
             domain = ctx.brand_domain
 
     import asyncio
-    scan = await asyncio.to_thread(
-        _execute_catalog_source,
-        source_name=source_name,
-        spec=spec,
-        inn=clean_inn,
-        name=name,
-        brand_domain=domain,
-    )
+    if source_name == "shared_web_analytics":
+        if not domain:
+            scan = CatalogScan([], config_error="Не найден сайт для извлечения идентификаторов аналитики.")
+        else:
+            _, tech, error = await _inspect_site_content(domain)
+            if error:
+                scan = CatalogScan([], config_error=error)
+            else:
+                try:
+                    facts = await asyncio.to_thread(
+                        _build_analytics_affiliation_facts, domain=domain,
+                        tracker_ids=tech.tracker_ids if tech else {}, subject_inn=clean_inn,
+                    )
+                    scan = CatalogScan(facts, succeeded=1)
+                except SearchUnavailable as exc:
+                    scan = CatalogScan([], config_error=str(exc))
+    else:
+        scan = await asyncio.to_thread(
+            _execute_catalog_source,
+            source_name=source_name,
+            spec=spec,
+            inn=clean_inn,
+            name=name,
+            brand_domain=domain,
+        )
     found = scan.hits
     added = _quarantine.add(clean_inn, found) if found else 0
     note = scan.failure_note
@@ -1846,11 +1867,26 @@ async def scan_catalog_batch(
         }
 
     import asyncio
+    if spec.scope == "company_asset":
+        # Resolve names/sites exactly as for a single-company scan. Searching
+        # reviews or tracker IDs using only an INN silently missed these assets.
+        results = {}
+        for clean_inn in dict.fromkeys(clean_inns):
+            item = await scan_catalog_source(clean_inn, source_name)
+            results[clean_inn] = {
+                "hits_count": item.found, "status": item.status,
+                "added_to_quarantine": item.added_to_quarantine,
+                "statements": [fact.statement for fact in item.hits], "note": item.note,
+            }
+        checked = sum(item["status"] != "unavailable" for item in results.values())
+        complete = all(item["status"] == "ok" for item in results.values())
+        return {"source": source_name, "scope": spec.scope,
+                "status": "ok" if complete else "partial" if checked else "unavailable",
+                "total_requested": len(clean_inns), "total_checked": checked,
+                "total_hits_added": sum(item["added_to_quarantine"] for item in results.values()),
+                "details": results}
     grouped_scans = await asyncio.to_thread(
-        _execute_catalog_batch,
-        source_name=source_name,
-        inns=clean_inns,
-        catalog=catalog,
+        _execute_catalog_batch, source_name=source_name, inns=clean_inns, catalog=catalog,
     )
 
     total_added = 0
@@ -1953,12 +1989,17 @@ async def check_shared_analytics(
         }
 
     import asyncio
-    facts = await asyncio.to_thread(
-        _build_analytics_affiliation_facts,
-        domain=target_site,
-        tracker_ids=tracker_ids,
-        subject_inn=clean_inn,
-    )
+    try:
+        facts = await asyncio.to_thread(
+            _build_analytics_affiliation_facts,
+            domain=target_site,
+            tracker_ids=tracker_ids,
+            subject_inn=clean_inn,
+        )
+    except SearchUnavailable as exc:
+        return {"inn": clean_inn, "site": target_site, "status": "unavailable",
+                "tracker_ids": tracker_ids, "networks_found": None,
+                "shared_networks": [], "message": str(exc)}
 
     added_to_quarantine = 0
     if facts:
@@ -2021,11 +2062,16 @@ async def check_customs_ved(
             target_name = ctx_res.context.name_short or ctx_res.context.name_legal
 
     import asyncio
-    facts = await asyncio.to_thread(
-        _build_customs_facts,
-        inn=clean_inn,
-        company_name=target_name,
-    )
+    try:
+        facts = await asyncio.to_thread(
+            _build_customs_facts,
+            inn=clean_inn,
+            company_name=target_name,
+        )
+    except SearchUnavailable as exc:
+        return {"inn": clean_inn, "company_name": target_name, "status": "unavailable",
+                "has_ved_activity": None, "facts_found": None,
+                "added_to_quarantine": 0, "interpretation": str(exc)}
 
     added_to_quarantine = 0
     if facts:
@@ -2042,6 +2088,7 @@ async def check_customs_ved(
         "inn": clean_inn,
         "company_name": target_name,
         "has_ved_activity": bool(facts),
+        "status": "ok",
         "facts_found": len(facts),
         "added_to_quarantine": added_to_quarantine,
         "interpretation": interpretation,
@@ -2089,12 +2136,17 @@ async def check_geo_reviews(
         }
 
     import asyncio
-    facts = await asyncio.to_thread(
-        _build_geo_reviews_facts,
-        inn=clean_inn,
-        company_name=target_name or clean_inn,
-        address=target_addr,
-    )
+    try:
+        facts = await asyncio.to_thread(
+            _build_geo_reviews_facts,
+            inn=clean_inn,
+            company_name=target_name or clean_inn,
+            address=target_addr,
+        )
+    except SearchUnavailable as exc:
+        return {"inn": clean_inn, "company_name": target_name, "address": target_addr,
+                "status": "unavailable", "facts_found": None,
+                "added_to_quarantine": 0, "interpretation": str(exc)}
 
     added_to_quarantine = 0
     if facts:
@@ -2110,6 +2162,7 @@ async def check_geo_reviews(
         "company_name": target_name,
         "address": target_addr,
         "facts_found": len(facts),
+        "status": "ok",
         "added_to_quarantine": added_to_quarantine,
         "interpretation": interpretation,
     }

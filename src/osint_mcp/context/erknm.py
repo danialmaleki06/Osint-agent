@@ -11,6 +11,7 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 
+from osint_mcp.context.registry_http import registry_client
 from osint_mcp.scoring.models import PendingFact
 
 _BASE = "https://proverki.gov.ru"
@@ -19,6 +20,48 @@ _TTL = timedelta(hours=1)
 _MAX_DOWNLOAD = 350 * 1024 * 1024
 _MAX_EXPANDED = 3 * 1024 * 1024 * 1024
 _FULL_AUTHORITY = "по надзору в сфере защиты прав потребителей и благополучия человека"
+_RETRYABLE = {408, 500, 502, 503, 504}
+
+
+async def _get_metadata(client: httpx.AsyncClient, path: str) -> dict:
+    for attempt in range(3):
+        try:
+            response = await client.get(_API + path, params={"isFederalLaw248": "true"})
+            return response.raise_for_status().json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _RETRYABLE or attempt == 2:
+                raise
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+        await asyncio.sleep(attempt + 1)
+    raise RuntimeError("ЕРКНМ: запрос метаданных не завершён")
+
+
+async def _download_archive(client: httpx.AsyncClient, url: str, archive: BinaryIO) -> None:
+    for attempt in range(3):
+        # A retry starts a new ZIP. Partial bytes from a broken connection
+        # must never be appended to a subsequent response.
+        archive.seek(0)
+        archive.truncate()
+        try:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                size = 0
+                async for chunk in response.aiter_bytes(512 * 1024):
+                    size += len(chunk)
+                    if size > _MAX_DOWNLOAD:
+                        raise ValueError("архив превышает допустимый размер")
+                    archive.write(chunk)
+            archive.seek(0)
+            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _RETRYABLE or attempt == 2:
+                raise
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+        await asyncio.sleep(attempt + 1)
 
 
 class ErknmUnavailable(RuntimeError):
@@ -124,9 +167,8 @@ class ErknmRegistry:
                 return current
             path = f"{moscow.year}/{moscow.month}" if self.monthly else f"plans/{moscow.year}"
             try:
-                async with httpx.AsyncClient(timeout=25) as client:
-                    response = await client.get(_API + path, params={"isFederalLaw248": "true"})
-                    data = response.raise_for_status().json()
+                async with registry_client(timeout=25, headers={}) as client:
+                    data = await _get_metadata(client, path)
                     url = data["dataZipUrl"]
                     parsed = urlsplit(url)
                     prefix = "/blob/erknm-opendata/" if self.monthly else "/blob/erknm-plan/"
@@ -137,15 +179,7 @@ class ErknmRegistry:
                     published = date.fromisoformat(next(item["published"] for item in data["history"]
                                                         if item.get("fileUrl") == url))
                     with TemporaryFile() as archive:
-                        size = 0
-                        async with client.stream("GET", url) as stream:
-                            stream.raise_for_status()
-                            async for chunk in stream.aiter_bytes(512 * 1024):
-                                size += len(chunk)
-                                if size > _MAX_DOWNLOAD:
-                                    raise ValueError("архив превышает допустимый размер")
-                                archive.write(chunk)
-                        archive.seek(0)
+                        await _download_archive(client, url, archive)
                         self._snapshot = await asyncio.to_thread(
                             _extract_archive, archive, period=period, monthly=self.monthly,
                             published=published, url=url,

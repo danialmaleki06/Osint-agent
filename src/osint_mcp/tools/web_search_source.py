@@ -9,7 +9,13 @@
 """
 
 import re
+import base64
+import binascii
 import time
+from collections import OrderedDict
+from concurrent.futures import Future
+from copy import deepcopy
+from threading import Lock, Semaphore
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
@@ -22,13 +28,24 @@ import structlog
 from selectolax.parser import HTMLParser
 
 from osint_mcp import ledger
+from osint_mcp.config import settings
 from osint_mcp.scoring.models import PendingFact
 
 SEARCH_URL = "https://lite.duckduckgo.com/lite/"
 YAHOO_SEARCH_URL = "https://search.yahoo.com/search"
 NEWS_SEARCH_URL = "https://news.google.com/rss/search"
+YANDEX_SEARCH_URL = "https://searchapi.api.cloud.yandex.net/v2/web/search"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 log = structlog.get_logger()
+_SEARCH_LOCK = Lock()
+_SEARCH_GATE = Semaphore(2)
+_SEARCH_CACHE: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
+_SEARCH_PENDING: dict[tuple, Future] = {}
+
+
+def clear_search_cache() -> None:
+    with _SEARCH_LOCK:
+        _SEARCH_CACHE.clear()
 
 # Домены, которые не считаем первоисточником (агрегаторы новостей
 # не проверяемые страницы).
@@ -116,7 +133,149 @@ def _parse_yahoo(html: str) -> list[dict]:
     return results
 
 
+def _request_yahoo(query: str, timeout: float) -> httpx.Response:
+    for attempt in range(3):
+        try:
+            response = httpx.get(
+                YAHOO_SEARCH_URL, params={"p": query}, headers=_HEADERS,
+                timeout=timeout, follow_redirects=True,
+            )
+            if response.status_code not in {500, 502, 503, 504} or attempt == 2:
+                return response
+            _log_provider_failure(
+                "yahoo", httpx.HTTPStatusError(
+                    "temporary search failure", request=response.request, response=response,
+                ),
+            )
+        except httpx.TransportError as exc:
+            if attempt == 2:
+                raise
+            _log_provider_failure("yahoo", exc)
+        time.sleep(0.5 * (attempt + 1))
+    raise SearchUnavailable("Yahoo Search: временный отказ")
+
+
+def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
+    key = settings.yandex_search_api_key.strip()
+    folder = settings.yandex_search_folder_id.strip()
+    if not key or not folder:
+        raise SearchUnavailable("Для Yandex Search API нужны YANDEX_SEARCH_API_KEY и YANDEX_SEARCH_FOLDER_ID")
+    try:
+        for attempt in range(3):
+            try:
+                response = httpx.post(
+                    YANDEX_SEARCH_URL,
+                    headers={"Authorization": f"Api-Key {key}"},
+                    json={
+                        "query": {"searchType": "SEARCH_TYPE_RU", "queryText": query},
+                        "folderId": folder,
+                        "responseFormat": "FORMAT_XML",
+                        "groupSpec": {
+                            "groupMode": "GROUP_MODE_FLAT",
+                            "groupsOnPage": str(min(limit, 100)), "docsInGroup": "1",
+                        },
+                    },
+                    timeout=max(timeout, 15),
+                )
+                response.raise_for_status()
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in {408, 500, 502, 503, 504}:
+                    raise
+                if attempt == 2:
+                    raise
+                reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
+                ledger.record("yandex_search_api", "web_search", "failed", reason)
+                time.sleep(0.5 * (attempt + 1))
+        payload = response.json()
+        raw = payload.get("rawData") if isinstance(payload, dict) else None
+        if not isinstance(raw, str):
+            raise ValueError("нет XML в rawData")
+        root = ElementTree.fromstring(base64.b64decode(raw, validate=True))
+        if root.tag != "yandexsearch" or root.find("response") is None:
+            raise ValueError("неизвестная схема XML")
+        error = root.find(".//error")
+        if error is not None:
+            if error.get("code") == "15":
+                return []
+            raise ValueError(f"ошибка поискового API {error.get('code')}")
+        hits = []
+        for doc in root.findall(".//doc"):
+            url = _result_url(doc.findtext("url", ""))
+            if not url:
+                continue
+            title = doc.find("title")
+            hits.append({
+                "title": "".join(title.itertext()) if title is not None else "",
+                "url": url,
+                "snippet": " ".join("".join(p.itertext()) for p in doc.findall(".//passage")),
+            })
+        if not hits and root.find(".//found") is None:
+            raise ValueError("нет результатов или подтверждения пустой выдачи")
+        return hits[:limit]
+    except (httpx.HTTPError, ValueError, binascii.Error, ElementTree.ParseError) as exc:
+        reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
+        raise SearchUnavailable(f"Yandex Search API: {reason}") from exc
+
+
 def search_web(
+    query: str, limit: int = 5, timeout: float = 5.0, retries: int = 1,
+    retry_delay: float = 0.5, *, raise_on_unavailable: bool = False,
+) -> list[dict]:
+    """Reuse identical successful searches and bound concurrent provider calls."""
+    if limit <= 0:
+        return []
+    provider = "yandex_search_api" if settings.yandex_search_api_key or settings.yandex_search_folder_id else "html"
+    account = sha256(
+        f"{settings.yandex_search_folder_id}\0{settings.yandex_search_api_key}".encode()
+    ).hexdigest() if provider == "yandex_search_api" else ""
+    key = (provider, account, query, limit, timeout, retries, retry_delay)
+    with _SEARCH_LOCK:
+        cached = _SEARCH_CACHE.get(key)
+        if cached and cached[0] > time.monotonic():
+            _SEARCH_CACHE.move_to_end(key)
+            ledger.record("web_search_cache", "web_search", "ok" if cached[1] else "empty", cached=True)
+            return deepcopy(cached[1])
+        pending = _SEARCH_PENDING.get(key)
+        owner = pending is None
+        if owner:
+            pending = Future()
+            _SEARCH_PENDING[key] = pending
+    try:
+        if owner:
+            try:
+                with _SEARCH_GATE:
+                    if provider == "yandex_search_api":
+                        try:
+                            hits = _search_yandex(query, limit, timeout)
+                        except SearchUnavailable as exc:
+                            ledger.record(provider, "web_search", "failed", str(exc))
+                            raise
+                        ledger.record(provider, "web_search", "ok" if hits else "empty")
+                    else:
+                        hits = _search_web(query, limit, timeout, retries, retry_delay, raise_on_unavailable=True)
+                with _SEARCH_LOCK:
+                    _SEARCH_CACHE[key] = (time.monotonic() + 300, deepcopy(hits))
+                    _SEARCH_CACHE.move_to_end(key)
+                    while len(_SEARCH_CACHE) > 256:
+                        _SEARCH_CACHE.popitem(last=False)
+                pending.set_result(hits)
+            except BaseException as exc:
+                pending.set_exception(exc)
+            finally:
+                with _SEARCH_LOCK:
+                    _SEARCH_PENDING.pop(key, None)
+        hits = deepcopy(pending.result())
+        if not owner:
+            ledger.record("web_search_cache", "web_search", "ok" if hits else "empty", cached=True)
+        return hits
+    except SearchUnavailable:
+        if raise_on_unavailable:
+            raise
+        return []
+
+
+def _search_web(
     query: str, limit: int = 5, timeout: float = 5.0, retries: int = 1,
     retry_delay: float = 0.5, *, raise_on_unavailable: bool = False,
 ) -> list[dict]:
@@ -139,10 +298,7 @@ def search_web(
             _log_provider_failure("duckduckgo", exc)
 
         try:
-            response = httpx.get(
-                YAHOO_SEARCH_URL, params={"p": query}, headers=_HEADERS,
-                timeout=timeout, follow_redirects=True,
-            )
+            response = _request_yahoo(query, timeout)
             response.raise_for_status()
             hits = _parse_yahoo(response.text)[:limit]
             ledger.record("yahoo", "web_search", "ok" if hits else "empty")

@@ -114,10 +114,13 @@ async def domain_age(url: str | None) -> tuple[date | None, str | None]:
     return created, None
 
 
-def _check_ssl_sync(hostname: str) -> SslInfo:
+def _check_ssl_sync(hostname: str, address: str | None = None, bind: str | None = None) -> SslInfo:
     """Синхронная проверка SSL-сертификата хоста на 443 порту."""
     ctx = ssl.create_default_context()
-    with socket.create_connection((hostname, 443), timeout=settings.request_timeout) as sock:
+    with socket.create_connection(
+        (address or hostname, 443), timeout=settings.request_timeout,
+        source_address=(bind, 0) if bind else None,
+    ) as sock:
         with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
             cert = ssock.getpeercert()
             issuer_name = None
@@ -154,13 +157,18 @@ async def ssl_info(url: str | None) -> tuple[SslInfo | None, str | None]:
 
     service, method = "ssl", "check"
     try:
-        info = await asyncio.to_thread(_check_ssl_sync, domain)
+        bind = settings.registry_bind_ipv4
+        if bind is None:
+            info = await asyncio.to_thread(_check_ssl_sync, domain)
+        else:
+            address = await resolve_public_ipv4(domain, str(bind))
+            info = await asyncio.to_thread(_check_ssl_sync, domain, address, str(bind))
         ledger.record(service, method, "ok")
         return info, None
     except ssl.SSLCertVerificationError as e:
         ledger.record(service, method, "failed", "недействительный сертификат")
         return SslInfo(valid=False, error=f"Сертификат не прошёл проверку: {e}"), None
-    except OSError as e:
+    except (OSError, httpx.HTTPError, ValueError) as e:
         ledger.record(service, method, "failed", f"сеть: {type(e).__name__}")
         return None, f"SSL-порт недоступен: {type(e).__name__}"
 
@@ -318,17 +326,28 @@ async def inspect_site_content(
             timeout=settings.request_timeout,
             headers={"User-Agent": _UA},
             follow_redirects=True,
-            verify=False,
+            verify=True,
         ) as client:
             for candidate in candidates:
-                try:
-                    r = await client.get(candidate)
-                    r.raise_for_status()
-                    resp = r
+                for attempt in range(3):
+                    try:
+                        r = await client.get(candidate)
+                        r.raise_for_status()
+                        resp = r
+                        break
+                    except (httpx.HTTPError, ValueError, ssl.SSLError, OSError) as e:
+                        last_err = e
+                        transient = isinstance(e, httpx.TransportError)
+                        if isinstance(e, httpx.HTTPStatusError):
+                            transient = e.response.status_code in {408, 500, 502, 503, 504}
+                        # Certificate failures require correction, not repeated requests.
+                        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                            transient = False
+                        if not transient or attempt == 2:
+                            break
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                if resp is not None:
                     break
-                except (httpx.HTTPError, ValueError, ssl.SSLError, OSError) as e:
-                    last_err = e
-                    continue
     except Exception as e:  # noqa: BLE001
         last_err = e
 

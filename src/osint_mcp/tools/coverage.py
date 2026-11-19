@@ -19,6 +19,11 @@ log = structlog.get_logger()
 # Что даёт каждое направление. Ключ — служба и метод, как они пишутся
 # в журнале; значение — человеческое название сведений.
 MEANING: dict[tuple[str, str], str] = {
+    ("yandex_search_api", "web_search"): "веб-поиск через официальный Yandex Search API",
+    ("web_search_cache", "web_search"): "успешный веб-поиск из кэша",
+    ("site", "inspect"): "содержимое официального сайта и веб-стек",
+    ("ssl", "check"): "сертификат безопасности сайта SSL/TLS",
+    ("whois", "domain_age"): "дата регистрации домена WHOIS",
     ("dadata", "findById/party"): "реквизиты из государственного реестра",
     ("dadata", "suggest/party"): "поиск организации по названию",
     ("dadata", "findById/brand"): "рыночное наименование и сайт",
@@ -114,8 +119,9 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
             ServiceUsage(service=call.service, requests=0,
                          daily_spent=daily.get(call.service)),
         )
-        usage.requests += 1
-        if hasattr(usage, call.outcome):
+        usage.requests += not call.cached
+        usage.cached += call.cached
+        if not call.cached and hasattr(usage, call.outcome):
             setattr(usage, call.outcome, getattr(usage, call.outcome) + 1)
 
     # ── что получили и что не ответило ───────────────────────────────
@@ -177,7 +183,7 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
     report = CoverageReport(
         inn=clean_inn,
         checked=True,
-        total_requests=len(calls),
+        total_requests=sum(not call.cached for call in calls),
         services=sorted(per_service.values(), key=lambda u: u.service),
         methods_ok=sorted({f"{s}/{m}" for (s, m), got in succeeded.items() if got}),
         methods_failed=sorted({f"{s}/{m}" for s, m in broken}),
@@ -185,6 +191,6 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
         gaps=gaps,
         session_requests=session,
     )
-    log.info("coverage", inn=inn, requests=len(calls),
+    log.info("coverage", inn=inn, requests=report.total_requests,
              ok=len(report.methods_ok), failed=len(report.methods_failed))
     return report

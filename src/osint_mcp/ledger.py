@@ -41,6 +41,7 @@ class Call:
     method: str
     outcome: Outcome
     reason: str | None = None
+    cached: bool = False
     at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -98,14 +99,17 @@ def record(
     outcome: Outcome,
     reason: str | None = None,
     daily_count: int | None = None,
+    *,
+    cached: bool = False,
 ) -> None:
     """Записать обращение. Вызывается из слоя запросов, не из инструментов."""
-    _session[service] = _session.get(service, 0) + 1
+    if not cached:
+        _session[service] = _session.get(service, 0) + 1
 
     if daily_count is not None:
         _daily_seen[service] = daily_count
 
-    call = Call(service=service, method=method, outcome=outcome, reason=reason)
+    call = Call(service=service, method=method, outcome=outcome, reason=reason, cached=cached)
     current = _current_calls.get()
     if current is not None:
         current.append(call)

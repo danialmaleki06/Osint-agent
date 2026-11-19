@@ -172,7 +172,7 @@ async def test_checko_concurrent_403s_only_exhaust_rejected_key(monkeypatch):
         source = CheckoSource(client)
         results = await asyncio.gather(
             source.check_registry_flags(BPMSOFT),
-            source.check_registry_flags(BPMSOFT),
+            source.check_registry_flags("1650032058"),
         )
 
     assert [result.status for result in results] == ["ok", "ok"]

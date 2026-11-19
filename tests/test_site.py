@@ -220,3 +220,35 @@ async def test_ssl_info_mocked(monkeypatch):
     assert info.issuer == "Let's Encrypt"
     assert info.days_left == 85
 
+
+async def test_ssl_uses_public_dns_and_selected_interface(monkeypatch):
+    from osint_mcp.context import site
+    from osint_mcp.config import settings
+    from osint_mcp.models import SslInfo
+
+    monkeypatch.setattr(settings, "registry_bind_ipv4", IPv4Address("192.0.2.12"))
+    resolver = AsyncMock(return_value="93.184.215.14")
+    check = Mock(return_value=SslInfo(valid=True))
+    monkeypatch.setattr(site, "resolve_public_ipv4", resolver)
+    monkeypatch.setattr(site, "_check_ssl_sync", check)
+    info, error = await site.ssl_info("https://example.ru")
+    assert info.valid and error is None
+    check.assert_called_once_with("example.ru", "93.184.215.14", "192.0.2.12")
+
+
+async def test_site_recovers_after_broken_connection():
+    async with respx.mock:
+        route = respx.get("https://bpmsoft.ru").mock(side_effect=[
+            httpx.RemoteProtocolError("connection closed"),
+            httpx.Response(502), httpx.Response(200, text="<h1>BPMSoft</h1>"),
+        ])
+        desc, reason = await site_self_description("https://bpmsoft.ru")
+    assert desc == "BPMSoft" and reason is None and route.call_count == 3
+
+
+async def test_site_does_not_retry_bot_block():
+    async with respx.mock:
+        route = respx.get("https://bpmsoft.ru").respond(403)
+        desc, reason = await site_self_description("https://bpmsoft.ru")
+    assert desc is None and reason and route.call_count == 1
+

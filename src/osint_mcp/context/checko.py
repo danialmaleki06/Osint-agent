@@ -15,8 +15,11 @@
 
 import asyncio
 import re
+from collections import OrderedDict
+from copy import deepcopy
 from datetime import UTC, date, datetime
 from typing import Any
+from time import monotonic
 
 import httpx
 import structlog
@@ -164,6 +167,46 @@ class CheckoSource:
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self._client = client
+        self._responses: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+        self._inflight: dict[tuple, asyncio.Task] = {}
+
+    async def _get(self, endpoint: str, params: dict[str, Any]) -> dict:
+        # Endpoint and pagination are part of the key. Returned dictionaries are
+        # copied because affiliation and context builders may enrich them.
+        key = (settings.checko_base_url, endpoint, tuple(sorted(params.items())))
+        cached = self._responses.get(key)
+        if cached and cached[0] > monotonic():
+            self._responses.move_to_end(key)
+            body = deepcopy(cached[1])
+            ledger.record("checko", endpoint, "ok" if body.get("data") else "empty", cached=True)
+            return body
+        task = self._inflight.get(key)
+        shared = task is not None
+        if task is None:
+            async def fetch() -> dict:
+                try:
+                    body = await self._get_uncached(endpoint, params)
+                    if (body.get("meta") or {}).get("status") == "ok":
+                        self._responses[key] = (monotonic() + 300, deepcopy(body))
+                        self._responses.move_to_end(key)
+                        while len(self._responses) > 256:
+                            self._responses.popitem(last=False)
+                    return body
+                finally:
+                    self._inflight.pop(key, None)
+
+            task = asyncio.create_task(fetch())
+            self._inflight[key] = task
+        body = deepcopy(await asyncio.shield(task))
+        if shared:
+            meta = body.get("meta") or {}
+            ledger.record(
+                "checko", endpoint,
+                "ok" if meta.get("status") == "ok" and body.get("data") else
+                "empty" if meta.get("status") == "ok" else "failed",
+                meta.get("message"), cached=True,
+            )
+        return body
 
     @retry(
         stop=stop_after_attempt(3),
@@ -196,7 +239,7 @@ class CheckoSource:
         resp.raise_for_status()
         return resp
 
-    async def _get(self, endpoint: str, params: dict[str, Any]) -> dict:
+    async def _get_uncached(self, endpoint: str, params: dict[str, Any]) -> dict:
         url = f"{settings.checko_base_url}/{endpoint}"
         try:
             resp = await self._request(url, params)

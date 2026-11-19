@@ -12,6 +12,7 @@
 """
 
 import sqlite3
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from osint_mcp.scoring.models import PendingFact
+from osint_mcp.tools.names import core_name
 from osint_mcp.tools.web_search_source import SearchUnavailable, search_web
 
 _SOURCES_CATALOG_PATH = Path(__file__).parent.parent / "config_data" / "sources.yaml"
@@ -267,6 +269,7 @@ def execute_catalog_source(
         return CatalogScan(matches.get(inn, []))
 
     company_name = name or inn
+    company_token = core_name(name)
     queries = []
 
     if spec.type == "site_inspection" and brand_domain:
@@ -278,8 +281,10 @@ def execute_catalog_source(
     elif spec.domains:
         # Поиск по целевым доверенным доменам
         for domain in spec.domains:
-            if spec.search_template and "{domain}" in spec.search_template:
+            if spec.search_template:
                 q = spec.search_template.replace("{domain}", domain).replace("{inn}", inn).replace("{name}", company_name)
+                if "{domain}" not in spec.search_template:
+                    q = f"site:{domain} {q}"
             else:
                 q = f'site:{domain} "{inn}"'
             queries.append(q)
@@ -293,7 +298,7 @@ def execute_catalog_source(
     seen_urls: set[str] = set()
     scan = CatalogScan(hits)
 
-    for q in queries[:2]:
+    for q in dict.fromkeys(queries):
         try:
             raw_results = search_web(q, limit=limit, retries=1, raise_on_unavailable=True)
         except SearchUnavailable:
@@ -308,6 +313,30 @@ def execute_catalog_source(
             title = res.get("title") or ""
             snippet = res.get("snippet") or ""
             text = f"{title}. {snippet}".strip()
+            host = (urlparse(url).hostname or "").removeprefix("www.").lower()
+            if spec.domains and not any(
+                host == domain.lower() or host.endswith("." + domain.lower()) for domain in spec.domains
+            ):
+                continue
+            if spec.topic == "hr_stack":
+                path = urlparse(url).path
+                if ("/resume/" in path or (host == "career.habr.com" and not path.startswith("/vacancies/"))):
+                    continue
+            # Search engines may relax exact queries and return a generic
+            # registry page. A keyword alone never ties that page to the company.
+            brand_host = urlparse(brand_domain if brand_domain and "://" in brand_domain
+                                  else f"//{brand_domain or ''}").hostname or ""
+            own_site = bool(brand_host and (host == brand_host or host.endswith("." + brand_host)))
+            tokens = [inn]
+            if company_token:
+                tokens.append(company_token)
+            if brand_host:
+                tokens.append(brand_host.removeprefix("www.").split(".")[0])
+            evidence = f"{title} {snippet} {url}".casefold()
+            if not own_site and not any(
+                re.search(rf"(?<!\w){re.escape(token.casefold())}(?!\w)", evidence) for token in tokens if token
+            ):
+                continue
 
             if spec.keywords:
                 matched_kw = [kw for kw in spec.keywords if kw.lower() in text.lower()]

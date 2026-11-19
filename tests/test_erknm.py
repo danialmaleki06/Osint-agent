@@ -80,3 +80,33 @@ async def test_erknm_unavailable_is_not_an_empty_lookup(monkeypatch):
 
     assert reply.status == "unavailable"
     assert "HTTP 503" in reply.note
+
+
+@respx.mock
+async def test_erknm_retries_transient_metadata_error():
+    route = respx.get(erknm._API + "2026/11").mock(side_effect=[
+        httpx.Response(502),
+        httpx.Response(200, json={"dataZipUrl": "published.zip"}),
+    ])
+    async with httpx.AsyncClient() as client:
+        result = await erknm._get_metadata(client, "2026/11")
+    assert result["dataZipUrl"] == "published.zip"
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_erknm_partial_download_is_truncated_on_retry():
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"broken zip bytes"
+            raise httpx.ReadError("connection interrupted")
+
+    url = "https://proverki.gov.ru/blob/erknm-opendata/data.zip"
+    respx.get(url).mock(side_effect=[
+        httpx.Response(200, stream=BrokenStream()),
+        httpx.Response(200, content=b"complete archive"),
+    ])
+    archive = BytesIO()
+    async with httpx.AsyncClient() as client:
+        await erknm._download_archive(client, url, archive)
+    assert archive.read() == b"complete archive"

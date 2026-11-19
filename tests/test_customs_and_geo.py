@@ -16,6 +16,29 @@ from osint_mcp.scoring import score_company
 from osint_mcp.models import ExtFact
 
 
+@pytest.mark.parametrize("module,builder,kwargs", [
+    ("customs", build_customs_facts, {"inn": "7724744134"}),
+    ("geo_reviews", build_geo_reviews_facts,
+     {"inn": "7724744134", "company_name": "БПМСОФТ", "address": "Москва"}),
+])
+def test_search_failure_is_not_an_empty_finding(module, builder, kwargs):
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+    with patch(f"osint_mcp.context.{module}.search_web", side_effect=SearchUnavailable("HTTP 403")):
+        with pytest.raises(SearchUnavailable):
+            builder(**kwargs)
+
+
+async def test_customs_tool_reports_unknown_activity_when_search_failed(monkeypatch):
+    from unittest.mock import Mock
+    from osint_mcp import server
+    from osint_mcp.tools.web_search_source import SearchUnavailable
+
+    monkeypatch.setattr(server, "_build_customs_facts", Mock(side_effect=SearchUnavailable("HTTP 403")))
+    result = await server.check_customs_ved("7724744134", company_name="БПМСОФТ")
+    assert result["status"] == "unavailable"
+    assert result["has_ved_activity"] is None and result["facts_found"] is None
+
+
 def test_evaluate_customs_findings_sanction_risk():
     """Тест выявления импортной зависимости от ЕС/США и санкционных рисков."""
     raw_declarations = [

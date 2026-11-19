@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     )
 
     request_timeout: float = Field(default=8.0, description="Таймаут запроса, секунды")
+    yandex_search_api_key: str = Field(default="", validation_alias="YANDEX_SEARCH_API_KEY")
+    yandex_search_folder_id: str = Field(default="", validation_alias="YANDEX_SEARCH_FOLDER_ID")
     cache_ttl_hours: int = Field(default=24, description="Срок жизни кэша реестровых данных")
     osint_debug: bool = Field(
         default=False,
