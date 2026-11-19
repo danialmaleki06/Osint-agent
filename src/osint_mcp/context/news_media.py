@@ -27,6 +27,7 @@ import structlog
 
 from osint_mcp import ledger
 from osint_mcp.tools.names import core_name
+from osint_mcp.context.search_depth import search_depth
 from osint_mcp.tools.web_search_source import SearchResults, SearchUnavailable, search_news
 
 log = structlog.get_logger()
@@ -554,6 +555,15 @@ async def fetch_company_media_presence(
 ) -> dict[str, Any]:
     """Асинхронный параллельный сбор новостей, заявлений руководства и презентаций компании."""
     queries = build_media_queries(company_name, brand=brand, director_fio=director_fio)
+    cap = search_depth(detail).media_queries
+    if cap is not None:
+        # Cover different topics before adding alternate company spellings.
+        distinct, extra = [], []
+        seen = set()
+        for topic, query in queries:
+            (extra if topic in seen else distinct).append((topic, query))
+            seen.add(topic)
+        queries = (distinct + extra)[:cap]
     mention = company_mention_pattern(company_name if company_name != inn else "", brand)
     if not queries or mention is None:
         result = format_media_profile([], detail=detail)
@@ -603,6 +613,8 @@ async def fetch_company_media_presence(
 
     media_items.sort(key=_sort_key, reverse=True)
     result = format_media_profile(media_items, detail=detail)
+    result["поисковых_запросов"] = len(queries)
+    result["режим_охвата"] = detail
     failed = gathered.count(None)
     incomplete = sum(bool(getattr(hits, "partial_reason", None)) for hits in gathered if hits is not None)
     if failed == len(gathered):

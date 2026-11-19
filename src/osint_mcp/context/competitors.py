@@ -28,6 +28,7 @@ import structlog
 
 from osint_mcp.context.news_media import company_mention_pattern, extract_news_date, resolve_news_source
 from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.context.search_depth import search_depth
 
 log = structlog.get_logger()
 
@@ -371,9 +372,10 @@ async def fetch_company_competitors(
     )
 
     candidate_peers: list[dict[str, str]] = list(cluster_peers)
+    depth = search_depth(detail)
 
     # 2. Если в кластерах не нашлось или нужно дополнить — делаем точечный веб-поиск
-    if len(candidate_peers) < 3:
+    if len(candidate_peers) < 3 and depth.competitor_discovery:
         queries = _build_competitor_queries(brand_to_use, company_name, okved_text)
         async def _run_search(q: str):
             try:
@@ -381,7 +383,7 @@ async def fetch_company_competitors(
             except Exception:  # noqa: BLE001
                 return []
 
-        search_res = await asyncio.gather(*[_run_search(q) for q in queries[:2]], return_exceptions=True)
+        search_res = await asyncio.gather(*[_run_search(q) for q in queries[:depth.competitor_discovery]], return_exceptions=True)
         snippets = []
         for r in search_res:
             if isinstance(r, list):
@@ -402,13 +404,10 @@ async def fetch_company_competitors(
     limit = 2 if detail in ("brief", "кратко") else (3 if detail in ("standard", "средне") else 5)
     selected_candidates = candidate_peers[:limit]
 
-    if not selected_candidates:
-        return format_competitors_profile([], industry_category=category, detail=detail)
-
     # 3. Параллельно собираем новости для каждого конкурента
-    async def _populate_competitor(c_dict: dict[str, str]) -> CompetitorProfile:
+    async def _populate_competitor(c_dict: dict[str, str], index: int) -> CompetitorProfile:
         b_name = c_dict["brand"]
-        news_items = await _fetch_competitor_recent_news(b_name)
+        news_items = await _fetch_competitor_recent_news(b_name) if index < depth.competitor_news else []
         return CompetitorProfile(
             brand=b_name,
             profile=c_dict.get("profile", "Игрок сопоставимого сегмента рынка"),
@@ -417,11 +416,20 @@ async def fetch_company_competitors(
             news=news_items,
         )
 
-    tasks = [_populate_competitor(c) for c in selected_candidates]
+    tasks = [_populate_competitor(c, index) for index, c in enumerate(selected_candidates)]
     populated_profiles = await asyncio.gather(*tasks, return_exceptions=True)
 
     final_profiles: list[CompetitorProfile] = [
         p for p in populated_profiles if isinstance(p, CompetitorProfile)
     ]
 
-    return format_competitors_profile(final_profiles, industry_category=category, detail=detail)
+    result = format_competitors_profile(final_profiles, industry_category=category, detail=detail)
+    result["охват_поиска"] = {"лимит_поиска_конкурентов": depth.competitor_discovery,
+                            "новости_первых_конкурентов": min(len(selected_candidates), depth.competitor_news)}
+    if depth.competitor_news == 0:
+        result["примечание"] = "Краткий режим: конкуренты только из отраслевого справочника, поиск и новости не запускались."
+        if not final_profiles:
+            result["сводка"] = "Поиск конкурентов не запускался; в отраслевом справочнике совпадений нет."
+        for item in result.get("конкуренты", []):
+            item["последняя_новость"] = "Поиск новостей не запускался в кратком режиме"
+    return result

@@ -628,6 +628,7 @@ async def _assemble_company_report(
                     company_name=target_name or clean_inn,
                     brand=brand_to_use,
                     domain=target_domain,
+                    detail=detail_norm,
                 )
                 if facts:
                     _quarantine.add(clean_inn, facts)
@@ -968,6 +969,15 @@ async def _assemble_company_report(
 
     detail_labels = {"brief": "кратко", "standard": "средне", "full": "полно"}
     result["детализация"] = detail_labels.get(detail_norm, detail_norm)
+    from osint_mcp.context.search_depth import search_depth
+    depth = search_depth(detail_norm)
+    result["глубина_веб_поиска"] = {
+        "репутационных_контуров": len(depth.reputation_platforms),
+        "лимит_запросов_СМИ": depth.media_queries,
+        "лимит_поиска_конкурентов": depth.competitor_discovery,
+        "лимит_новостей_конкурентов": depth.competitor_news,
+        "примечание": "Краткие режимы проверяют меньше поисковых направлений; отсутствие находок не означает полный охват интернета.",
+    }
     if widget:
         result = {"виджет": _build_summary_widget(result), **result}
     log.info("tool_call", tool="get_company_report", inn=clean_inn,

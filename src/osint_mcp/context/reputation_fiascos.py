@@ -26,6 +26,7 @@ import structlog
 
 from osint_mcp.scoring.models import PendingFact
 from osint_mcp.tools.web_search_source import search_web
+from osint_mcp.context.search_depth import search_depth
 
 log = structlog.get_logger()
 
@@ -808,6 +809,7 @@ async def async_build_reputation_fiasco_facts(
     brand: str | None = None,
     domain: str | None = None,
     platforms: list[str] | None = None,
+    detail: str = "full",
 ) -> list[PendingFact]:
     """Асинхронный параллельный сбор и генерация фактов инцидентов и новостных событий."""
     import asyncio
@@ -819,7 +821,7 @@ async def async_build_reputation_fiasco_facts(
     if platforms:
         target_platform_vals = set(platforms)
     else:
-        target_platform_vals = {p.value for p in DEFAULT_MONITORING_PLATFORMS}
+        target_platform_vals = set(search_depth(detail).reputation_platforms)
 
     # Параллельный поиск по целевым контурам (без последовательного time.sleep)
     async def _search_one(plat: FiascoPlatform, q: str) -> list[dict[str, Any]]:
