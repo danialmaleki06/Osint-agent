@@ -40,6 +40,8 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 log = structlog.get_logger()
 _SEARCH_LOCK = Lock()
 _SEARCH_GATE = Semaphore(2)
+_YANDEX_RATE_LOCK = Lock()
+_YANDEX_NEXT_REQUEST = 0.0
 _SEARCH_CACHE: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
 _SEARCH_PENDING: dict[tuple, Future] = {}
 
@@ -196,7 +198,7 @@ def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
         raise SearchUnavailable("Для Yandex Search API нужны YANDEX_SEARCH_API_KEY и YANDEX_SEARCH_FOLDER_ID")
     try:
         for attempt in range(3):
-            reserve_yandex_attempt()
+            _reserve_yandex_request_slot()
             log.debug("paid_search_http_attempt", provider="yandex_search_api", attempt=attempt + 1)
             try:
                 response = httpx.post(
@@ -254,6 +256,17 @@ def _search_yandex(query: str, limit: int, timeout: float) -> list[dict]:
     except (httpx.HTTPError, ValueError, binascii.Error, ElementTree.ParseError) as exc:
         reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
         raise SearchUnavailable(f"Yandex Search API: {reason}") from exc
+
+
+def _reserve_yandex_request_slot() -> None:
+    """Space starts across threads for the default one-request/second quota."""
+    global _YANDEX_NEXT_REQUEST
+    with _YANDEX_RATE_LOCK:
+        delay = _YANDEX_NEXT_REQUEST - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        reserve_yandex_attempt()
+        _YANDEX_NEXT_REQUEST = time.monotonic() + 1.05
 
 
 def search_web(

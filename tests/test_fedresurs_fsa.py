@@ -143,11 +143,11 @@ async def test_fedresurs_unknown_company_is_valid_empty():
 
 
 @respx.mock
-async def test_fedresurs_no_publications_is_partial():
-    """Компания есть, публикаций нет — partial с оговоркой о смысле пустоты."""
+async def test_fedresurs_no_publications_is_successful_empty():
+    """Компания есть, публикаций нет — корректная пустая выдача с пояснением."""
     _mock_fedresurs(publications={"pageData": [], "found": 0})
     result = await FedresursSource().check_commercial_facts(BPMSOFT)
-    assert result.status == "partial"
+    assert result.status == "ok"
     assert result.reason and "означает" in result.reason
 
 
@@ -212,12 +212,12 @@ async def test_fsa_parses_declarations_and_certificates():
 
 
 @respx.mock
-async def test_fsa_empty_result_is_partial_with_caveat():
+async def test_fsa_empty_result_is_successful_with_caveat():
     """Не у всякой продукции есть обязательная сертификация — пустой
     результат честно оговаривается."""
     _mock_fsa(decl={"items": [], "total": 0}, certs={"items": [], "total": 0})
     result = await FsaSource().check_certificates(BPMSOFT)
-    assert result.status == "partial"
+    assert result.status == "ok"
     assert result.reason and "означает" in result.reason
 
 

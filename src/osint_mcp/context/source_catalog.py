@@ -13,7 +13,7 @@
 
 import sqlite3
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -195,6 +195,7 @@ class CatalogScan:
     failed: int = 0
     config_error: str | None = None
     incomplete: int = 0
+    errors: list[str] = field(default_factory=list)
 
     @property
     def status(self) -> Literal["unavailable", "partial", "ok"]:
@@ -210,7 +211,8 @@ class CatalogScan:
             return self.config_error
         if self.failed:
             return (f"Выполнено веб-запросов: {self.succeeded}, не ответили: {self.failed}."
-                    + (f" Частичная выдача: {self.incomplete}." if self.incomplete else ""))
+                    + (f" Частичная выдача: {self.incomplete}." if self.incomplete else "")
+                    + (" Причины: " + "; ".join(dict.fromkeys(self.errors)) if self.errors else ""))
         if self.incomplete:
             return f"Частичная выдача в {self.incomplete} запросах: пригодные результаты сохранены, часть карточек повреждена."
         return None
@@ -305,8 +307,9 @@ def execute_catalog_source(
     for q in dict.fromkeys(queries):
         try:
             raw_results = search_web(q, limit=limit, retries=1, raise_on_unavailable=True)
-        except SearchUnavailable:
+        except SearchUnavailable as exc:
             scan.failed += 1
+            scan.errors.append(str(exc))
             continue
         scan.succeeded += 1
         scan.incomplete += bool(getattr(raw_results, "partial_reason", None))

@@ -261,7 +261,7 @@ class FsaSource:
             )
         return SourceResult(
             source="fsa.certificates",
-            status="unavailable" if not answered else ("partial" if reason else "ok"),
+            status="unavailable" if not answered else ("partial" if gaps else "ok"),
             reason=reason,
             facts=facts,
         )

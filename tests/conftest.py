@@ -20,3 +20,13 @@ def isolated_search_cache():
     clear_search_cache()
     yield
     clear_search_cache()
+
+
+@pytest.fixture(autouse=True)
+def no_rate_wait_in_mocked_search_tests(monkeypatch):
+    from osint_mcp.tools import web_search_source
+    from osint_mcp.tools.search_budget import reserve_yandex_attempt
+
+    original = web_search_source._reserve_yandex_request_slot
+    monkeypatch.setattr(web_search_source, "_reserve_yandex_request_slot", reserve_yandex_attempt)
+    return original

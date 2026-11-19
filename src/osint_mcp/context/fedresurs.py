@@ -183,9 +183,8 @@ class FedresursSource:
     async def check_commercial_facts(self, inn: str) -> SourceResult:
         """Коммерческие сведения: лизинг, залоги, факторинг, гарантии, СРО.
 
-        Статус partial при пустом результате — реестр обязателен не для
-        всех организаций, отсутствие записей законно; но и источник
-        бывает недоступен, и это различие несёт reason.
+        Корректная пустая выдача имеет статус ok с пояснением.
+        Статус partial означает неполную загрузку, а unavailable — отказ.
         """
         service, method = self.name, "publications"
         try:
@@ -311,7 +310,7 @@ class FedresursSource:
             reason = None
         return SourceResult(
             source="fedresurs.commercial",
-            status="partial" if reason else "ok",
+            status="partial" if failure or len(records) < total else "ok",
             reason=reason,
             facts=facts,
         )
