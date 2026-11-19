@@ -16,7 +16,7 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from copy import deepcopy
 from threading import Lock, Semaphore
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from html import unescape
@@ -225,10 +225,12 @@ def search_web(
     """Reuse identical successful searches and bound concurrent provider calls."""
     if limit <= 0:
         return []
-    provider = "yandex_search_api" if settings.yandex_search_api_key or settings.yandex_search_folder_id else "html"
+    configured = bool(settings.yandex_search_api_key or settings.yandex_search_folder_id)
+    mode = settings.yandex_search_mode
+    provider = f"yandex_{mode}" if configured and mode != "disabled" else "html"
     account = sha256(
         f"{settings.yandex_search_folder_id}\0{settings.yandex_search_api_key}".encode()
-    ).hexdigest() if provider == "yandex_search_api" else ""
+    ).hexdigest() if provider != "html" else ""
     key = (provider, account, query, limit, timeout, retries, retry_delay)
     with _SEARCH_LOCK:
         cached = _SEARCH_CACHE.get(key)
@@ -245,15 +247,28 @@ def search_web(
         if owner:
             try:
                 with _SEARCH_GATE:
-                    if provider == "yandex_search_api":
+                    use_paid = configured and mode == "primary"
+                    if not use_paid:
+                        try:
+                            hits = _search_web(query, limit, timeout, retries, retry_delay, raise_on_unavailable=True)
+                        except SearchUnavailable:
+                            if not configured or mode == "disabled":
+                                raise
+                            use_paid = True
+                    if use_paid:
+                        log.info("paid_search_used", provider="yandex_search_api", mode=mode,
+                                 reason="free_sources_unavailable" if mode == "fallback" else "explicit_primary")
+                        hour = datetime.now(timezone(timedelta(hours=3))).hour
+                        price = 0.366 if hour < 8 else 0.488
                         try:
                             hits = _search_yandex(query, limit, timeout)
                         except SearchUnavailable as exc:
-                            ledger.record(provider, "web_search", "failed", str(exc))
+                            ledger.record("yandex_search_api", "web_search", "failed", str(exc))
                             raise
-                        ledger.record(provider, "web_search", "ok" if hits else "empty")
-                    else:
-                        hits = _search_web(query, limit, timeout, retries, retry_delay, raise_on_unavailable=True)
+                        # Public synchronous RU tariff, VAT included. This is
+                        # an estimate for successful responses, not billing data.
+                        ledger.record("yandex_search_api", "web_search", "ok" if hits else "empty",
+                                      estimated_cost_rub=price)
                 with _SEARCH_LOCK:
                     _SEARCH_CACHE[key] = (time.monotonic() + 300, deepcopy(hits))
                     _SEARCH_CACHE.move_to_end(key)

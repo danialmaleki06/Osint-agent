@@ -121,6 +121,7 @@ def build_coverage(inn: str, *, calls: list[ledger.Call] | None = None) -> Cover
         )
         usage.requests += not call.cached
         usage.cached += call.cached
+        usage.estimated_cost_rub = round(usage.estimated_cost_rub + call.estimated_cost_rub, 6)
         if not call.cached and hasattr(usage, call.outcome):
             setattr(usage, call.outcome, getattr(usage, call.outcome) + 1)
 

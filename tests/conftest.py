@@ -10,6 +10,7 @@ def use_default_registry_route(monkeypatch):
     monkeypatch.setattr(settings, "registry_proxy_url", None)
     monkeypatch.setattr(settings, "yandex_search_api_key", "")
     monkeypatch.setattr(settings, "yandex_search_folder_id", "")
+    monkeypatch.setattr(settings, "yandex_search_mode", "fallback")
 
 
 @pytest.fixture(autouse=True)

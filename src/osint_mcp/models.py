@@ -1210,6 +1210,7 @@ class ServiceUsage(BaseModel):
     service: str = Field(description="Служба-источник")
     requests: int = Field(description="Обращений по этой организации")
     cached: int = Field(default=0, description="Результатов из кэша без обращения к поставщику")
+    estimated_cost_rub: float = Field(default=0.0, description="Расчётная стоимость успешных запросов, руб.; не данные биллинга")
     ok: int = Field(default=0, description="Из них вернули данные")
     empty: int = Field(default=0, description="Ответили, но данных нет")
     failed: int = Field(default=0, description="Не ответили")

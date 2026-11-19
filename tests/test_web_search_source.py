@@ -18,6 +18,11 @@ from osint_mcp.tools.web_search_source import (
 from osint_mcp.config import settings
 
 
+@pytest.fixture
+def yandex_primary(monkeypatch):
+    monkeypatch.setattr(settings, "yandex_search_mode", "primary")
+
+
 @respx.mock
 def test_ddg_challenge_falls_back_to_yahoo_with_direct_publisher_url():
     respx.post(SEARCH_URL).mock(return_value=httpx.Response(202, text="<html>Challenge</html>"))
@@ -95,7 +100,7 @@ def test_yahoo_recovers_after_temporary_502():
 
 
 @respx.mock
-def test_official_yandex_api_returns_publisher_urls(monkeypatch):
+def test_official_yandex_api_returns_publisher_urls(monkeypatch, yandex_primary):
     monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
     monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
     xml = '<yandexsearch><response><results><grouping><group><doc><url>https://example.org/page</url><title>A <hlword>title</hlword></title><passages><passage>Real snippet</passage></passages></doc></group></grouping></results></response></yandexsearch>'
@@ -108,7 +113,7 @@ def test_official_yandex_api_returns_publisher_urls(monkeypatch):
 
 
 @respx.mock
-def test_official_yandex_api_failure_is_explicit(monkeypatch):
+def test_official_yandex_api_failure_is_explicit(monkeypatch, yandex_primary):
     monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
     monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
     route = respx.post(YANDEX_SEARCH_URL).respond(403)
@@ -118,7 +123,7 @@ def test_official_yandex_api_failure_is_explicit(monkeypatch):
 
 
 @respx.mock
-def test_yandex_recovers_from_temporary_server_error(monkeypatch):
+def test_yandex_recovers_from_temporary_server_error(monkeypatch, yandex_primary):
     monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
     monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
     xml = '<yandexsearch><response><found>0</found></response></yandexsearch>'
@@ -131,9 +136,69 @@ def test_yandex_recovers_from_temporary_server_error(monkeypatch):
 
 
 @respx.mock
-def test_yandex_malformed_json_is_unavailable(monkeypatch):
+def test_yandex_malformed_json_is_unavailable(monkeypatch, yandex_primary):
     monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
     monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
     respx.post(YANDEX_SEARCH_URL).respond(json=[])
     with pytest.raises(SearchUnavailable):
         search_web("query", raise_on_unavailable=True)
+
+
+@respx.mock
+@pytest.mark.parametrize("empty", [False, True])
+def test_free_success_or_empty_never_calls_paid_yandex(monkeypatch, empty):
+    monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
+    monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
+    html = ('<div class="no-results">No results found</div>' if empty else
+            '<a class="result-link" href="https://example.org/">Found</a>')
+    respx.post(SEARCH_URL).respond(text=html)
+    paid = respx.post(YANDEX_SEARCH_URL).respond(403)
+    result = search_web("query", raise_on_unavailable=True)
+    assert len(result) == (0 if empty else 1)
+    assert paid.call_count == 0
+
+
+@respx.mock
+def test_yahoo_success_does_not_call_yandex(monkeypatch):
+    monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
+    monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
+    respx.post(SEARCH_URL).respond(202)
+    respx.get(YAHOO_SEARCH_URL).respond(text='<div class="no-results">No results</div>')
+    paid = respx.post(YANDEX_SEARCH_URL).respond(403)
+    assert search_web("query", raise_on_unavailable=True) == []
+    assert paid.call_count == 0
+
+
+@respx.mock
+def test_yandex_only_after_both_free_providers_fail_and_cache_is_free(monkeypatch):
+    from osint_mcp import ledger
+    from osint_mcp.tools.coverage import build_coverage
+
+    monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
+    monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
+    respx.post(SEARCH_URL).respond(202)
+    respx.get(YAHOO_SEARCH_URL).respond(403)
+    xml = '<yandexsearch><response><found>0</found></response></yandexsearch>'
+    paid = respx.post(YANDEX_SEARCH_URL).respond(json={"rawData": base64.b64encode(xml.encode()).decode()})
+    with ledger.capture_calls():
+        assert search_web("query", raise_on_unavailable=True) == []
+        assert search_web("query", raise_on_unavailable=True) == []
+        coverage = build_coverage("7724744134", calls=ledger.current_calls())
+    assert paid.call_count == 1
+    usage = next(service for service in coverage.services if service.service == "yandex_search_api")
+    assert usage.requests == 1 and usage.estimated_cost_rub in (0.366, 0.488)
+    cache = next(service for service in coverage.services if service.service == "web_search_cache")
+    assert cache.cached == 1 and cache.estimated_cost_rub == 0
+
+
+@respx.mock
+def test_disabled_yandex_is_not_called_even_when_free_search_fails(monkeypatch):
+    monkeypatch.setattr(settings, "yandex_search_api_key", "test-key")
+    monkeypatch.setattr(settings, "yandex_search_folder_id", "test-folder")
+    monkeypatch.setattr(settings, "yandex_search_mode", "disabled")
+    respx.post(SEARCH_URL).respond(202)
+    respx.get(YAHOO_SEARCH_URL).respond(403)
+    paid = respx.post(YANDEX_SEARCH_URL).respond(200)
+    with pytest.raises(SearchUnavailable):
+        search_web("query", raise_on_unavailable=True)
+    assert paid.call_count == 0

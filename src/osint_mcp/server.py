@@ -939,6 +939,14 @@ async def _assemble_company_report(
             "с_данными": sum(s.ok for s in coverage_rep.services),
             "без_данных": sum(s.empty for s in coverage_rep.services),
             "с_ошибкой": sum(s.failed for s in coverage_rep.services),
+            "платный_веб_поиск": {
+                "провайдер": "yandex_search_api",
+                "режим": settings.yandex_search_mode,
+                "запросов": sum(s.requests for s in coverage_rep.services if s.service == "yandex_search_api"),
+                "оценка_стоимости_руб": round(sum(s.estimated_cost_rub for s in coverage_rep.services
+                                                 if s.service == "yandex_search_api"), 6),
+                "примечание": "Оценка успешных запросов по публичному тарифу; не выписка биллинга. Стоимость запросов с потерянным ответом неизвестна.",
+            },
         }
         if detail_norm in ("standard", "full") or is_debug:
             coverage.update({

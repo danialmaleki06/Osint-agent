@@ -1,6 +1,7 @@
 """Настройки. Ключи читаются из окружения либо из .env, в код не попадают."""
 
 from ipaddress import IPv4Address
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=8.0, description="Таймаут запроса, секунды")
     yandex_search_api_key: str = Field(default="", validation_alias="YANDEX_SEARCH_API_KEY")
     yandex_search_folder_id: str = Field(default="", validation_alias="YANDEX_SEARCH_FOLDER_ID")
+    yandex_search_mode: Literal["fallback", "disabled", "primary"] = Field(
+        default="fallback", validation_alias="YANDEX_SEARCH_MODE",
+        description="fallback — платный резерв после отказа бесплатных источников; disabled — без Яндекса",
+    )
     cache_ttl_hours: int = Field(default=24, description="Срок жизни кэша реестровых данных")
     osint_debug: bool = Field(
         default=False,
